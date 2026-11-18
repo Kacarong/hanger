@@ -6,14 +6,14 @@ import { openDb } from "./db";
 const dataDir = process.env.DATA_DIR ?? join(import.meta.dir, "..", "data");
 mkdirSync(dataDir, { recursive: true });
 
-process.stdout.write("새 비밀번호 (10자 이상): ");
+process.stdout.write("새 비밀번호 (8자 이상): ");
 let password = "";
 for await (const line of console) {
   password = line.trim();
   break;
 }
-if (password.length < 10) {
-  console.error("\n10자 이상이어야 합니다.");
+if (password.length < 8) {
+  console.error("\n8자 이상이어야 합니다.");
   process.exit(1);
 }
 const db = openDb(join(dataDir, "folio.db"));
