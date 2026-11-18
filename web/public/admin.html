@@ -98,7 +98,7 @@
       <label>시간<input class="input" type="time" id="task-time"></label>
     </div>
     <label>메모<textarea class="input" id="task-note"></textarea></label>
-    <div class="foot"><button class="btn" value="cancel" formnovalidate>취소</button><button class="btn primary" value="ok">저장</button></div>
+    <div class="foot"><button class="btn" type="button" data-close>취소</button><button class="btn primary" value="ok">저장</button></div>
   </form>
 </dialog>
 
@@ -109,7 +109,7 @@
     <label>분류<select class="input" id="file-category"></select></label>
     <label>태그 (쉼표로 구분)<input class="input" id="file-tags"></label>
     <label>메모 (공개 페이지에 설명으로 나옵니다)<textarea class="input" id="file-note"></textarea></label>
-    <div class="foot"><button class="btn" value="cancel" formnovalidate>취소</button><button class="btn primary" value="ok">저장</button></div>
+    <div class="foot"><button class="btn" type="button" data-close>취소</button><button class="btn primary" value="ok">저장</button></div>
   </form>
 </dialog>
 
@@ -123,7 +123,7 @@
     </div>
     <label>메모<input class="input" id="up-note"></label>
     <ul class="progress" id="progress"></ul>
-    <div class="foot"><button class="btn" value="cancel" formnovalidate>닫기</button><button class="btn primary" value="ok" id="upload-btn">올리기</button></div>
+    <div class="foot"><button class="btn" type="button" data-close>닫기</button><button class="btn primary" value="ok" id="upload-btn">올리기</button></div>
   </form>
 </dialog>
 

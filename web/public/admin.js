@@ -373,8 +373,9 @@ async function init() {
   taskKind = seg("task-filter-kind", () => loadTasks().catch(showError));
   fileCategory = seg("filter-category", () => loadList().catch(showError));
 
+  // 취소·닫기는 submit 버튼이 아니어야 Enter가 저장·올리기로 간다.
+  document.querySelectorAll("dialog [data-close]").forEach((b) => (b.onclick = () => b.closest("dialog").close()));
   $("task-form").onsubmit = async (ev) => {
-    if (ev.submitter?.value !== "ok") return;
     ev.preventDefault();
     const body = { kind: $("task-kind").value, title: $("task-title").value, course: $("task-course").value, due_date: $("task-date").value, due_time: $("task-time").value, note: $("task-note").value };
     try {
@@ -387,7 +388,6 @@ async function init() {
     }
   };
   $("file-form").onsubmit = async (ev) => {
-    if (ev.submitter?.value !== "ok") return;
     ev.preventDefault();
     try {
       await call(`/api/files/${editingFile.id}`, { method: "PATCH", body: { title: $("file-title").value, category: $("file-category").value, tags: $("file-tags").value, note: $("file-note").value } });
@@ -398,7 +398,6 @@ async function init() {
     }
   };
   $("upload").onsubmit = async (ev) => {
-    if (ev.submitter?.value !== "ok") return;
     ev.preventDefault();
     const files = [...$("files").files];
     const tooBig = files.filter((f) => f.size >= me.maxFileSize);
