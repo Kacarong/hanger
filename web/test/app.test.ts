@@ -415,3 +415,29 @@ test("할 일·과제: 추가 → 오늘 화면 분류 → 완료 → 수정·�
     cleanup();
   }
 });
+
+test("비밀번호 로그인: 병렬 요청도 5번까지만 검증", async () => {
+  const { call, db, cleanup } = makeApp({ googleEnabled: false });
+  try {
+    db.setSetting("password_hash", await Bun.password.hash("correct horse battery"));
+    const results = await Promise.all(Array.from({ length: 20 }, () => passwordLogin(call, "wrong")));
+    const statuses = results.map((r) => r.res.status);
+    expect(statuses.filter((s) => s === 401)).toHaveLength(5);
+    expect(statuses.filter((s) => s === 429)).toHaveLength(15);
+    expect((await passwordLogin(call, "correct horse battery")).res.status).toBe(429);
+  } finally {
+    cleanup();
+  }
+});
+
+test("비밀번호 로그인: 성공한 시도는 실패 횟수에 남지 않음", async () => {
+  const { call, db, cleanup } = makeApp({ googleEnabled: false });
+  try {
+    db.setSetting("password_hash", await Bun.password.hash("correct horse battery"));
+    for (let i = 0; i < 4; i++) expect((await passwordLogin(call, "wrong")).res.status).toBe(401);
+    expect((await passwordLogin(call, "correct horse battery")).res.status).toBe(204);
+    expect((await passwordLogin(call, "correct horse battery")).res.status).toBe(204);
+  } finally {
+    cleanup();
+  }
+});

@@ -350,12 +350,15 @@ ${items.length ? `<ul class="grid">${cards}</ul>` : "<p>아직 공개된 작업�
       const t = Date.now();
       loginFailures = loginFailures.filter((x) => x > t - LOGIN_FAIL_WINDOW);
       if (loginFailures.length >= LOGIN_FAIL_LIMIT) return json({ error: "비밀번호를 여러 번 틀렸습니다. 15분 뒤에 다시 시도해 주세요." }, 429);
+      // Count the attempt as a failure before any await, so parallel requests can't all slip past the limit.
+      loginFailures.push(t);
       const hash = db.getSetting("password_hash");
       const password = (await body(req)).password;
       if (!hash || typeof password !== "string" || !password || !(await Bun.password.verify(password, hash))) {
-        loginFailures.push(t);
         return json({ error: hash ? "비밀번호가 틀렸습니다" : "비밀번호가 아직 설정되지 않았습니다" }, 401);
       }
+      const i = loginFailures.indexOf(t);
+      if (i >= 0) loginFailures.splice(i, 1); // it succeeded after all
       const headers = new Headers();
       startSession("password", headers);
       return new Response(null, { status: 204, headers });
