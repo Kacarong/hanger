@@ -1,0 +1,18 @@
+# ~/.config/systemd/user/kacarong-folio.service 로 복사해서 쓴다.
+[Unit]
+Description=kacarong.kr 포트폴리오/파일함 웹사이트
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/claude/kacarong-folio/web
+EnvironmentFile=/home/claude/.config/kacarong-folio/env
+Environment=TMPDIR=/home/claude/.tmp
+ExecStart=/home/claude/.bun/bin/bun src/main.ts
+Restart=always
+RestartSec=5
+MemoryMax=512M
+
+[Install]
+WantedBy=default.target

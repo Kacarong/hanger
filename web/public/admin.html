@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>kacarong 관리</title>
+<link rel="stylesheet" href="/static/base.css">
+</head>
+<body>
+<h1>파일함 관리</h1>
+<p id="msg" class="error"></p>
+
+<div id="login" hidden>
+  <p>관리자 구글 계정으로 로그인해 주세요.</p>
+  <a href="/auth/login">구글로 로그인</a>
+</div>
+
+<div id="main" hidden>
+  <p><span id="quota"></span> · <a href="/" target="_blank">공개 페이지 보기</a> · <button id="logout">로그아웃</button></p>
+
+  <form id="upload">
+    <fieldset>
+      <legend>업로드 (파일당 1GB 미만)</legend>
+      <p><input type="file" id="files" multiple required></p>
+      <p><label>분류 <select id="up-category"></select></label>
+         <label>태그 <input id="up-tags" placeholder="쉼표로 구분"></label></p>
+      <p><label>메모 <input id="up-note" size="50"></label></p>
+      <button>올리기</button>
+      <ul id="progress"></ul>
+    </fieldset>
+  </form>
+
+  <form id="search">
+    <input id="q" placeholder="이름, 태그, 메모 검색">
+    <select id="filter-category"><option value="">전체 분류</option></select>
+    <button>검색</button>
+  </form>
+
+  <table>
+    <thead><tr><th></th><th>제목</th><th>분류 / 태그 / 메모</th><th>크기</th><th>공유</th><th>공개 페이지</th><th></th></tr></thead>
+    <tbody id="list"></tbody>
+  </table>
+</div>
+<script type="module" src="/static/admin.js"></script>
+</body>
+</html>
