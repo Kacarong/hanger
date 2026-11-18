@@ -4,76 +4,129 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>kacarong 작업공간</title>
-<link rel="stylesheet" href="/static/base.css">
+<link rel="stylesheet" href="/static/admin.css">
 </head>
 <body>
-<h1>kacarong 작업공간</h1>
-<p id="msg" class="error"></p>
-
-<div id="login" hidden>
-  <form id="password-login">
-    <input type="password" id="password" placeholder="비밀번호" autocomplete="current-password" required>
-    <button>로그인</button>
-  </form>
-  <p id="google-login" hidden><a href="/auth/login">구글로 로그인</a></p>
+<div id="login" class="login" hidden>
+  <div class="login-card">
+    <span class="badge-k">K</span>
+    <h1>kacarong 작업공간</h1>
+    <p>비밀번호를 입력해 주세요.</p>
+    <form id="password-login">
+      <input class="input" type="password" id="password" placeholder="비밀번호" autocomplete="current-password" required autofocus>
+      <button class="btn primary">로그인</button>
+      <span id="login-msg" class="error"></span>
+    </form>
+    <a id="google-login" class="google" href="/auth/login" hidden>구글 계정으로 로그인</a>
+  </div>
 </div>
 
-<div id="main" hidden>
-  <nav>
-    <a href="#today">오늘</a> · <a href="#tasks">할 일·과제</a> · <a href="#files">파일함</a>
-    · <a href="/" target="_blank">공개 페이지 보기</a> · <button id="logout">로그아웃</button>
-  </nav>
+<div id="main" class="app" hidden>
+  <aside class="side">
+    <div class="ws"><span class="badge-k">K</span> kacarong <span class="caret" data-icon="chevrons"></span></div>
+    <label class="search"><span data-icon="search"></span><input id="global-search" placeholder="검색"><kbd>/</kbd></label>
 
-<section id="tab-today" hidden>
-  <h2 id="today-date"></h2>
-  <div id="today-lists"></div>
-</section>
+    <a class="nav-item" href="#today" data-tab="today"><span data-icon="home"></span>오늘<span class="count" id="nav-overdue" hidden></span></a>
 
-<section id="tab-tasks" hidden>
-  <form id="task-add">
-    <fieldset>
-      <legend>추가</legend>
-      <p><select id="task-kind"></select>
-         <input id="task-title" placeholder="제목" required size="30">
-         <input id="task-course" placeholder="과목 (과제)"></p>
-      <p><label>날짜 <input type="date" id="task-date"></label>
-         <label>시간 <input type="time" id="task-time"></label></p>
-      <p><input id="task-note" placeholder="메모" size="50"></p>
-      <button>추가</button>
-    </fieldset>
-  </form>
-  <p><select id="task-filter-done"><option value="0">안 끝난 것</option><option value="1">끝낸 것</option><option value="">전체</option></select>
-     <select id="task-filter-kind"><option value="">전체 종류</option></select></p>
-  <ul id="task-list" class="tasks"></ul>
-</section>
+    <div class="nav-group">작업</div>
+    <a class="nav-item" href="#tasks" data-tab="tasks"><span data-icon="check"></span>할 일·과제</a>
+    <span class="nav-item disabled"><span data-icon="calendar"></span>캘린더<span class="soon">준비 중</span></span>
+    <span class="nav-item disabled"><span data-icon="note"></span>노트<span class="soon">준비 중</span></span>
 
-<section id="tab-files" hidden>
-  <p id="quota"></p>
+    <div class="nav-group">보관</div>
+    <a class="nav-item" href="#files" data-tab="files"><span data-icon="folder"></span>클라우드</a>
+    <a class="nav-item" href="/" target="_blank"><span data-icon="globe"></span>포트폴리오 보기</a>
 
-  <form id="upload">
-    <fieldset>
-      <legend>업로드 (파일당 1GB 미만)</legend>
-      <p><input type="file" id="files" multiple required></p>
-      <p><label>분류 <select id="up-category"></select></label>
-         <label>태그 <input id="up-tags" placeholder="쉼표로 구분"></label></p>
-      <p><label>메모 <input id="up-note" size="50"></label></p>
-      <button>올리기</button>
-      <ul id="progress"></ul>
-    </fieldset>
-  </form>
+    <div class="side-foot">
+      <button class="nav-item btn ghost" id="logout" style="border:0;justify-content:flex-start"><span data-icon="logout"></span>로그아웃</button>
+      <div class="me"><span class="avatar">KC</span><div>kacarong<small>관리자</small></div></div>
+    </div>
+  </aside>
 
-  <form id="search">
-    <input id="q" placeholder="이름, 태그, 메모 검색">
-    <select id="filter-category"><option value="">전체 분류</option></select>
-    <button>검색</button>
-  </form>
+  <section class="main">
+    <header class="bar">
+      <button class="btn ghost menu-btn" id="menu-btn" aria-label="메뉴"><span data-icon="menu"></span></button>
+      <h1 id="page-title">오늘</h1>
+      <div id="bar-actions"></div>
+    </header>
+    <p id="msg" class="msg"></p>
+    <div class="content">
 
-  <table>
-    <thead><tr><th></th><th>제목</th><th>분류 / 태그 / 메모</th><th>크기</th><th>공유</th><th>공개 페이지</th><th></th></tr></thead>
-    <tbody id="list"></tbody>
-  </table>
-</section>
+      <div id="tab-today" hidden>
+        <div class="stats" id="today-stats"></div>
+        <table class="table"><thead><tr><th class="w1"></th><th>제목</th><th class="hide-sm">종류</th><th class="hide-sm">과목</th><th>마감</th><th>상태</th></tr></thead>
+          <tbody id="today-list"></tbody></table>
+      </div>
+
+      <div id="tab-tasks" hidden>
+        <div class="stats" id="task-stats"></div>
+        <div class="toolbar">
+          <div class="seg" id="task-filter-done"><button data-v="0" class="on">안 끝난 것</button><button data-v="1">끝낸 것</button><button data-v="">전체</button></div>
+          <span class="grow"></span>
+          <div class="seg" id="task-filter-kind"><button data-v="" class="on">전체</button></div>
+        </div>
+        <table class="table"><thead><tr><th class="w1"></th><th>제목</th><th class="hide-sm">종류</th><th class="hide-sm">과목</th><th>마감</th><th>상태</th><th></th></tr></thead>
+          <tbody id="task-list"></tbody></table>
+      </div>
+
+      <div id="tab-files" hidden>
+        <div class="stats" id="file-stats"></div>
+        <p class="notice" id="drive-off" hidden>구글 드라이브가 아직 연결되지 않았습니다. 구글 OAuth 정보를 서버에 넣고 구글 계정으로 한 번 로그인하면 업로드가 켜집니다.</p>
+        <div class="toolbar">
+          <form id="search" style="display:contents"><input class="input" id="q" placeholder="이름, 태그, 메모 검색" style="width:240px"></form>
+          <span class="grow"></span>
+          <div class="seg" id="filter-category"><button data-v="" class="on">전체</button></div>
+        </div>
+        <table class="table"><thead><tr><th class="w1"></th><th>제목</th><th class="hide-sm">분류</th><th class="hide-sm">태그</th><th class="num">크기</th><th>링크 공유</th><th>공개</th><th></th></tr></thead>
+          <tbody id="list"></tbody></table>
+      </div>
+
+    </div>
+  </section>
 </div>
+
+<dialog id="task-dialog">
+  <form method="dialog" id="task-form">
+    <h2 id="task-dialog-title">새 할 일</h2>
+    <div class="row">
+      <label>종류<select class="input" id="task-kind"></select></label>
+      <label>과목<input class="input" id="task-course" placeholder="과제일 때"></label>
+    </div>
+    <label>제목<input class="input" id="task-title" required></label>
+    <div class="row">
+      <label>날짜<input class="input" type="date" id="task-date"></label>
+      <label>시간<input class="input" type="time" id="task-time"></label>
+    </div>
+    <label>메모<textarea class="input" id="task-note"></textarea></label>
+    <div class="foot"><button class="btn" value="cancel" formnovalidate>취소</button><button class="btn primary" value="ok">저장</button></div>
+  </form>
+</dialog>
+
+<dialog id="file-dialog">
+  <form method="dialog" id="file-form">
+    <h2>파일 정보 수정</h2>
+    <label>제목<input class="input" id="file-title" required></label>
+    <label>분류<select class="input" id="file-category"></select></label>
+    <label>태그 (쉼표로 구분)<input class="input" id="file-tags"></label>
+    <label>메모 (공개 페이지에 설명으로 나옵니다)<textarea class="input" id="file-note"></textarea></label>
+    <div class="foot"><button class="btn" value="cancel" formnovalidate>취소</button><button class="btn primary" value="ok">저장</button></div>
+  </form>
+</dialog>
+
+<dialog id="upload-dialog">
+  <form method="dialog" id="upload">
+    <h2>올리기 <span class="muted" style="font-weight:400;font-size:12px">파일당 1GB 미만</span></h2>
+    <label>파일<input class="input" type="file" id="files" multiple required style="padding-top:5px"></label>
+    <div class="row">
+      <label>분류<select class="input" id="up-category"></select></label>
+      <label>태그<input class="input" id="up-tags" placeholder="쉼표로 구분"></label>
+    </div>
+    <label>메모<input class="input" id="up-note"></label>
+    <ul class="progress" id="progress"></ul>
+    <div class="foot"><button class="btn" value="cancel" formnovalidate>닫기</button><button class="btn primary" value="ok" id="upload-btn">올리기</button></div>
+  </form>
+</dialog>
+
 <script type="module" src="/static/admin.js"></script>
 </body>
 </html>

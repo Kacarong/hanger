@@ -23,8 +23,10 @@
 - 2026-11-19: 비밀번호 로그인, 할 일·과제(tasks 테이블, /api/tasks, /api/today), /admin 탭(오늘/할 일·과제/파일함). 구글 환경변수 없이도 서버가 뜬다(구글 로그인 404, 파일함은 "연결 안 됨").
 - 실제 구글로는 아직 미검증: 특히 브라우저→구글 직접 업로드 CORS, 익명 공유/해제.
 
+- 2026-11-19 배포: GitHub https://github.com/Kacarong/hanger (공개 저장소, main; 업데이트마다 푸시 — 사용자 요청). 서버 /home/claude/kacarong-folio (GitHub clone) + user systemd `kacarong-folio.service`, env `~/.config/kacarong-folio/env`, 데이터 `~/.local/share/kacarong-folio`. 터널 ingress kacarong.kr → 127.0.0.1:2992, DNS CNAME 덮어씀. 업데이트: `cd ~/kacarong-folio && git pull && systemctl --user restart kacarong-folio`.
+- 2026-11-19 디자인: 공개 페이지 = introck.studio 참고(검은 배경, 큰 타이포, 스크롤 등장·이미지 패럴랙스; public/site.css·site.js). 작업공간 = 어두운 사이드바 대시보드(요약 카드 + 표 + 대화상자; public/admin.css). 캘린더·노트는 메뉴에 "준비 중".
+
 ## 남은 일
 1. 사용자: OAuth 클라이언트(웹 애플리케이션, 리디렉션 URI https://kacarong.kr/auth/callback, 프로덕션 게시, Drive·Calendar API 사용 설정) + 관리자 이메일.
-2. 사용자: kacarong.kr 기존 A 레코드(525) 교체 동의 → `cloudflared tunnel route dns --overwrite-dns unifi-site kacarong.kr`.
-3. 배포: deploy/kacarong-folio.service, deploy/env.example.
+2. (완료) DNS·배포.
 4. 실제 계정으로 업로드 CORS·공유 해제 확인 → 디자인 → PWA/TWA → Flutter PC.

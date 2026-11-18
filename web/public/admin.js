@@ -1,8 +1,33 @@
-// 관리 화면. 디자인 없이 기능만 둔다.
+// 작업공간(관리) 화면.
 const CHUNK = 16 * 1024 * 1024; // must be a multiple of 256 KiB for Drive resumable uploads
 const $ = (id) => document.getElementById(id);
+let me = null;
 let categories = [];
 let taskKinds = [];
+
+const ICONS = {
+  home: '<path d="M3 10.5 12 3l9 7.5V21h-6v-6H9v6H3z"/>',
+  check: '<rect x="3" y="3" width="18" height="18" rx="3"/><path d="m8 12 3 3 5-6"/>',
+  calendar: '<rect x="3" y="4.5" width="18" height="16.5" rx="2.5"/><path d="M3 9.5h18M8 2.5v4M16 2.5v4"/>',
+  note: '<path d="M6 3h9l4 4v14H6z"/><path d="M14 3v5h5M9 13h7M9 17h5"/>',
+  folder: '<path d="M3 6.5A1.5 1.5 0 0 1 4.5 5H9l2 2.5h8.5A1.5 1.5 0 0 1 21 9v9.5a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 18.5z"/>',
+  globe: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.7 3.8 5.7 3.8 9s-1.3 6.3-3.8 9c-2.5-2.7-3.8-5.7-3.8-9S9.5 5.7 12 3z"/>',
+  logout: '<path d="M15 4h4v16h-4M10 8l-4 4 4 4M6 12h10"/>',
+  search: '<circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>',
+  plus: '<path d="M12 5v14M5 12h14"/>',
+  upload: '<path d="M12 15V4M7 9l5-5 5 5M4 15v4a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-4"/>',
+  edit: '<path d="M4 20h4L19 9l-4-4L4 16z"/>',
+  trash: '<path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/>',
+  download: '<path d="M12 4v11M7 10l5 5 5-5M4 20h16"/>',
+  chevrons: '<path d="m8 9 4-4 4 4M8 15l4 4 4-4"/>',
+  menu: '<path d="M4 6h16M4 12h16M4 18h16"/>',
+};
+const icon = (name) => {
+  const t = document.createElement("template");
+  t.innerHTML = `<svg viewBox="0 0 24 24">${ICONS[name]}</svg>`;
+  return t.content.firstChild;
+};
+document.querySelectorAll("[data-icon]").forEach((e) => e.replaceWith(icon(e.dataset.icon)));
 
 function showError(e) {
   $("msg").textContent = e instanceof Error ? e.message : String(e);
@@ -19,20 +44,31 @@ async function call(path, opts = {}) {
   return data;
 }
 
+function el(tag, props = {}, ...children) {
+  const e = Object.assign(document.createElement(tag), props);
+  e.append(...children.filter((c) => c !== null && c !== undefined && c !== false));
+  return e;
+}
+const iconBtn = (label, iconName, onclick, extra = "") => el("button", { className: `btn ghost sm ${extra}`, type: "button", onclick, title: label, ariaLabel: label }, icon(iconName));
+const stat = (label, value, sub, warn = false) =>
+  el("div", { className: "stat" }, el("div", { className: "label", textContent: label }), el("div", { className: "value" + (warn ? " warn" : ""), textContent: value }), el("div", { className: "sub", textContent: sub }));
+const pill = (text, color) => el("span", { className: `pill ${color}`, textContent: text });
+const emptyRow = (cols, text) => el("tr", { className: "empty-row" }, el("td", { colSpan: cols, textContent: text }));
+
+// Segmented control: buttons with data-v. Returns a getter for the current value.
+function seg(id, onChange) {
+  const box = $(id);
+  box.onclick = (ev) => {
+    const b = ev.target.closest("button");
+    if (!b) return;
+    box.querySelectorAll("button").forEach((x) => x.classList.toggle("on", x === b));
+    onChange(b.dataset.v);
+  };
+  return () => box.querySelector("button.on").dataset.v;
+}
+
 const gb = (n) => (Number(n || 0) / 1024 ** 3).toFixed(1) + "GB";
 const sizeText = (n) => (n >= 1024 ** 2 ? (n / 1024 ** 2).toFixed(1) + "MB" : Math.ceil(n / 1024) + "KB");
-
-async function loadQuota() {
-  try {
-    const q = await call("/api/quota");
-    const pct = q.limit ? (Number(q.usage) / Number(q.limit)) * 100 : 0;
-    $("quota").textContent =
-      `구글 드라이브 ${gb(q.usage)} / ${q.limit ? gb(q.limit) : "무제한"} 사용 (휴지통 ${gb(q.usageInDriveTrash)})` +
-      (pct >= 90 ? " ⚠ 용량이 90% 넘게 찼습니다" : "");
-  } catch (e) {
-    $("quota").textContent = "용량 확인 실패: " + e.message;
-  }
-}
 
 // Sends one byte range straight to Google. Returns the Drive file when the upload is complete,
 // the next offset Google confirmed, or next: null when the reply doesn't say (Range hidden by CORS).
@@ -74,225 +110,328 @@ async function uploadToDrive(url, file, onProgress) {
 }
 
 async function uploadOne(file) {
-  const li = document.createElement("li");
-  li.textContent = `${file.name}: 준비 중`;
+  const name = el("span", { textContent: `${file.name} · 준비 중` });
+  const fill = el("div", { className: "bar-fill" });
+  const li = el("li", {}, name, el("div", { className: "bar-track" }, fill));
   $("progress").append(li);
   try {
     const { uploadUrl } = await call("/api/uploads", { method: "POST", body: { name: file.name, size: file.size, mimeType: file.type } });
-    const driveFile = await uploadToDrive(uploadUrl, file, (p) => (li.textContent = `${file.name}: ${Math.floor(p * 100)}%`));
+    const driveFile = await uploadToDrive(uploadUrl, file, (p) => {
+      name.textContent = `${file.name} · ${Math.floor(p * 100)}%`;
+      fill.style.width = `${p * 100}%`;
+    });
     await call("/api/files", {
       method: "POST",
       body: { driveId: driveFile.id, category: $("up-category").value, tags: $("up-tags").value, note: $("up-note").value },
     });
-    li.textContent = `${file.name}: 완료`;
+    name.textContent = `${file.name} · 완료`;
+    fill.style.width = "100%";
   } catch (e) {
-    li.textContent = `${file.name}: 실패 - ${e.message}`;
+    name.textContent = `${file.name} · 실패: ${e.message}`;
     li.className = "error";
   }
 }
 
-function el(tag, props = {}, ...children) {
-  const e = Object.assign(document.createElement(tag), props);
-  e.append(...children);
-  return e;
+// 클라우드(파일함)
+let fileCategory = () => "";
+let editingFile = null;
+
+function openFileDialog(f) {
+  editingFile = f;
+  $("file-title").value = f.title;
+  $("file-category").value = f.category;
+  $("file-tags").value = f.tags;
+  $("file-note").value = f.note;
+  $("file-dialog").showModal();
 }
 
-function categorySelect(value, onChange) {
-  const s = el("select", { onchange: () => onChange(s.value) }, ...categories.map((c) => el("option", { value: c, textContent: c, selected: c === value })));
-  return s;
+async function loadQuota(files) {
+  const shared = files.filter((f) => f.shared).length;
+  const pub = files.filter((f) => f.public).length;
+  const cards = [stat("파일", String(files.length), "이 조건에 맞는 파일"), stat("공개 중", String(pub), `링크 공유 ${shared}개`)];
+  if (me.driveConnected) {
+    try {
+      const q = await call("/api/quota");
+      const pct = q.limit ? (Number(q.usage) / Number(q.limit)) * 100 : 0;
+      cards.unshift(stat("구글 드라이브", gb(q.usage), `${q.limit ? gb(q.limit) : "무제한"} 중 ${pct.toFixed(0)}% · 휴지통 ${gb(q.usageInDriveTrash)}`, pct >= 90));
+    } catch (e) {
+      cards.unshift(stat("구글 드라이브", "—", "용량 확인 실패: " + e.message, true));
+    }
+  } else {
+    cards.unshift(stat("구글 드라이브", "—", "연결 안 됨"));
+  }
+  $("file-stats").replaceChildren(...cards);
 }
 
 async function loadList() {
-  const params = new URLSearchParams({ q: $("q").value, category: $("filter-category").value });
+  const params = new URLSearchParams({ q: $("q").value, category: fileCategory() });
   const files = await call("/api/files?" + params);
+  loadQuota(files);
   const rows = files.map((f) => {
-    const update = (patch) => call(`/api/files/${f.id}`, { method: "PATCH", body: patch }).then(loadList, showError);
     const toggle = (kind, on) => call(`/api/files/${f.id}/${kind}`, { method: "POST", body: { [kind === "share" ? "shared" : "public"]: on } }).then(loadList, showError);
+    const sw = (checked, onchange) => el("label", { className: "switch" }, el("input", { type: "checkbox", checked, onchange }), el("span"));
     return el(
       "tr",
       {},
-      el("td", {}, el("img", { src: `/thumb/${f.id}`, alt: "", loading: "lazy", onerror() { this.remove(); } })),
-      el("td", {}, el("a", { href: f.web_view_link, target: "_blank", rel: "noopener", textContent: f.title }), el("br"), el("small", { textContent: f.name })),
+      el("td", {}, el("img", { className: "thumb", src: `/thumb/${f.id}`, alt: "", loading: "lazy", onerror() { this.replaceWith(el("div", { className: "thumb-empty" })); } })),
+      el("td", {}, el("a", { className: "title", href: f.web_view_link, target: "_blank", rel: "noopener", textContent: f.title }), el("span", { className: "sub", textContent: f.note || f.name })),
+      el("td", { className: "hide-sm" }, pill(f.category, f.category === "포트폴리오" ? "blue" : "gray")),
+      el("td", { className: "hide-sm" }, ...f.tags.split(",").map((t) => t.trim()).filter(Boolean).map((t) => el("span", { className: "tag", textContent: t }))),
+      el("td", { className: "num muted", textContent: sizeText(f.size) }),
+      el("td", {}, sw(!!f.shared, function () { toggle("share", this.checked); })),
+      el("td", {}, sw(!!f.public, function () { toggle("public", this.checked); })),
       el(
         "td",
-        {},
-        categorySelect(f.category, (c) => update({ category: c })),
-        el("div", { textContent: f.tags ? "#" + f.tags : "" }),
-        el("div", { textContent: f.note }),
-        el("button", {
-          textContent: "수정",
-          onclick() {
-            const title = prompt("제목", f.title);
-            if (title === null) return;
-            const tags = prompt("태그 (쉼표로 구분)", f.tags);
-            if (tags === null) return;
-            const note = prompt("메모", f.note);
-            if (note === null) return;
-            update({ title, tags, note });
-          },
-        }),
-      ),
-      el("td", { textContent: sizeText(f.size) }),
-      el("td", {}, el("label", {}, el("input", { type: "checkbox", checked: !!f.shared, onchange() { toggle("share", this.checked); } }), " 링크 공유")),
-      el("td", {}, el("label", {}, el("input", { type: "checkbox", checked: !!f.public, onchange() { toggle("public", this.checked); } }), " 공개")),
-      el(
-        "td",
-        {},
-        f.web_content_link ? el("a", { href: f.web_content_link, textContent: "받기" }) : "",
-        " ",
-        el("button", {
-          textContent: "삭제",
-          onclick() {
-            if (confirm(`"${f.title}" 을(를) 드라이브 휴지통으로 보낼까요? (30일 뒤 자동 삭제)`)) call(`/api/files/${f.id}`, { method: "DELETE" }).then(loadList, showError);
-          },
-        }),
+        { className: "actions" },
+        f.web_content_link ? el("a", { className: "btn ghost sm", href: f.web_content_link, title: "받기" }, icon("download")) : "",
+        iconBtn("수정", "edit", () => openFileDialog(f)),
+        iconBtn("삭제", "trash", () => {
+          if (confirm(`"${f.title}" 을(를) 드라이브 휴지통으로 보낼까요? (30일 뒤 자동 삭제)`)) call(`/api/files/${f.id}`, { method: "DELETE" }).then(loadList, showError);
+        }, "danger"),
       ),
     );
   });
-  $("list").replaceChildren(...rows);
+  $("list").replaceChildren(...(rows.length ? rows : [emptyRow(8, $("q").value || fileCategory() ? "검색 결과가 없습니다." : "아직 올린 파일이 없습니다.")]));
 }
 
 // 할 일·과제
 const DAY = 86400_000;
 const daysBetween = (a, b) => Math.round((Date.parse(b) - Date.parse(a)) / DAY);
+const md = (d) => `${Number(d.slice(5, 7))}월 ${Number(d.slice(8, 10))}일`;
 
-function taskItem(t, today, reload) {
+function taskStatus(t, today) {
+  if (t.done) return pill("끝냄", "gray");
+  if (!t.due_date) return pill("날짜 없음", "gray");
+  const d = daysBetween(today, t.due_date);
+  if (d < 0) return pill("지남", "orange");
+  if (d === 0) return pill("오늘", "blue");
+  if (d <= 3) return pill("임박", "amber");
+  return pill("예정", "white");
+}
+
+function dueCell(t, today) {
+  if (!t.due_date) return el("td", { className: "muted", textContent: "—" });
+  const main = el("span", { className: t.done ? "muted" : "date-main", textContent: md(t.due_date) + (t.due_time ? " " + t.due_time : "") });
+  if (t.done) return el("td", {}, main);
+  const d = daysBetween(today, t.due_date);
+  const note = d < 0 ? [`${-d}일 지남`, "warn"] : d === 0 ? ["오늘", "soon"] : [`D-${d}`, d <= 3 ? "soon" : "ok"];
+  return el("td", {}, main, el("span", { className: `date-note ${note[1]}`, textContent: note[0] }));
+}
+
+function taskRow(t, today, reload, withActions) {
   const update = (patch) => call(`/api/tasks/${t.id}`, { method: "PATCH", body: patch }).then(reload, showError);
-  let when = t.due_date ? t.due_date + (t.due_time ? " " + t.due_time : "") : "날짜 없음";
-  if (t.kind === "과제" && t.due_date && !t.done) {
-    const d = daysBetween(today, t.due_date);
-    when += d > 0 ? ` (D-${d})` : d === 0 ? " (오늘 마감)" : ` (${-d}일 지남)`;
-  }
   return el(
-    "li",
+    "tr",
     {},
-    el("label", { className: t.done ? "done" : "" }, el("input", { type: "checkbox", checked: !!t.done, onchange() { update({ done: this.checked }); } }), " ", t.title),
-    el("small", { textContent: [t.kind, t.course, when].filter(Boolean).join(" · ") }),
-    t.note ? el("div", {}, el("small", { textContent: t.note })) : "",
+    el("td", {}, el("input", { type: "checkbox", checked: !!t.done, title: "끝냄 표시", onchange() { update({ done: this.checked }); } })),
+    el("td", {}, el("span", { className: "title" + (t.done ? " done" : ""), textContent: t.title }), t.note ? el("span", { className: "sub", textContent: t.note }) : null),
+    el("td", { className: "hide-sm" }, pill(t.kind, t.kind === "과제" ? "blue" : "gray")),
+    el("td", { className: "hide-sm muted", textContent: t.course || "—" }),
+    dueCell(t, today),
+    el("td", {}, taskStatus(t, today)),
+    withActions
+      ? el(
+          "td",
+          { className: "actions" },
+          iconBtn("수정", "edit", () => openTaskDialog(t)),
+          iconBtn("삭제", "trash", () => {
+            if (confirm(`"${t.title}" 을(를) 삭제할까요?`)) call(`/api/tasks/${t.id}`, { method: "DELETE" }).then(reload, showError);
+          }, "danger"),
+        )
+      : null,
   );
+}
+
+let editingTask = null;
+function openTaskDialog(t = null) {
+  editingTask = t;
+  $("task-dialog-title").textContent = t ? "할 일 수정" : "새 할 일";
+  $("task-kind").value = t?.kind ?? taskKinds[0];
+  $("task-title").value = t?.title ?? "";
+  $("task-course").value = t?.course ?? "";
+  $("task-date").value = t?.due_date ?? "";
+  $("task-time").value = t?.due_time ?? "";
+  $("task-note").value = t?.note ?? "";
+  $("task-dialog").showModal();
 }
 
 async function loadToday() {
   const t = await call("/api/today");
   const reload = () => loadToday().catch(showError);
-  $("today-date").textContent = `${t.date} 오늘`;
+  updateOverdueBadge(t.overdue.length);
+  const wd = new Intl.DateTimeFormat("ko-KR", { weekday: "long", timeZone: "Asia/Seoul" }).format(new Date(t.date + "T12:00:00+09:00"));
+  $("page-title").textContent = `오늘 · ${md(t.date)} ${wd}`;
+  $("today-stats").replaceChildren(
+    stat("지난 일", String(t.overdue.length), "날짜가 지났는데 안 끝낸 것", t.overdue.length > 0),
+    stat("오늘", String(t.today.length), "오늘 날짜의 할 일·과제"),
+    stat("다가오는 과제", String(t.upcoming.length), "3일 안에 마감"),
+    stat("오늘 끝낸 일", String(t.doneToday.length), "수고했어요"),
+  );
+  const q = searchText();
   const sections = [
     ["지난 일", t.overdue],
     ["오늘", t.today],
     ["다가오는 과제 (3일 안)", t.upcoming],
     ["오늘 끝낸 일", t.doneToday],
-  ].filter(([, items]) => items.length);
-  $("today-lists").replaceChildren(
+  ]
+    .map(([title, items]) => [title, items.filter((x) => matches(x, q))])
+    .filter(([, items]) => items.length);
+  $("today-list").replaceChildren(
     ...(sections.length
-      ? sections.flatMap(([title, items]) => [el("h3", { textContent: title }), el("ul", { className: "tasks" }, ...items.map((x) => taskItem(x, t.date, reload)))])
-      : [el("p", { textContent: "오늘 할 일이 없습니다." })]),
+      ? sections.flatMap(([title, items]) => [el("tr", { className: "group-row" }, el("td", { colSpan: 6, textContent: `${title} · ${items.length}` })), ...items.map((x) => taskRow(x, t.date, reload, false))])
+      : [emptyRow(6, "오늘 할 일이 없습니다.")]),
   );
 }
 
+let taskDone = () => "0";
+let taskKind = () => "";
 async function loadTasks() {
   const params = new URLSearchParams();
-  if ($("task-filter-done").value) params.set("done", $("task-filter-done").value);
-  if ($("task-filter-kind").value) params.set("kind", $("task-filter-kind").value);
-  const [tasks, { date }] = await Promise.all([call("/api/tasks?" + params), call("/api/today")]);
+  if (taskDone()) params.set("done", taskDone());
+  if (taskKind()) params.set("kind", taskKind());
+  const [tasks, all, today] = await Promise.all([call("/api/tasks?" + params), call("/api/tasks?done=0"), call("/api/today")]);
+  updateOverdueBadge(today.overdue.length);
   const reload = () => loadTasks().catch(showError);
-  $("task-list").replaceChildren(
-    ...tasks.map((t) => {
-      const li = taskItem(t, date, reload);
-      li.append(
-        " ",
-        el("button", {
-          textContent: "수정",
-          onclick() {
-            const title = prompt("제목", t.title);
-            if (title === null) return;
-            const due_date = prompt("날짜 (YYYY-MM-DD, 비우면 날짜 없음)", t.due_date ?? "");
-            if (due_date === null) return;
-            const due_time = prompt("시간 (HH:MM, 비우면 없음)", t.due_time ?? "");
-            if (due_time === null) return;
-            const course = prompt("과목", t.course);
-            if (course === null) return;
-            const note = prompt("메모", t.note);
-            if (note === null) return;
-            call(`/api/tasks/${t.id}`, { method: "PATCH", body: { title, due_date, due_time, course, note } }).then(reload, showError);
-          },
-        }),
-        " ",
-        el("button", {
-          textContent: "삭제",
-          onclick() {
-            if (confirm(`"${t.title}" 을(를) 삭제할까요?`)) call(`/api/tasks/${t.id}`, { method: "DELETE" }).then(reload, showError);
-          },
-        }),
-      );
-      return li;
-    }),
+  const left = (k) => all.filter((x) => x.kind === k).length;
+  $("task-stats").replaceChildren(
+    stat("남은 할 일", String(left("할 일")), "안 끝낸 할 일"),
+    stat("남은 과제", String(left("과제")), `3일 안 마감 ${today.upcoming.length}개`),
+    stat("지난 일", String(today.overdue.length), "날짜가 지났는데 안 끝낸 것", today.overdue.length > 0),
   );
-  if (!tasks.length) $("task-list").append(el("li", { textContent: "없습니다." }));
+  const q = searchText();
+  const shown = tasks.filter((x) => matches(x, q));
+  $("task-list").replaceChildren(...(shown.length ? shown.map((x) => taskRow(x, today.date, reload, true)) : [emptyRow(7, q ? "검색 결과가 없습니다." : "없습니다.")]));
 }
 
+function updateOverdueBadge(n) {
+  $("nav-overdue").hidden = !n;
+  $("nav-overdue").textContent = n;
+}
+
+// 검색: 할 일은 화면에서 거르고, 파일은 서버에 묻는다.
+const searchText = () => $("global-search").value.trim().toLowerCase();
+const matches = (t, q) => !q || [t.title, t.course, t.note].some((v) => (v ?? "").toLowerCase().includes(q));
+
 const tabs = {
-  today: () => loadToday(),
-  tasks: () => loadTasks(),
-  files: async () => {
-    loadQuota();
-    await loadList();
+  today: { title: "오늘", load: () => loadToday(), actions: () => [newTaskBtn()] },
+  tasks: { title: "할 일·과제", load: () => loadTasks(), actions: () => [newTaskBtn()] },
+  files: {
+    title: "클라우드",
+    load: () => {
+      $("drive-off").hidden = me.driveConnected;
+      return loadList();
+    },
+    actions: () => (me.driveConnected ? [el("button", { className: "btn primary", type: "button", onclick: openUpload }, icon("upload"), "올리기", el("kbd", { textContent: "U" }))] : []),
   },
 };
+const newTaskBtn = () => el("button", { className: "btn primary", type: "button", onclick: () => openTaskDialog() }, icon("plus"), "새 할 일", el("kbd", { textContent: "N" }));
 
+function openUpload() {
+  $("progress").replaceChildren();
+  $("upload-dialog").showModal();
+}
+
+const currentTab = () => (location.hash.slice(1) in tabs ? location.hash.slice(1) : "today");
 function showTab() {
-  const name = location.hash.slice(1) in tabs ? location.hash.slice(1) : "today";
+  const name = currentTab();
   for (const key of Object.keys(tabs)) $(`tab-${key}`).hidden = key !== name;
+  document.querySelectorAll(".nav-item[data-tab]").forEach((a) => a.classList.toggle("active", a.dataset.tab === name));
+  $("main").classList.remove("nav-open");
+  $("page-title").textContent = tabs[name].title;
+  $("bar-actions").replaceChildren(...tabs[name].actions());
   $("msg").textContent = "";
-  tabs[name]().catch(showError);
+  tabs[name].load().catch(showError);
 }
 
 async function init() {
-  const me = await call("/api/me");
+  me = await call("/api/me");
   if (!me.admin) {
     $("login").hidden = false;
     $("google-login").hidden = !me.googleEnabled;
     $("password-login").onsubmit = (ev) => {
       ev.preventDefault();
-      call("/auth/password", { method: "POST", body: { password: $("password").value } }).then(() => location.reload(), showError);
+      call("/auth/password", { method: "POST", body: { password: $("password").value } }).then(
+        () => location.reload(),
+        (e) => ($("login-msg").textContent = e.message),
+      );
     };
     return;
   }
   categories = me.categories;
   taskKinds = me.taskKinds;
   $("main").hidden = false;
-  $("task-kind").append(...taskKinds.map((k) => el("option", { value: k, textContent: k })));
-  $("task-filter-kind").append(...taskKinds.map((k) => el("option", { value: k, textContent: k })));
-  $("task-filter-done").onchange = $("task-filter-kind").onchange = () => loadTasks().catch(showError);
-  $("task-add").onsubmit = async (ev) => {
+  const opts = (list) => list.map((v) => el("option", { value: v, textContent: v }));
+  $("task-kind").append(...opts(taskKinds));
+  $("up-category").append(...opts(categories));
+  $("file-category").append(...opts(categories));
+  $("task-filter-kind").append(...taskKinds.map((k) => el("button", { type: "button", textContent: k })));
+  $("task-filter-kind").querySelectorAll("button").forEach((b, i) => i && (b.dataset.v = taskKinds[i - 1]));
+  $("filter-category").append(...categories.map((c) => el("button", { type: "button", textContent: c })));
+  $("filter-category").querySelectorAll("button").forEach((b, i) => i && (b.dataset.v = categories[i - 1]));
+
+  taskDone = seg("task-filter-done", () => loadTasks().catch(showError));
+  taskKind = seg("task-filter-kind", () => loadTasks().catch(showError));
+  fileCategory = seg("filter-category", () => loadList().catch(showError));
+
+  $("task-form").onsubmit = async (ev) => {
+    if (ev.submitter?.value !== "ok") return;
     ev.preventDefault();
+    const body = { kind: $("task-kind").value, title: $("task-title").value, course: $("task-course").value, due_date: $("task-date").value, due_time: $("task-time").value, note: $("task-note").value };
     try {
-      await call("/api/tasks", {
-        method: "POST",
-        body: { kind: $("task-kind").value, title: $("task-title").value, course: $("task-course").value, due_date: $("task-date").value, due_time: $("task-time").value, note: $("task-note").value },
-      });
-      for (const id of ["task-title", "task-course", "task-date", "task-time", "task-note"]) $(id).value = "";
-      await loadTasks();
+      if (editingTask) await call(`/api/tasks/${editingTask.id}`, { method: "PATCH", body });
+      else await call("/api/tasks", { method: "POST", body });
+      $("task-dialog").close();
+      tabs[currentTab()].load().catch(showError);
     } catch (e) {
       showError(e);
     }
   };
-  $("up-category").append(...categories.map((c) => el("option", { value: c, textContent: c })));
-  $("filter-category").append(...categories.map((c) => el("option", { value: c, textContent: c })));
-
+  $("file-form").onsubmit = async (ev) => {
+    if (ev.submitter?.value !== "ok") return;
+    ev.preventDefault();
+    try {
+      await call(`/api/files/${editingFile.id}`, { method: "PATCH", body: { title: $("file-title").value, category: $("file-category").value, tags: $("file-tags").value, note: $("file-note").value } });
+      $("file-dialog").close();
+      await loadList();
+    } catch (e) {
+      showError(e);
+    }
+  };
   $("upload").onsubmit = async (ev) => {
+    if (ev.submitter?.value !== "ok") return;
     ev.preventDefault();
     const files = [...$("files").files];
     const tooBig = files.filter((f) => f.size >= me.maxFileSize);
-    if (tooBig.length) return showError("1GB 미만 파일만 올릴 수 있습니다: " + tooBig.map((f) => f.name).join(", "));
+    if (tooBig.length) return $("progress").replaceChildren(el("li", { className: "error", textContent: "1GB 미만 파일만 올릴 수 있습니다: " + tooBig.map((f) => f.name).join(", ") }));
+    $("upload-btn").disabled = true;
     for (const f of files) await uploadOne(f); // one at a time to keep bandwidth predictable
+    $("upload-btn").disabled = false;
     $("files").value = "";
     loadList().catch(showError);
-    loadQuota();
   };
   $("search").onsubmit = (ev) => {
     ev.preventDefault();
     loadList().catch(showError);
   };
+
+  // 사이드바 검색: 파일함에서는 파일 검색, 그 밖에서는 할 일 거르기.
+  let searchTimer;
+  $("global-search").oninput = () => {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => {
+      if (currentTab() === "files") {
+        $("q").value = $("global-search").value;
+        loadList().catch(showError);
+      } else tabs[currentTab()].load().catch(showError);
+    }, 200);
+  };
+  document.addEventListener("keydown", (ev) => {
+    if (ev.target.closest?.("input, textarea, select, dialog") || ev.metaKey || ev.ctrlKey || ev.altKey) return;
+    if (ev.key === "/") (ev.preventDefault(), $("global-search").focus());
+    else if (ev.key.toLowerCase() === "n" && currentTab() !== "files") (ev.preventDefault(), openTaskDialog());
+    else if (ev.key.toLowerCase() === "u" && currentTab() === "files" && me.driveConnected) (ev.preventDefault(), openUpload());
+  });
+  $("menu-btn").onclick = () => $("main").classList.toggle("nav-open");
   $("logout").onclick = () => call("/auth/logout", { method: "POST" }).then(() => location.reload());
 
   window.onhashchange = showTab;

@@ -125,20 +125,55 @@ export function createApp(cfg: AppConfig, db: Db, google: Google) {
 
   async function renderPublic(): Promise<Response> {
     const items = db.listFiles({ publicOnly: true });
-    const cards = items
+    const num = (i: number) => String(i + 1).padStart(2, "0");
+    const chips = (f: FileRow) =>
+      [f.category, ...f.tags.split(",")]
+        .map((t) => t.trim())
+        .filter(Boolean)
+        .map((t) => `<span class="chip">${escapeHtml(t)}</span>`)
+        .join("");
+    const works = items
       .map(
-        (f) => `<li><a href="${escapeHtml(f.web_view_link)}" target="_blank" rel="noopener">
-<img src="/thumb/${f.id}" alt="" loading="lazy" onerror="this.remove()">
-<strong>${escapeHtml(f.title)}</strong></a>
-<div>${escapeHtml(f.category)}${f.tags ? " · " + escapeHtml(f.tags) : ""}</div>
-${f.note ? `<p>${escapeHtml(f.note)}</p>` : ""}</li>`,
+        (f, i) => `<article class="work reveal">
+<a class="work-media" href="${escapeHtml(f.web_view_link)}" target="_blank" rel="noopener">
+<img src="/thumb/${f.id}" alt="" loading="lazy" onerror="this.parentNode.classList.add('no-thumb');this.remove()"><span class="work-media-label">${escapeHtml(f.title)}</span></a>
+<div class="work-info"><span class="work-num">${num(i)}</span>
+<h3><a href="${escapeHtml(f.web_view_link)}" target="_blank" rel="noopener">${escapeHtml(f.title)}</a></h3>
+<div class="chips">${chips(f)}</div>
+${f.note ? `<p class="work-note">${escapeHtml(f.note)}</p>` : ""}</div>
+</article>`,
+      )
+      .join("\n");
+    const index = items
+      .map(
+        (f, i) => `<li class="reveal"><span class="idx-num">${"✳".repeat(Math.min(i + 1, 4))}</span>
+<div><h3>${escapeHtml(f.title)}</h3><div class="chips">${chips(f)}</div></div></li>`,
       )
       .join("\n");
     const html = `<!doctype html><html lang="ko"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1"><title>kacarong 포트폴리오</title>
-<link rel="stylesheet" href="/static/base.css"></head><body>
-<h1>포트폴리오</h1>
-${items.length ? `<ul class="grid">${cards}</ul>` : "<p>아직 공개된 작업이 없습니다.</p>"}
+<meta name="viewport" content="width=device-width, initial-scale=1"><title>kacarong — 포트폴리오</title>
+<link rel="stylesheet" href="/static/site.css"></head><body>
+<header class="top">
+<a class="brand" href="/">KACARONG <span class="spark">✳</span></a>
+<nav><a href="#work">WORK</a><a href="#index">INDEX</a><a href="#contact">CONTACT</a></nav>
+<span class="clock" id="clock"></span>
+<span class="year">© ${new Date().getFullYear()}</span>
+</header>
+<section class="hero">
+<h1 class="hero-title"><span class="line"><span>kacarong</span></span><span class="line"><span>portfolio</span></span></h1>
+<p class="hero-copy reveal">기록하고, 만들고, 남깁니다.<br>작업한 것들을 여기에 모아 둡니다.</p>
+<a class="hero-cta" href="#work">VIEW WORK <span class="spark">✳</span></a>
+</section>
+<section class="works" id="work">
+<h2 class="section-title reveal">SELECTED<br>WORK <sup>${items.length}</sup></h2>
+${items.length ? works : `<p class="empty reveal">아직 공개된 작업이 없습니다.</p>`}
+</section>
+${items.length ? `<section class="index" id="index"><h2 class="section-title reveal">INDEX</h2><ul>${index}</ul></section>` : ""}
+<footer class="foot" id="contact">
+<p class="foot-big reveal">LET'S MAKE<br>SOMETHING.</p>
+<div class="foot-row"><span>KACARONG.KR</span><a href="/admin">WORKSPACE</a></div>
+</footer>
+<script src="/static/site.js" defer></script>
 </body></html>`;
     return new Response(html, { headers: { "Content-Type": "text/html; charset=utf-8" } });
   }
