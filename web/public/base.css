@@ -9,3 +9,7 @@ td, th { border-bottom: 1px solid #eee; padding: .4rem; text-align: left; vertic
 td img { width: 64px; height: 48px; object-fit: cover; }
 fieldset { margin-bottom: 1rem; }
 .error { color: #b00; }
+.tasks { list-style: none; padding: 0; }
+.tasks li { padding: .3rem 0; border-bottom: 1px solid #eee; }
+.tasks small { color: #666; margin-left: .5rem; }
+.done { text-decoration: line-through; color: #888; }

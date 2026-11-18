@@ -1,6 +1,6 @@
 # ~/.config/systemd/user/kacarong-folio.service 로 복사해서 쓴다.
 [Unit]
-Description=kacarong.kr 포트폴리오/파일함 웹사이트
+Description=kacarong.kr 개인 작업공간 웹사이트
 After=network-online.target
 Wants=network-online.target
 

@@ -114,7 +114,7 @@ beforeAll(() => {
 
 afterAll(() => fake.stop(true));
 
-function makeApp() {
+function makeApp(opts: { googleEnabled?: boolean; now?: () => Date } = {}) {
   const dataDir = mkdtempSync(join(tmpdir(), "folio-test-"));
   const db = openDb(join(dataDir, "t.db"));
   const google = createGoogle(
@@ -128,7 +128,11 @@ function makeApp() {
     },
     db,
   );
-  const fetch = createApp({ baseUrl: "https://kacarong.kr", adminEmail: "owner@example.com", dataDir }, db, google);
+  const fetch = createApp(
+    { baseUrl: "https://kacarong.kr", adminEmail: "owner@example.com", dataDir, googleEnabled: opts.googleEnabled ?? true, now: opts.now },
+    db,
+    google,
+  );
   const call = (path: string, init: RequestInit & { cookie?: string } = {}) => {
     const headers = new Headers(init.headers);
     if (init.cookie) headers.set("Cookie", init.cookie);
@@ -300,6 +304,113 @@ test("첫 업로드를 동시에 여러 개 시작해도 드라이브 폴더는 
       results.map(async (r) => uploads.get(new URL(((await r.json()) as { uploadUrl: string }).uploadUrl).searchParams.get("upload_id")!)!.parents[0]),
     );
     expect(new Set(parents)).toEqual(new Set([db.getSetting("root_folder_id")!]));
+  } finally {
+    cleanup();
+  }
+});
+
+const JSON_ORIGIN = { "Content-Type": "application/json", Origin: "https://kacarong.kr" };
+
+async function passwordLogin(call: ReturnType<typeof makeApp>["call"], password: string) {
+  const res = await call("/auth/password", { method: "POST", headers: JSON_ORIGIN, body: JSON.stringify({ password }) });
+  return { res, cookie: res.headers.getSetCookie().find((c) => c.startsWith("sid="))?.split(";")[0] };
+}
+
+test("비밀번호 로그인: 구글 없이 로그인, 틀리면 거부, 5번 틀리면 잠금", async () => {
+  const { call, db, cleanup } = makeApp({ googleEnabled: false });
+  try {
+    expect((await passwordLogin(call, "anything")).res.status).toBe(401); // not set yet
+    db.setSetting("password_hash", await Bun.password.hash("correct horse battery"));
+
+    expect((await call("/auth/login")).status).toBe(404); // Google login is off
+    expect(await (await call("/api/me")).json()).toMatchObject({ admin: false, googleEnabled: false });
+
+    const cross = await call("/auth/password", { method: "POST", headers: { ...JSON_ORIGIN, Origin: "https://evil.example" }, body: JSON.stringify({ password: "correct horse battery" }) });
+    expect(cross.status).toBe(403);
+
+    const { res, cookie } = await passwordLogin(call, "correct horse battery");
+    expect(res.status).toBe(204);
+    expect(await (await call("/api/me", { cookie })).json()).toMatchObject({ admin: true });
+    // Drive isn't connected, so file storage says so instead of crashing.
+    expect((await call("/api/quota", { cookie })).status).toBe(401);
+
+    // The attempt before the password was set already counts as 1 failure.
+    for (let i = 0; i < 3; i++) expect((await passwordLogin(call, "wrong")).res.status).toBe(401);
+    expect((await passwordLogin(call, "wrong")).res.status).toBe(401); // 5th failure
+    expect((await passwordLogin(call, "correct horse battery")).res.status).toBe(429); // locked even with the right one
+
+    expect((await call("/auth/logout", { method: "POST", cookie })).status).toBe(204);
+    expect((await call("/api/me", { cookie })).status).toBe(200);
+    expect(await (await call("/api/me", { cookie })).json()).toMatchObject({ admin: false });
+  } finally {
+    cleanup();
+  }
+});
+
+test("할 일·과제: 추가 → 오늘 화면 분류 → 완료 → 수정·삭제", async () => {
+  // 2026-11-19 00:30 in Korea is still 11-18 in UTC; the today screen must use Korean dates.
+  let clock = new Date("2026-11-18T15:30:00Z");
+  const { call, db, cleanup } = makeApp({ googleEnabled: false, now: () => clock });
+  try {
+    db.setSetting("password_hash", await Bun.password.hash("correct horse battery"));
+    const { cookie } = await passwordLogin(call, "correct horse battery");
+    expect((await call("/api/tasks")).status).toBe(401);
+
+    const add = async (b: object) => {
+      const r = await call("/api/tasks", { method: "POST", cookie, headers: JSON_ORIGIN, body: JSON.stringify(b) });
+      return { status: r.status, task: (await r.json()) as { id: number; error?: string } & Record<string, unknown> };
+    };
+    const late = (await add({ title: "지난 할 일", due_date: "2026-11-17" })).task;
+    const todayTodo = (await add({ title: "장보기", due_date: "2026-11-19", due_time: "18:00" })).task;
+    const soon = (await add({ kind: "과제", title: "레포트", course: "디자인사", due_date: "2026-11-22", due_time: "23:59" })).task;
+    await add({ kind: "과제", title: "먼 과제", due_date: "2026-11-30" });
+    await add({ title: "먼 할 일", due_date: "2026-11-21" }); // 할 일 only shows on its own day
+    await add({ title: "날짜 없는 할 일" });
+    expect(todayTodo).toMatchObject({ kind: "할 일", due_time: "18:00", done: 0 });
+    expect(soon).toMatchObject({ kind: "과제", course: "디자인사" });
+
+    expect((await add({ title: "" })).status).toBe(400);
+    expect((await add({ title: "x", kind: "숙제" })).status).toBe(400);
+    expect((await add({ title: "x", due_date: "2026-02-30" })).status).toBe(400);
+    expect((await add({ title: "x", due_date: "2026-11-19", due_time: "25:00" })).status).toBe(400);
+
+    const todayView = async () => (await (await call("/api/today", { cookie })).json()) as Record<string, { title: string }[]> & { date: string };
+    let t = await todayView();
+    expect(t.date).toBe("2026-11-19");
+    expect(t.overdue!.map((x) => x.title)).toEqual(["지난 할 일"]);
+    expect(t.today!.map((x) => x.title)).toEqual(["장보기"]);
+    expect(t.upcoming!.map((x) => x.title)).toEqual(["레포트"]);
+    expect(t.doneToday).toEqual([]);
+
+    const patch = (id: number, b: object) => call(`/api/tasks/${id}`, { method: "PATCH", cookie, headers: JSON_ORIGIN, body: JSON.stringify(b) });
+    expect(await (await patch(todayTodo.id, { done: true })).json()).toMatchObject({ done: 1, done_at: "2026-11-19" });
+    t = await todayView();
+    expect(t.today).toEqual([]);
+    expect(t.doneToday!.map((x) => x.title)).toEqual(["장보기"]);
+    expect(await (await patch(todayTodo.id, { done: false })).json()).toMatchObject({ done: 0, done_at: null });
+
+    expect(await (await patch(late.id, { title: "미룬 할 일", due_date: "" })).json()).toMatchObject({ title: "미룬 할 일", due_date: null });
+    expect((await patch(late.id, { title: "" })).status).toBe(400);
+    expect((await call("/api/tasks/9999", { method: "PATCH", cookie, headers: JSON_ORIGIN, body: "{}" })).status).toBe(404);
+
+    // Two days later the 과제 is due today, and the 할 일 from 11-21 appears.
+    clock = new Date("2026-11-21T03:00:00Z");
+    t = await todayView();
+    expect(t.today!.map((x) => x.title)).toEqual(["먼 할 일"]);
+    expect(t.overdue!.map((x) => x.title)).toEqual(["장보기"]);
+    expect(t.upcoming!.map((x) => x.title)).toEqual(["레포트"]);
+
+    // Range query for the calendar, plus filters.
+    const range = (await (await call("/api/tasks?from=2026-11-19&to=2026-11-30", { cookie })).json()) as { title: string }[];
+    expect(range.map((x) => x.title)).toEqual(["장보기", "먼 할 일", "레포트", "먼 과제"]);
+    const assignments = (await (await call("/api/tasks?kind=과제&done=0", { cookie })).json()) as unknown[];
+    expect(assignments).toHaveLength(2);
+    const all = (await (await call("/api/tasks", { cookie })).json()) as { title: string }[];
+    expect(all.at(-1)?.title).toBe("날짜 없는 할 일"); // undated last
+    expect((await call("/api/tasks?from=2026-13-01", { cookie })).status).toBe(400);
+
+    expect((await call(`/api/tasks/${soon.id}`, { method: "DELETE", cookie, headers: JSON_ORIGIN })).status).toBe(200);
+    expect(db.getTask(soon.id)).toBeNull();
   } finally {
     cleanup();
   }

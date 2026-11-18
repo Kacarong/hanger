@@ -19,6 +19,22 @@ export type FileRow = {
 
 export const CATEGORIES = ["포트폴리오", "플래닝", "작업", "과제", "기타"];
 
+export type TaskRow = {
+  id: number;
+  kind: string; // TASK_KINDS
+  title: string;
+  course: string; // 과목, mainly for 과제
+  due_date: string | null; // YYYY-MM-DD in Asia/Seoul
+  due_time: string | null; // HH:MM
+  note: string;
+  done: number;
+  done_at: string | null; // YYYY-MM-DD the task was checked off
+  created_at: string;
+};
+
+export const TASK_KINDS = ["할 일", "과제"];
+export type TaskFields = Pick<TaskRow, "kind" | "title" | "course" | "due_date" | "due_time" | "note">;
+
 export function openDb(path: string) {
   const db = new Database(path, { create: true });
   db.exec("PRAGMA journal_mode = WAL");
@@ -41,7 +57,20 @@ export function openDb(path: string) {
       web_content_link TEXT NOT NULL DEFAULT '',
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
+    CREATE TABLE IF NOT EXISTS tasks (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      kind TEXT NOT NULL DEFAULT '할 일',
+      title TEXT NOT NULL,
+      course TEXT NOT NULL DEFAULT '',
+      due_date TEXT,
+      due_time TEXT,
+      note TEXT NOT NULL DEFAULT '',
+      done INTEGER NOT NULL DEFAULT 0,
+      done_at TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
   `);
+  const TASK_ORDER = "ORDER BY due_date IS NULL, due_date, due_time IS NULL, due_time, id";
 
   return {
     raw: db,
@@ -99,6 +128,50 @@ export function openDb(path: string) {
     },
     deleteFile(id: number) {
       db.query("DELETE FROM files WHERE id = ?").run(id);
+    },
+    // from/to are inclusive YYYY-MM-DD bounds on due_date; a bound excludes undated tasks.
+    listTasks(opts: { done?: boolean; from?: string; to?: string; kind?: string; doneOn?: string }): TaskRow[] {
+      const where: string[] = [];
+      const args: (string | number)[] = [];
+      if (opts.done !== undefined) {
+        where.push("done = ?");
+        args.push(opts.done ? 1 : 0);
+      }
+      if (opts.from) {
+        where.push("due_date >= ?");
+        args.push(opts.from);
+      }
+      if (opts.to) {
+        where.push("due_date <= ?");
+        args.push(opts.to);
+      }
+      if (opts.kind) {
+        where.push("kind = ?");
+        args.push(opts.kind);
+      }
+      if (opts.doneOn) {
+        where.push("done_at = ?");
+        args.push(opts.doneOn);
+      }
+      const sql = `SELECT * FROM tasks ${where.length ? "WHERE " + where.join(" AND ") : ""} ${TASK_ORDER}`;
+      return db.query(sql).all(...args) as TaskRow[];
+    },
+    getTask(id: number): TaskRow | null {
+      return db.query("SELECT * FROM tasks WHERE id = ?").get(id) as TaskRow | null;
+    },
+    insertTask(t: TaskFields): TaskRow {
+      return db
+        .query("INSERT INTO tasks (kind, title, course, due_date, due_time, note) VALUES (?, ?, ?, ?, ?, ?) RETURNING *")
+        .get(t.kind, t.title, t.course, t.due_date, t.due_time, t.note) as TaskRow;
+    },
+    updateTask(id: number, patch: Partial<TaskFields & Pick<TaskRow, "done" | "done_at">>) {
+      const keys = Object.keys(patch) as (keyof typeof patch)[];
+      if (!keys.length) return;
+      const sets = keys.map((k) => `${k} = ?`).join(", ");
+      db.query(`UPDATE tasks SET ${sets} WHERE id = ?`).run(...keys.map((k) => patch[k] ?? null), id);
+    },
+    deleteTask(id: number) {
+      db.query("DELETE FROM tasks WHERE id = ?").run(id);
     },
   };
 }

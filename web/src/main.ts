@@ -14,11 +14,16 @@ const baseUrl = need("BASE_URL").replace(/\/$/, "");
 const dataDir = process.env.DATA_DIR ?? join(import.meta.dir, "..", "data");
 mkdirSync(dataDir, { recursive: true });
 
+// Google login and Drive stay off until the OAuth client and admin email are all set.
+const adminEmail = (process.env.ADMIN_EMAIL ?? "").toLowerCase();
+const googleEnabled = !!(process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET && adminEmail);
+
 const db = openDb(join(dataDir, "folio.db"));
+if (!db.getSetting("password_hash")) console.warn("비밀번호가 없습니다. `bun run set-password` 로 설정하세요.");
 const google = createGoogle(
   {
-    clientId: need("GOOGLE_CLIENT_ID"),
-    clientSecret: need("GOOGLE_CLIENT_SECRET"),
+    clientId: process.env.GOOGLE_CLIENT_ID ?? "",
+    clientSecret: process.env.GOOGLE_CLIENT_SECRET ?? "",
     redirectUri: `${baseUrl}/auth/callback`,
     authUrl: "https://accounts.google.com/o/oauth2/v2/auth",
     tokenUrl: "https://oauth2.googleapis.com/token",
@@ -26,7 +31,7 @@ const google = createGoogle(
   },
   db,
 );
-const fetch = createApp({ baseUrl, adminEmail: need("ADMIN_EMAIL").toLowerCase(), dataDir }, db, google);
+const fetch = createApp({ baseUrl, adminEmail, dataDir, googleEnabled }, db, google);
 
 const server = Bun.serve({
   hostname: process.env.HOST ?? "127.0.0.1",

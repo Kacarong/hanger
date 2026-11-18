@@ -2,6 +2,7 @@
 const CHUNK = 16 * 1024 * 1024; // must be a multiple of 256 KiB for Drive resumable uploads
 const $ = (id) => document.getElementById(id);
 let categories = [];
+let taskKinds = [];
 
 function showError(e) {
   $("msg").textContent = e instanceof Error ? e.message : String(e);
@@ -151,14 +152,130 @@ async function loadList() {
   $("list").replaceChildren(...rows);
 }
 
+// 할 일·과제
+const DAY = 86400_000;
+const daysBetween = (a, b) => Math.round((Date.parse(b) - Date.parse(a)) / DAY);
+
+function taskItem(t, today, reload) {
+  const update = (patch) => call(`/api/tasks/${t.id}`, { method: "PATCH", body: patch }).then(reload, showError);
+  let when = t.due_date ? t.due_date + (t.due_time ? " " + t.due_time : "") : "날짜 없음";
+  if (t.kind === "과제" && t.due_date && !t.done) {
+    const d = daysBetween(today, t.due_date);
+    when += d > 0 ? ` (D-${d})` : d === 0 ? " (오늘 마감)" : ` (${-d}일 지남)`;
+  }
+  return el(
+    "li",
+    {},
+    el("label", { className: t.done ? "done" : "" }, el("input", { type: "checkbox", checked: !!t.done, onchange() { update({ done: this.checked }); } }), " ", t.title),
+    el("small", { textContent: [t.kind, t.course, when].filter(Boolean).join(" · ") }),
+    t.note ? el("div", {}, el("small", { textContent: t.note })) : "",
+  );
+}
+
+async function loadToday() {
+  const t = await call("/api/today");
+  const reload = () => loadToday().catch(showError);
+  $("today-date").textContent = `${t.date} 오늘`;
+  const sections = [
+    ["지난 일", t.overdue],
+    ["오늘", t.today],
+    ["다가오는 과제 (3일 안)", t.upcoming],
+    ["오늘 끝낸 일", t.doneToday],
+  ].filter(([, items]) => items.length);
+  $("today-lists").replaceChildren(
+    ...(sections.length
+      ? sections.flatMap(([title, items]) => [el("h3", { textContent: title }), el("ul", { className: "tasks" }, ...items.map((x) => taskItem(x, t.date, reload)))])
+      : [el("p", { textContent: "오늘 할 일이 없습니다." })]),
+  );
+}
+
+async function loadTasks() {
+  const params = new URLSearchParams();
+  if ($("task-filter-done").value) params.set("done", $("task-filter-done").value);
+  if ($("task-filter-kind").value) params.set("kind", $("task-filter-kind").value);
+  const [tasks, { date }] = await Promise.all([call("/api/tasks?" + params), call("/api/today")]);
+  const reload = () => loadTasks().catch(showError);
+  $("task-list").replaceChildren(
+    ...tasks.map((t) => {
+      const li = taskItem(t, date, reload);
+      li.append(
+        " ",
+        el("button", {
+          textContent: "수정",
+          onclick() {
+            const title = prompt("제목", t.title);
+            if (title === null) return;
+            const due_date = prompt("날짜 (YYYY-MM-DD, 비우면 날짜 없음)", t.due_date ?? "");
+            if (due_date === null) return;
+            const due_time = prompt("시간 (HH:MM, 비우면 없음)", t.due_time ?? "");
+            if (due_time === null) return;
+            const course = prompt("과목", t.course);
+            if (course === null) return;
+            const note = prompt("메모", t.note);
+            if (note === null) return;
+            call(`/api/tasks/${t.id}`, { method: "PATCH", body: { title, due_date, due_time, course, note } }).then(reload, showError);
+          },
+        }),
+        " ",
+        el("button", {
+          textContent: "삭제",
+          onclick() {
+            if (confirm(`"${t.title}" 을(를) 삭제할까요?`)) call(`/api/tasks/${t.id}`, { method: "DELETE" }).then(reload, showError);
+          },
+        }),
+      );
+      return li;
+    }),
+  );
+  if (!tasks.length) $("task-list").append(el("li", { textContent: "없습니다." }));
+}
+
+const tabs = {
+  today: () => loadToday(),
+  tasks: () => loadTasks(),
+  files: async () => {
+    loadQuota();
+    await loadList();
+  },
+};
+
+function showTab() {
+  const name = location.hash.slice(1) in tabs ? location.hash.slice(1) : "today";
+  for (const key of Object.keys(tabs)) $(`tab-${key}`).hidden = key !== name;
+  $("msg").textContent = "";
+  tabs[name]().catch(showError);
+}
+
 async function init() {
   const me = await call("/api/me");
   if (!me.admin) {
     $("login").hidden = false;
+    $("google-login").hidden = !me.googleEnabled;
+    $("password-login").onsubmit = (ev) => {
+      ev.preventDefault();
+      call("/auth/password", { method: "POST", body: { password: $("password").value } }).then(() => location.reload(), showError);
+    };
     return;
   }
   categories = me.categories;
+  taskKinds = me.taskKinds;
   $("main").hidden = false;
+  $("task-kind").append(...taskKinds.map((k) => el("option", { value: k, textContent: k })));
+  $("task-filter-kind").append(...taskKinds.map((k) => el("option", { value: k, textContent: k })));
+  $("task-filter-done").onchange = $("task-filter-kind").onchange = () => loadTasks().catch(showError);
+  $("task-add").onsubmit = async (ev) => {
+    ev.preventDefault();
+    try {
+      await call("/api/tasks", {
+        method: "POST",
+        body: { kind: $("task-kind").value, title: $("task-title").value, course: $("task-course").value, due_date: $("task-date").value, due_time: $("task-time").value, note: $("task-note").value },
+      });
+      for (const id of ["task-title", "task-course", "task-date", "task-time", "task-note"]) $(id).value = "";
+      await loadTasks();
+    } catch (e) {
+      showError(e);
+    }
+  };
   $("up-category").append(...categories.map((c) => el("option", { value: c, textContent: c })));
   $("filter-category").append(...categories.map((c) => el("option", { value: c, textContent: c })));
 
@@ -178,8 +295,8 @@ async function init() {
   };
   $("logout").onclick = () => call("/auth/logout", { method: "POST" }).then(() => location.reload());
 
-  loadQuota();
-  await loadList();
+  window.onhashchange = showTab;
+  showTab();
 }
 
 init().catch(showError);

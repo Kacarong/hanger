@@ -1,17 +1,38 @@
 import { mkdirSync, existsSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { CATEGORIES, type Db, type FileRow } from "./db";
+import { CATEGORIES, TASK_KINDS, type Db, type FileRow, type TaskFields } from "./db";
 import { GoogleError, type Google } from "./google";
 
 export const MAX_FILE_SIZE = 1024 ** 3; // files must be under 1GB
 const SESSION_DAYS = 30;
+const UPCOMING_DAYS = 3; // 과제 due within this many days show up on the today screen
+const LOGIN_FAIL_LIMIT = 5; // password failures allowed per LOGIN_FAIL_WINDOW
+const LOGIN_FAIL_WINDOW = 15 * 60_000;
 const PUBLIC_DIR = join(import.meta.dir, "..", "public");
 
 export type AppConfig = {
   baseUrl: string; // e.g. https://kacarong.kr
-  adminEmail: string;
+  adminEmail: string; // only used by Google login
   dataDir: string;
+  googleEnabled: boolean; // false until the OAuth client is configured
+  now?: () => Date; // for tests
 };
+
+// YYYY-MM-DD of the given instant in Korea.
+export function seoulDate(d: Date): string {
+  return new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Seoul" }).format(d);
+}
+
+function addDays(date: string, days: number): string {
+  const d = new Date(date + "T00:00:00Z");
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+}
+
+function isDate(v: string): boolean {
+  const d = new Date(v + "T00:00:00Z");
+  return /^\d{4}-\d{2}-\d{2}$/.test(v) && !Number.isNaN(d.getTime()) && d.toISOString().startsWith(v);
+}
 
 function json(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), { status, headers: { "Content-Type": "application/json; charset=utf-8" } });
@@ -44,10 +65,21 @@ export function createApp(cfg: AppConfig, db: Db, google: Google) {
     return `${name}=${encodeURIComponent(value)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAgeSec}${secure}`;
   }
 
+  // Sessions are only ever created for the owner (password or the admin Google account).
   function isAdmin(req: Request): boolean {
     const sid = cookies(req).sid;
-    return !!sid && db.getSession(sid)?.email === cfg.adminEmail;
+    return !!sid && !!db.getSession(sid);
   }
+
+  function startSession(subject: string, headers: Headers) {
+    const sid = crypto.randomUUID() + crypto.randomUUID();
+    db.createSession(sid, subject, Date.now() + SESSION_DAYS * 86400_000);
+    headers.append("Set-Cookie", setCookie("sid", sid, SESSION_DAYS * 86400));
+  }
+
+  const now = cfg.now ?? (() => new Date());
+  const today = () => seoulDate(now());
+  let loginFailures: number[] = [];
 
   async function body(req: Request): Promise<Record<string, unknown>> {
     try {
@@ -63,6 +95,32 @@ export function createApp(cfg: AppConfig, db: Db, google: Google) {
 
   function category(v: unknown): string {
     return CATEGORIES.includes(v as string) ? (v as string) : "기타";
+  }
+
+  // Validates task fields from a request body. Only keys present in the body are returned.
+  function taskFields(b: Record<string, unknown>): Partial<TaskFields> | string {
+    const out: Partial<TaskFields> = {};
+    if ("kind" in b) {
+      if (!TASK_KINDS.includes(b.kind as string)) return "종류가 올바르지 않습니다";
+      out.kind = b.kind as string;
+    }
+    if ("title" in b) {
+      out.title = str(b.title, 200);
+      if (!out.title) return "제목을 입력해 주세요";
+    }
+    if ("course" in b) out.course = str(b.course, 100);
+    if ("note" in b) out.note = str(b.note, 5000);
+    if ("due_date" in b) {
+      const v = str(b.due_date, 10);
+      if (v && !isDate(v)) return "날짜가 올바르지 않습니다";
+      out.due_date = v || null;
+    }
+    if ("due_time" in b) {
+      const v = str(b.due_time, 5);
+      if (v && !/^([01]\d|2[0-3]):[0-5]\d$/.test(v)) return "시간이 올바르지 않습니다";
+      out.due_time = v || null;
+    }
+    return out;
   }
 
   async function renderPublic(): Promise<Response> {
@@ -104,7 +162,14 @@ ${items.length ? `<ul class="grid">${cards}</ul>` : "<p>아직 공개된 작업�
     const method = req.method;
 
     if (path === "/api/me" && method === "GET") {
-      return json({ admin: isAdmin(req), driveConnected: !!db.getSetting("refresh_token"), categories: CATEGORIES, maxFileSize: MAX_FILE_SIZE });
+      return json({
+        admin: isAdmin(req),
+        googleEnabled: cfg.googleEnabled,
+        driveConnected: !!db.getSetting("refresh_token"),
+        categories: CATEGORIES,
+        taskKinds: TASK_KINDS,
+        maxFileSize: MAX_FILE_SIZE,
+      });
     }
     if (path === "/api/public" && method === "GET") {
       return json(db.listFiles({ publicOnly: true }).map(publicView));
@@ -114,6 +179,57 @@ ${items.length ? `<ul class="grid">${cards}</ul>` : "<p>아직 공개된 작업�
     // Session cookies are SameSite=Lax; also refuse state changes from other origins.
     if (method !== "GET" && req.headers.get("Origin") && req.headers.get("Origin") !== origin) {
       return json({ error: "잘못된 요청 출처" }, 403);
+    }
+
+    if (path === "/api/today" && method === "GET") {
+      const d = today();
+      const open = db.listTasks({ done: false, to: addDays(d, UPCOMING_DAYS) });
+      return json({
+        date: d,
+        overdue: open.filter((t) => t.due_date! < d),
+        today: open.filter((t) => t.due_date === d),
+        upcoming: open.filter((t) => t.due_date! > d && t.kind === "과제"),
+        doneToday: db.listTasks({ done: true, doneOn: d }),
+      });
+    }
+
+    if (path === "/api/tasks" && method === "GET") {
+      const q = url.searchParams;
+      const done = q.get("done");
+      const from = q.get("from") ?? "";
+      const to = q.get("to") ?? "";
+      if ((from && !isDate(from)) || (to && !isDate(to))) return json({ error: "날짜가 올바르지 않습니다" }, 400);
+      return json(db.listTasks({ done: done === null ? undefined : done === "1", from, to, kind: q.get("kind") ?? undefined }));
+    }
+
+    if (path === "/api/tasks" && method === "POST") {
+      const f = taskFields(await body(req));
+      if (typeof f === "string") return json({ error: f }, 400);
+      if (!f.title) return json({ error: "제목을 입력해 주세요" }, 400);
+      return json(db.insertTask({ kind: "할 일", course: "", due_date: null, due_time: null, note: "", ...f, title: f.title }), 201);
+    }
+
+    const tm = path.match(/^\/api\/tasks\/(\d+)$/);
+    if (tm) {
+      const t = db.getTask(Number(tm[1]));
+      if (!t) return json({ error: "할 일을 찾을 수 없습니다" }, 404);
+      if (method === "PATCH") {
+        const b = await body(req);
+        const f = taskFields(b);
+        if (typeof f === "string") return json({ error: f }, 400);
+        const patch: Parameters<Db["updateTask"]>[1] = f;
+        if ("done" in b) {
+          const done = b.done === true;
+          patch.done = done ? 1 : 0;
+          if (done !== !!t.done) patch.done_at = done ? today() : null;
+        }
+        db.updateTask(t.id, patch);
+        return json(db.getTask(t.id));
+      }
+      if (method === "DELETE") {
+        db.deleteTask(t.id);
+        return json({ ok: true });
+      }
     }
 
     if (path === "/api/files" && method === "GET") {
@@ -229,6 +345,24 @@ ${items.length ? `<ul class="grid">${cards}</ul>` : "<p>아직 공개된 작업�
       return (await file.exists()) ? new Response(file) : new Response("not found", { status: 404 });
     }
 
+    if (path === "/auth/password" && req.method === "POST") {
+      if (req.headers.get("Origin") !== origin) return json({ error: "잘못된 요청 출처" }, 403);
+      const t = Date.now();
+      loginFailures = loginFailures.filter((x) => x > t - LOGIN_FAIL_WINDOW);
+      if (loginFailures.length >= LOGIN_FAIL_LIMIT) return json({ error: "비밀번호를 여러 번 틀렸습니다. 15분 뒤에 다시 시도해 주세요." }, 429);
+      const hash = db.getSetting("password_hash");
+      const password = (await body(req)).password;
+      if (!hash || typeof password !== "string" || !password || !(await Bun.password.verify(password, hash))) {
+        loginFailures.push(t);
+        return json({ error: hash ? "비밀번호가 틀렸습니다" : "비밀번호가 아직 설정되지 않았습니다" }, 401);
+      }
+      const headers = new Headers();
+      startSession("password", headers);
+      return new Response(null, { status: 204, headers });
+    }
+
+    if (path.startsWith("/auth/") && path !== "/auth/logout" && !cfg.googleEnabled) return new Response("not found", { status: 404 });
+
     if (path === "/auth/login" && req.method === "GET") {
       const state = crypto.randomUUID();
       return new Response(null, {
@@ -245,12 +379,10 @@ ${items.length ? `<ul class="grid">${cards}</ul>` : "<p>아직 공개된 작업�
       const code = url.searchParams.get("code");
       if (!state || state !== cookies(req).oauth_state || !code) return new Response("로그인 요청이 올바르지 않습니다. 다시 시도해 주세요.", { status: 400 });
       const r = await google.exchangeCode(code);
-      if (!r.emailVerified || r.email !== cfg.adminEmail) return new Response("관리자 계정이 아닙니다.", { status: 403 });
+      if (!r.emailVerified || !cfg.adminEmail || r.email !== cfg.adminEmail) return new Response("관리자 계정이 아닙니다.", { status: 403 });
       google.saveTokens(r.tokens);
-      const sid = crypto.randomUUID() + crypto.randomUUID();
-      db.createSession(sid, r.email, Date.now() + SESSION_DAYS * 86400_000);
       const headers = new Headers({ Location: "/admin" });
-      headers.append("Set-Cookie", setCookie("sid", sid, SESSION_DAYS * 86400));
+      startSession(r.email, headers);
       headers.append("Set-Cookie", setCookie("oauth_state", "", 0));
       return new Response(null, { status: 302, headers });
     }

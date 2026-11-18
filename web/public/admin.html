@@ -3,20 +3,52 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>kacarong 관리</title>
+<title>kacarong 작업공간</title>
 <link rel="stylesheet" href="/static/base.css">
 </head>
 <body>
-<h1>파일함 관리</h1>
+<h1>kacarong 작업공간</h1>
 <p id="msg" class="error"></p>
 
 <div id="login" hidden>
-  <p>관리자 구글 계정으로 로그인해 주세요.</p>
-  <a href="/auth/login">구글로 로그인</a>
+  <form id="password-login">
+    <input type="password" id="password" placeholder="비밀번호" autocomplete="current-password" required>
+    <button>로그인</button>
+  </form>
+  <p id="google-login" hidden><a href="/auth/login">구글로 로그인</a></p>
 </div>
 
 <div id="main" hidden>
-  <p><span id="quota"></span> · <a href="/" target="_blank">공개 페이지 보기</a> · <button id="logout">로그아웃</button></p>
+  <nav>
+    <a href="#today">오늘</a> · <a href="#tasks">할 일·과제</a> · <a href="#files">파일함</a>
+    · <a href="/" target="_blank">공개 페이지 보기</a> · <button id="logout">로그아웃</button>
+  </nav>
+
+<section id="tab-today" hidden>
+  <h2 id="today-date"></h2>
+  <div id="today-lists"></div>
+</section>
+
+<section id="tab-tasks" hidden>
+  <form id="task-add">
+    <fieldset>
+      <legend>추가</legend>
+      <p><select id="task-kind"></select>
+         <input id="task-title" placeholder="제목" required size="30">
+         <input id="task-course" placeholder="과목 (과제)"></p>
+      <p><label>날짜 <input type="date" id="task-date"></label>
+         <label>시간 <input type="time" id="task-time"></label></p>
+      <p><input id="task-note" placeholder="메모" size="50"></p>
+      <button>추가</button>
+    </fieldset>
+  </form>
+  <p><select id="task-filter-done"><option value="0">안 끝난 것</option><option value="1">끝낸 것</option><option value="">전체</option></select>
+     <select id="task-filter-kind"><option value="">전체 종류</option></select></p>
+  <ul id="task-list" class="tasks"></ul>
+</section>
+
+<section id="tab-files" hidden>
+  <p id="quota"></p>
 
   <form id="upload">
     <fieldset>
@@ -40,6 +72,7 @@
     <thead><tr><th></th><th>제목</th><th>분류 / 태그 / 메모</th><th>크기</th><th>공유</th><th>공개 페이지</th><th></th></tr></thead>
     <tbody id="list"></tbody>
   </table>
+</section>
 </div>
 <script type="module" src="/static/admin.js"></script>
 </body>
