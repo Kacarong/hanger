@@ -1,0 +1,8 @@
+{
+  "name": "kacarong-folio-root",
+  "private": true,
+  "scripts": {
+    "test": "cd web && bun install --frozen-lockfile && bun test",
+    "typecheck": "cd web && bun install --frozen-lockfile && bun run typecheck"
+  }
+}

@@ -135,6 +135,13 @@ ${items.length ? `<ul class="grid">${cards}</ul>` : "<p>아직 공개된 작업�
       return json({ uploadUrl });
     }
 
+    if (path === "/api/uploads/status" && method === "POST") {
+      const b = await body(req);
+      const size = Number(b.size);
+      if (!Number.isInteger(size) || size <= 0) return json({ error: "파일 크기가 올바르지 않습니다" }, 400);
+      return json(await google.uploadStatus(str(b.uploadUrl, 2000), size));
+    }
+
     if (path === "/api/files" && method === "POST") {
       const b = await body(req);
       const driveId = str(b.driveId, 200);
@@ -262,7 +269,7 @@ ${items.length ? `<ul class="grid">${cards}</ul>` : "<p>아직 공개된 작업�
     try {
       return await handle(req);
     } catch (e) {
-      if (e instanceof GoogleError) return json({ error: e.message }, e.status === 401 ? 401 : 502);
+      if (e instanceof GoogleError) return json({ error: e.message }, e.status === 401 || e.status === 400 ? e.status : 502);
       console.error(e);
       return json({ error: "서버 오류" }, 500);
     }

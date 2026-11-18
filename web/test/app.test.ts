@@ -9,7 +9,8 @@ import { createGoogle } from "../src/google";
 // A small stand-in for the Google OAuth + Drive endpoints the app uses.
 type FakeFile = { id: string; name: string; mimeType: string; parents: string[]; trashed: boolean; anyone: boolean; bytes: number };
 const drive = new Map<string, FakeFile>();
-const uploads = new Map<string, { name: string; mimeType: string; parents: string[]; size: number; received: number; origin: string | null }>();
+const uploads = new Map<string, { name: string; mimeType: string; parents: string[]; size: number; received: number; origin: string | null; fileId?: string }>();
+let foldersCreated = 0;
 let loginEmail = "owner@example.com";
 let nextId = 1;
 let fake: ReturnType<typeof Bun.serve>;
@@ -48,15 +49,20 @@ beforeAll(() => {
         if (req.headers.get("Authorization") !== "Bearer at") return new Response("no", { status: 403 });
         return new Response("PNGDATA", { headers: { "Content-Type": "image/png" } });
       }
-      if (p.startsWith("/session/")) {
-        const u = uploads.get(p.slice("/session/".length))!;
-        const range = req.headers.get("Content-Range")!;
-        const bytes = (await req.arrayBuffer()).byteLength;
-        u.received += bytes;
-        if (!range.startsWith("bytes */") && u.received < u.size) return new Response(null, { status: 308, headers: { Range: `bytes=0-${u.received - 1}` } });
-        const f: FakeFile = { id: `f${nextId++}`, name: u.name, mimeType: u.mimeType, parents: u.parents, trashed: false, anyone: false, bytes: u.size };
-        drive.set(f.id, f);
-        return Response.json(fileJson(f));
+      // Upload session URI, same shape as Google's: /upload/drive/v3/files?uploadType=resumable&upload_id=...
+      if (p === "/upload/drive/v3/files" && req.method === "PUT") {
+        const u = uploads.get(url.searchParams.get("upload_id")!)!;
+        u.received += (await req.arrayBuffer()).byteLength;
+        if (u.received < u.size) {
+          // Google omits Range when it has no bytes yet.
+          return new Response(null, { status: 308, headers: u.received ? { Range: `bytes=0-${u.received - 1}` } : {} });
+        }
+        if (!u.fileId) {
+          const f: FakeFile = { id: `f${nextId++}`, name: u.name, mimeType: u.mimeType, parents: u.parents, trashed: false, anyone: false, bytes: u.size };
+          drive.set(f.id, f);
+          u.fileId = f.id;
+        }
+        return Response.json(fileJson(drive.get(u.fileId)!));
       }
       if (req.headers.get("Authorization") !== "Bearer at") return new Response("unauthorized", { status: 401 });
 
@@ -71,10 +77,12 @@ beforeAll(() => {
           received: 0,
           origin: req.headers.get("Origin"),
         });
-        return new Response(null, { headers: { Location: `${fake.url}session/${sid}` } });
+        return new Response(null, { headers: { Location: `${fake.url}upload/drive/v3/files?uploadType=resumable&upload_id=${sid}` } });
       }
       if (p === "/drive/v3/files" && req.method === "POST") {
         const meta = await req.json();
+        foldersCreated++;
+        await Bun.sleep(20); // widen the window for concurrent first uploads
         const f: FakeFile = { id: `folder${nextId++}`, name: meta.name, mimeType: meta.mimeType, parents: [], trashed: false, anyone: false, bytes: 0 };
         drive.set(f.id, f);
         return Response.json({ id: f.id });
@@ -163,15 +171,26 @@ test("관리자 로그인 → 업로드 → 공유/공개 → 공개 페이지 �
     });
     expect(init.status).toBe(200);
     const { uploadUrl } = (await init.json()) as { uploadUrl: string };
-    const session = uploads.get(new URL(uploadUrl).pathname.split("/").pop()!)!;
+    const session = uploads.get(new URL(uploadUrl).searchParams.get("upload_id")!)!;
     expect(session.origin).toBe("https://kacarong.kr");
     const rootId = session.parents[0]!;
     expect(drive.get(rootId)?.mimeType).toBe("application/vnd.google-apps.folder");
 
+    const status = (u = uploadUrl) =>
+      call("/api/uploads/status", { method: "POST", cookie, headers: { "Content-Type": "application/json" }, body: JSON.stringify({ uploadUrl: u, size }) });
+    expect(await (await status()).json()).toEqual({ next: 0 });
+
     const first = await fetch(uploadUrl, { method: "PUT", headers: { "Content-Range": `bytes 0-262143/${size}` }, body: new Uint8Array(262144) });
     expect(first.status).toBe(308);
+    // What the browser asks for when CORS hides the Range header.
+    expect(await (await status()).json()).toEqual({ next: 262144 });
+    // Only Drive upload session URLs are queried.
+    expect((await status("http://192.168.10.1/admin?upload_id=x")).status).toBe(400);
+    expect((await status(`${fake.url}drive/v3/files?upload_id=x`)).status).toBe(400);
     const done = await fetch(uploadUrl, { method: "PUT", headers: { "Content-Range": `bytes 262144-${size - 1}/${size}` }, body: new Uint8Array(size - 262144) });
     const driveFile = (await done.json()) as { id: string };
+    // A status query after completion returns the finished file, so a lost final reply is recoverable.
+    expect(((await (await status()).json()) as { file: { id: string } }).file.id).toBe(driveFile.id);
 
     const reg = await call("/api/files", {
       method: "POST",
@@ -261,6 +280,26 @@ test("공개 페이지는 제목·메모를 HTML 이스케이프", async () => {
     const html = await (await call("/")).text();
     expect(html).not.toContain("<script>alert");
     expect(html).toContain("&lt;script&gt;");
+  } finally {
+    cleanup();
+  }
+});
+
+test("첫 업로드를 동시에 여러 개 시작해도 드라이브 폴더는 하나만 생성", async () => {
+  loginEmail = "owner@example.com";
+  const { call, db, cleanup } = makeApp();
+  try {
+    const { cookie } = await login(call);
+    const before = foldersCreated;
+    const start = () =>
+      call("/api/uploads", { method: "POST", cookie, headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: "a.txt", size: 10, mimeType: "text/plain" }) });
+    const results = await Promise.all([start(), start(), start()]);
+    expect(results.map((r) => r.status)).toEqual([200, 200, 200]);
+    expect(foldersCreated - before).toBe(1);
+    const parents = await Promise.all(
+      results.map(async (r) => uploads.get(new URL(((await r.json()) as { uploadUrl: string }).uploadUrl).searchParams.get("upload_id")!)!.parents[0]),
+    );
+    expect(new Set(parents)).toEqual(new Set([db.getSetting("root_folder_id")!]));
   } finally {
     cleanup();
   }

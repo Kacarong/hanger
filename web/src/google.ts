@@ -98,21 +98,27 @@ export function createGoogle(cfg: GoogleConfig, db: Db) {
     return check(await fetch(cfg.apiBase + path, { ...init, headers }), what);
   }
 
-  async function rootFolder(): Promise<string> {
+  // Shared while in flight so concurrent first uploads don't each create a folder.
+  let creatingRoot: Promise<string> | null = null;
+
+  function rootFolder(): Promise<string> {
     const existing = db.getSetting("root_folder_id");
-    if (existing) return existing;
-    const res = await api(
-      "/drive/v3/files?fields=id",
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: "kacarong.kr 파일함", mimeType: "application/vnd.google-apps.folder" }),
-      },
-      "드라이브 폴더 생성",
-    );
-    const { id } = (await res.json()) as { id: string };
-    db.setSetting("root_folder_id", id);
-    return id;
+    if (existing) return Promise.resolve(existing);
+    creatingRoot ??= (async () => {
+      const res = await api(
+        "/drive/v3/files?fields=id",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name: "kacarong.kr 파일함", mimeType: "application/vnd.google-apps.folder" }),
+        },
+        "드라이브 폴더 생성",
+      );
+      const { id } = (await res.json()) as { id: string };
+      db.setSetting("root_folder_id", id);
+      return id;
+    })().finally(() => (creatingRoot = null));
+    return creatingRoot;
   }
 
   async function getFile(id: string): Promise<DriveFile> {
@@ -148,6 +154,20 @@ export function createGoogle(cfg: GoogleConfig, db: Db) {
       const location = res.headers.get("Location");
       if (!location) throw new GoogleError("업로드 주소를 받지 못했습니다", 502);
       return location;
+    },
+
+    // Asks Google how many bytes a resumable session already has. Used when the browser
+    // cannot read the Range header of a 308 reply. Only real Drive upload session URLs are accepted.
+    async uploadStatus(sessionUrl: string, size: number): Promise<{ next: number } | { file: DriveFile }> {
+      const u = URL.canParse(sessionUrl) ? new URL(sessionUrl) : null;
+      if (!u || `${u.origin}${u.pathname}` !== `${cfg.apiBase}/upload/drive/v3/files` || !u.searchParams.get("upload_id")) {
+        throw new GoogleError("업로드 주소가 올바르지 않습니다", 400);
+      }
+      const res = await fetch(u, { method: "PUT", headers: { "Content-Range": `bytes */${size}` } });
+      if (res.status === 200 || res.status === 201) return { file: (await res.json()) as DriveFile };
+      if (res.status !== 308) throw new GoogleError(`업로드 상태 조회 실패 (${res.status})`, res.status);
+      const range = res.headers.get("Range"); // absent when nothing has been received yet
+      return { next: range ? Number(range.split("-")[1]) + 1 : 0 };
     },
 
     async share(id: string) {

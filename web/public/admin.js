@@ -34,25 +34,27 @@ async function loadQuota() {
 }
 
 // Sends one byte range straight to Google. Returns the Drive file when the upload is complete,
-// otherwise the next offset to send.
+// the next offset Google confirmed, or next: null when the reply doesn't say (Range hidden by CORS).
 async function putRange(url, file, start, end) {
-  const headers = end > start ? { "Content-Range": `bytes ${start}-${end - 1}/${file.size}` } : { "Content-Range": `bytes */${file.size}` };
-  const res = await fetch(url, { method: "PUT", headers, body: end > start ? file.slice(start, end) : undefined });
+  const res = await fetch(url, { method: "PUT", headers: { "Content-Range": `bytes ${start}-${end - 1}/${file.size}` }, body: file.slice(start, end) });
   if (res.status === 200 || res.status === 201) return { file: await res.json() };
   if (res.status === 308) {
-    const range = res.headers.get("Range"); // "bytes=0-1234"; may be hidden by CORS
-    if (range) return { next: Number(range.split("-")[1]) + 1 };
-    return { next: end > start ? end : 0 };
+    const range = res.headers.get("Range"); // "bytes=0-1234"
+    return { next: range ? Number(range.split("-")[1]) + 1 : null };
   }
   throw new Error(`구글 업로드 오류 (${res.status})`);
 }
+
+// The server asks Google directly, so the answer doesn't depend on which headers CORS exposes.
+const uploadStatus = (url, file) => call("/api/uploads/status", { method: "POST", body: { uploadUrl: url, size: file.size } });
 
 async function uploadToDrive(url, file, onProgress) {
   let offset = 0;
   let failures = 0;
   for (;;) {
     try {
-      const r = await putRange(url, file, offset, Math.min(offset + CHUNK, file.size));
+      let r = await putRange(url, file, offset, Math.min(offset + CHUNK, file.size));
+      if (r.next === null) r = await uploadStatus(url, file);
       if (r.file) return r.file;
       offset = r.next;
       failures = 0;
@@ -61,8 +63,8 @@ async function uploadToDrive(url, file, onProgress) {
       if (++failures > 5) throw e;
       await new Promise((ok) => setTimeout(ok, 1000 * 2 ** failures));
       try {
-        // Ask Google how much it already has, then resume from there.
-        const s = await putRange(url, file, 0, 0);
+        // Resume from whatever Google already has.
+        const s = await uploadStatus(url, file);
         if (s.file) return s.file;
         offset = s.next;
       } catch {}
