@@ -178,6 +178,7 @@ async function login(call: ReturnType<typeof makeApp>["call"], code = "good-code
   const redirect = new URL(start.headers.get("Location")!);
   expect(redirect.searchParams.get("scope")).toContain("drive.file");
   expect(redirect.searchParams.get("access_type")).toBe("offline");
+  expect(redirect.searchParams.get("login_hint")).toBe("owner@example.com"); // Google picks the owner account by itself
   const state = redirect.searchParams.get("state")!;
   const res = await call(`/auth/callback?state=${state}&code=${code}`, { cookie: `oauth_state=${state}` });
   const sid = res.headers.getSetCookie().find((c) => c.startsWith("sid="))?.split(";")[0];
@@ -290,6 +291,10 @@ test("state 불일치, 1GB 이상, 파일함 밖 파일, 다른 출처 요청은
   const { call, cleanup } = makeApp();
   try {
     expect((await call("/auth/callback?state=a&code=good-code", { cookie: "oauth_state=b" })).status).toBe(400);
+    const cancelled = await call("/auth/callback?state=a&error=access_denied", { cookie: "oauth_state=a" });
+    expect(cancelled.status).toBe(302); // back to the login screen, no session
+    expect(cancelled.headers.get("Location")).toBe("/admin");
+    expect(cancelled.headers.getSetCookie().some((c) => c.startsWith("sid="))).toBe(false);
     const { cookie } = await login(call);
     const json = JSON_ORIGIN;
 

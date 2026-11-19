@@ -23,6 +23,7 @@
 - 2026-11-19: 비밀번호 로그인, 할 일·과제(tasks 테이블, /api/tasks, /api/today), /admin 탭(오늘/할 일·과제/파일함). 구글 환경변수 없이도 서버가 뜬다(구글 로그인 404, 파일함은 "연결 안 됨").
 - 실제 구글로는 아직 미검증: 특히 브라우저→구글 직접 업로드 CORS, 익명 공유/해제.
 
+- 2026-11-19 자동 로그인: 로그인 안 된 /admin은 바로 /auth/login(login_hint=ADMIN_EMAIL)으로 가서 구글이 클릭 없이 로그인시킨다. 탭마다 한 번만 시도(sessionStorage autoLoginTried)해 취소·실패 때 반복 없이 로그인 화면, 로그아웃하면 그 기기는 직접 로그인할 때까지 자동 로그인 안 함(localStorage noAutoLogin). 구글에서 취소하면 /auth/callback?error → /admin.
 - 2026-11-19 배포: GitHub https://github.com/Kacarong/hanger (공개 저장소, main; 업데이트마다 푸시 — 사용자 요청). 서버 /home/claude/kacarong-folio (GitHub clone) + user systemd `kacarong-folio.service`, env `~/.config/kacarong-folio/env`, 데이터 `~/.local/share/kacarong-folio`. 터널 ingress kacarong.kr → 127.0.0.1:2992, DNS CNAME 덮어씀. 업데이트: `cd ~/kacarong-folio && git pull && systemctl --user restart kacarong-folio`. 서비스 파일(deploy/kacarong-folio.service)이 바뀌면 `cp deploy/kacarong-folio.service ~/.config/systemd/user/ && systemctl --user daemon-reload` 도. 서비스는 Landlock(setpriv)으로 갇혀 있어 코드·데이터 폴더 밖을 못 읽는다(2026-11-19).
 - 2026-11-19 디자인: 공개 페이지 = introck.studio 참고(검은 배경, 큰 타이포, 스크롤 등장·이미지 패럴랙스; public/site.css·site.js). 작업공간 = 어두운 사이드바 대시보드(요약 카드 + 표 + 대화상자; public/admin.css). 노트는 메뉴에 "준비 중".
 - 2026-11-19 캘린더: 월 달력(6주)에 구글 캘린더 일정 + 날짜 있는 할 일·과제. scope `calendar.readonly`(읽기만, 일정은 서버에 저장 안 함), 구글에서 체크된 캘린더만. `/api/calendar?from&to`(최대 62일), 구글 실패해도 할 일은 나옴. 받은 scope는 settings `granted_scopes`에 저장, 캘린더 scope가 없으면 /auth/login이 prompt=consent로 다시 동의를 받는다. 빈 칸을 누르면 그 날짜로 새 할 일.

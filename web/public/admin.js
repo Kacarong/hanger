@@ -648,6 +648,13 @@ function showTab() {
 async function init() {
   me = await call("/api/me");
   if (!me.admin) {
+    // Go straight to Google, which signs the owner in without a click. Only once per tab, so a
+    // cancelled or failed login shows this screen instead of looping, and not after a logout.
+    if (me.googleEnabled && !localStorage.getItem("noAutoLogin") && !sessionStorage.getItem("autoLoginTried")) {
+      sessionStorage.setItem("autoLoginTried", "1");
+      location.replace("/auth/login");
+      return;
+    }
     $("login").hidden = false;
     $("google-login").hidden = !me.googleEnabled;
     $("password-login").onsubmit = (ev) => {
@@ -659,6 +666,8 @@ async function init() {
     };
     return;
   }
+  sessionStorage.removeItem("autoLoginTried");
+  localStorage.removeItem("noAutoLogin");
   categories = me.categories;
   taskKinds = me.taskKinds;
   $("main").hidden = false;
@@ -775,7 +784,10 @@ async function init() {
       $("pw-msg").textContent = e.message;
     }
   };
-  $("logout").onclick = () => call("/auth/logout", { method: "POST" }).then(() => location.reload());
+  $("logout").onclick = () => {
+    localStorage.setItem("noAutoLogin", "1"); // otherwise the reload would sign straight back in
+    call("/auth/logout", { method: "POST" }).then(() => location.reload());
+  };
 
   window.onhashchange = showTab;
   showTab();

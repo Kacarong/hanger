@@ -51,7 +51,8 @@ async function check(res: Response, what: string): Promise<Response> {
 export function createGoogle(cfg: GoogleConfig, db: Db) {
   let accessToken: { token: string; expiresAt: number } | null = null;
 
-  function authRedirect(state: string, forceConsent: boolean): string {
+  // loginHint makes Google pick that account by itself, so a returning owner signs in without a click.
+  function authRedirect(state: string, forceConsent: boolean, loginHint: string): string {
     const u = new URL(cfg.authUrl);
     u.search = new URLSearchParams({
       client_id: cfg.clientId,
@@ -61,6 +62,7 @@ export function createGoogle(cfg: GoogleConfig, db: Db) {
       access_type: "offline",
       include_granted_scopes: "true",
       state,
+      ...(loginHint ? { login_hint: loginHint } : {}),
       ...(forceConsent ? { prompt: "consent" } : {}),
     }).toString();
     return u.toString();

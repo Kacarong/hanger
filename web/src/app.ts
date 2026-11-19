@@ -576,13 +576,15 @@ ${items.length ? `<section class="index" id="index"><h2 class="section-title rev
         status: 302,
         headers: {
           // Ask again when the saved grant lacks a scope (e.g. calendar, added later) so Google issues a new refresh token.
-          Location: google.authRedirect(state, !db.getSetting("refresh_token") || !google.calendarGranted()),
+          Location: google.authRedirect(state, !db.getSetting("refresh_token") || !google.calendarGranted(), cfg.adminEmail),
           "Set-Cookie": setCookie("oauth_state", state, 600),
         },
       });
     }
 
     if (path === "/auth/callback" && req.method === "GET") {
+      // Cancelled or denied on Google's page: back to the login screen instead of an error page.
+      if (url.searchParams.get("error")) return new Response(null, { status: 302, headers: { Location: "/admin", "Set-Cookie": setCookie("oauth_state", "", 0) } });
       const state = url.searchParams.get("state");
       const code = url.searchParams.get("code");
       if (!state || state !== cookies(req).oauth_state || !code) return new Response("로그인 요청이 올바르지 않습니다. 다시 시도해 주세요.", { status: 400 });
