@@ -577,24 +577,27 @@ ${items.length ? `<section class="index" id="index"><h2 class="section-title rev
         headers: {
           // Ask for the full grant only when none is saved or it lacks a scope (e.g. calendar, added later).
           Location: google.authRedirect(state, !db.getSetting("refresh_token") || !google.calendarGranted(), cfg.adminEmail),
-          "Set-Cookie": setCookie("oauth_state", state, 600),
+          // One cookie per attempt, so two tabs signing in at once don't overwrite each other's state.
+          "Set-Cookie": setCookie(`oauth_state_${state}`, "1", 600),
         },
       });
     }
 
     if (path === "/auth/callback" && req.method === "GET") {
-      // Cancelled or denied on Google's page: back to the login screen instead of an error page.
-      if (url.searchParams.get("error")) return new Response(null, { status: 302, headers: { Location: "/admin", "Set-Cookie": setCookie("oauth_state", "", 0) } });
-      const state = url.searchParams.get("state");
+      const state = url.searchParams.get("state") ?? "";
+      const stateCookie = `oauth_state_${state}`;
+      const validState = /^[0-9a-f-]{36}$/.test(state) && cookies(req)[stateCookie] === "1";
+      const headers = new Headers({ Location: "/admin" });
+      if (validState) headers.append("Set-Cookie", setCookie(stateCookie, "", 0));
+      // Cancelled on Google's page, an unknown or expired attempt, or a used link opened again:
+      // no session from it, back to /admin (the login screen, or the workspace if already signed in).
       const code = url.searchParams.get("code");
-      if (!state || state !== cookies(req).oauth_state || !code) return new Response("로그인 요청이 올바르지 않습니다. 다시 시도해 주세요.", { status: 400 });
+      if (url.searchParams.get("error") || !validState || !code) return new Response(null, { status: 302, headers });
       const r = await google.exchangeCode(code);
       if (!r.emailVerified || !cfg.adminEmail || r.email !== cfg.adminEmail) return new Response("관리자 계정이 아닙니다.", { status: 403 });
       // A plain sign-in gets no refresh token; keep the saved grant then.
       if (r.tokens.refresh_token) google.saveTokens(r.tokens);
-      const headers = new Headers({ Location: "/admin" });
       startSession(r.email, headers);
-      headers.append("Set-Cookie", setCookie("oauth_state", "", 0));
       return new Response(null, { status: 302, headers });
     }
 

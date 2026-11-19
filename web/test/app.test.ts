@@ -184,7 +184,7 @@ async function login(call: ReturnType<typeof makeApp>["call"], code = "good-code
   expect(redirect.searchParams.get("access_type")).toBe("offline");
   expect(redirect.searchParams.get("login_hint")).toBe("owner@example.com"); // Google picks the owner account by itself
   const state = redirect.searchParams.get("state")!;
-  const res = await call(`/auth/callback?state=${state}&code=${code}`, { cookie: `oauth_state=${state}` });
+  const res = await call(`/auth/callback?state=${state}&code=${code}`, { cookie: `oauth_state_${state}=1` });
   const sid = res.headers.getSetCookie().find((c) => c.startsWith("sid="))?.split(";")[0];
   return { res, cookie: sid };
 }
@@ -294,11 +294,23 @@ test("state 불일치, 1GB 이상, 파일함 밖 파일, 다른 출처 요청은
   loginEmail = "owner@example.com";
   const { call, cleanup } = makeApp();
   try {
-    expect((await call("/auth/callback?state=a&code=good-code", { cookie: "oauth_state=b" })).status).toBe(400);
-    const cancelled = await call("/auth/callback?state=a&error=access_denied", { cookie: "oauth_state=a" });
-    expect(cancelled.status).toBe(302); // back to the login screen, no session
-    expect(cancelled.headers.get("Location")).toBe("/admin");
-    expect(cancelled.headers.getSetCookie().some((c) => c.startsWith("sid="))).toBe(false);
+    const noSession = (r: Response) => {
+      expect(r.status).toBe(302); // back to /admin, no session from it
+      expect(r.headers.get("Location")).toBe("/admin");
+      expect(r.headers.getSetCookie().some((c) => c.startsWith("sid="))).toBe(false);
+    };
+    const stateOf = async () => new URL((await call("/auth/login")).headers.get("Location")!).searchParams.get("state")!;
+    const [s1, s2] = [await stateOf(), await stateOf()];
+    noSession(await call(`/auth/callback?state=${s1}&code=good-code`, { cookie: `oauth_state_${s2}=1` })); // someone else's state
+    noSession(await call(`/auth/callback?state=${s1}&error=access_denied`, { cookie: `oauth_state_${s1}=1` })); // cancelled on Google's page
+    // Two tabs signing in at the same time: both attempts are accepted.
+    const both = `oauth_state_${s1}=1; oauth_state_${s2}=1`;
+    for (const s of [s2, s1]) {
+      const r = await call(`/auth/callback?state=${s}&code=good-code`, { cookie: both });
+      expect(r.headers.getSetCookie().some((c) => c.startsWith("sid="))).toBe(true);
+      expect(r.headers.getSetCookie()).toContain(`oauth_state_${s}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0; Secure`);
+    }
+    noSession(await call(`/auth/callback?state=${s1}&code=good-code`)); // the used link opened again
     const { cookie } = await login(call);
     const json = JSON_ORIGIN;
 
