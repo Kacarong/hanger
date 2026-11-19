@@ -171,7 +171,7 @@ ${items.length ? works : `<p class="empty reveal">아직 공개된 작업이 없
 ${items.length ? `<section class="index" id="index"><h2 class="section-title reveal">INDEX</h2><ul>${index}</ul></section>` : ""}
 <footer class="foot" id="contact">
 <p class="foot-big reveal">LET'S MAKE<br>SOMETHING.</p>
-<div class="foot-row"><span>KACARONG.KR</span><a href="/admin">WORKSPACE</a></div>
+<div class="foot-row"><span>KACARONG.KR</span><a href="/privacy">PRIVACY</a><a href="/admin">WORKSPACE</a></div>
 </footer>
 <script src="/static/site.js" defer></script>
 </body></html>`;
@@ -369,6 +369,7 @@ ${items.length ? `<section class="index" id="index"><h2 class="section-title rev
 
     if (path === "/" && req.method === "GET") return renderPublic();
     if (path === "/admin" && req.method === "GET") return new Response(Bun.file(join(PUBLIC_DIR, "admin.html")));
+    if (path === "/privacy" && req.method === "GET") return new Response(Bun.file(join(PUBLIC_DIR, "privacy.html")));
 
     const t = path.match(/^\/thumb\/(\d+)$/);
     if (t && req.method === "GET") return thumb(Number(t[1]), req);

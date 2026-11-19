@@ -289,6 +289,19 @@ test("공개 페이지는 제목·메모를 HTML 이스케이프", async () => {
   }
 });
 
+test("개인정보처리방침 페이지가 열리고 공개 페이지에서 링크됨", async () => {
+  const { call, cleanup } = makeApp();
+  try {
+    const res = await call("/privacy");
+    expect(res.status).toBe(200);
+    expect(res.headers.get("Content-Type")).toContain("text/html");
+    expect(await res.text()).toContain("개인정보처리방침");
+    expect(await (await call("/")).text()).toContain('href="/privacy"');
+  } finally {
+    cleanup();
+  }
+});
+
 test("첫 업로드를 동시에 여러 개 시작해도 드라이브 폴더는 하나만 생성", async () => {
   loginEmail = "owner@example.com";
   const { call, db, cleanup } = makeApp();
