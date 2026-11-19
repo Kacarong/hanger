@@ -342,20 +342,24 @@ function showPicked() {
 
 // 파일함 화면 어디에 끌어다 놓아도 올리기 창이 열리고 그 파일들이 골라진다.
 function setupDrop() {
-  const canDrop = (ev) => ev.dataTransfer?.types.includes("Files") && currentTab() === "files" && me.driveConnected && !$("upload-btn").disabled;
+  // 파일을 끌어다 놓을 때 브라우저가 그 파일을 열어 버리지 않게(업로드 중이면 끊긴다) 기본 동작은 늘 막고,
+  // 받을 수 있을 때만 골라 넣는다.
+  const isFiles = (ev) => ev.dataTransfer?.types.includes("Files");
+  const canDrop = () => currentTab() === "files" && me.driveConnected && !$("upload-btn").disabled;
   document.addEventListener("dragover", (ev) => {
-    if (!canDrop(ev)) return;
+    if (!isFiles(ev)) return;
     ev.preventDefault();
-    document.body.classList.add("dragging");
+    ev.dataTransfer.dropEffect = canDrop() ? "copy" : "none";
+    document.body.classList.toggle("dragging", canDrop());
   });
   document.addEventListener("dragleave", (ev) => {
     if (!ev.relatedTarget) document.body.classList.remove("dragging"); // pointer left the window
   });
   document.addEventListener("drop", (ev) => {
     document.body.classList.remove("dragging");
-    if (!canDrop(ev)) return;
+    if (!isFiles(ev)) return;
     ev.preventDefault();
-    if (!ev.dataTransfer.files.length) return;
+    if (!canDrop() || !ev.dataTransfer.files.length) return;
     if (!$("upload-dialog").open) openUpload();
     $("files").files = ev.dataTransfer.files;
     showPicked();
