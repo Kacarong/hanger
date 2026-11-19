@@ -13,6 +13,7 @@ const ICONS = {
   folder: '<path d="M3 6.5A1.5 1.5 0 0 1 4.5 5H9l2 2.5h8.5A1.5 1.5 0 0 1 21 9v9.5a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 18.5z"/>',
   globe: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.7 3.8 5.7 3.8 9s-1.3 6.3-3.8 9c-2.5-2.7-3.8-5.7-3.8-9S9.5 5.7 12 3z"/>',
   logout: '<path d="M15 4h4v16h-4M10 8l-4 4 4 4M6 12h10"/>',
+  key: '<circle cx="8" cy="15" r="4"/><path d="m11 12 9-9M16 7l3 3M14 9l2 2"/>',
   search: '<circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>',
   plus: '<path d="M12 5v14M5 12h14"/>',
   upload: '<path d="M12 15V4M7 9l5-5 5 5M4 15v4a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-4"/>',
@@ -566,6 +567,24 @@ async function init() {
     loadCalendar().catch(showError);
   };
   $("menu-btn").onclick = () => $("main").classList.toggle("nav-open");
+  $("change-password").onclick = () => {
+    $("pw-current-row").hidden = me.loginMethod !== "password"; // a Google login already proved who you are
+    $("pw-current").required = me.loginMethod === "password";
+    $("password-form").reset();
+    $("pw-msg").textContent = "";
+    $("password-dialog").showModal();
+  };
+  $("password-form").onsubmit = async (ev) => {
+    ev.preventDefault();
+    if ($("pw-new").value !== $("pw-new2").value) return ($("pw-msg").textContent = "새 비밀번호 두 칸이 다릅니다.");
+    try {
+      await call("/api/password", { method: "POST", body: { current: $("pw-current").value, password: $("pw-new").value } });
+      $("password-dialog").close();
+      $("msg").textContent = "비밀번호를 바꿨습니다. 다른 기기의 로그인은 모두 풀렸습니다.";
+    } catch (e) {
+      $("pw-msg").textContent = e.message;
+    }
+  };
   $("logout").onclick = () => call("/auth/logout", { method: "POST" }).then(() => location.reload());
 
   window.onhashchange = showTab;

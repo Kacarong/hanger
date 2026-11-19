@@ -11,6 +11,13 @@ const io = new IntersectionObserver(
 );
 document.querySelectorAll(".reveal").forEach((el) => io.observe(el));
 
+// 썸네일이 없으면(드라이브가 아직 못 만든 경우 등) 제목 카드로 바꾼다. CSP 때문에 인라인 onerror 대신 여기서.
+const noThumb = (img) => (img.parentNode.classList.add("no-thumb"), img.remove());
+document.querySelectorAll(".work-media img").forEach((img) => {
+  if (img.complete && img.naturalWidth === 0) noThumb(img); // already failed before this script ran
+  else img.addEventListener("error", () => noThumb(img));
+});
+
 const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
 const media = [...document.querySelectorAll(".work-media")];
 let ticking = false;

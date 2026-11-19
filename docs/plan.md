@@ -7,7 +7,7 @@
 - 캘린더: 사용자 구글 캘린더와 연동(구글 OAuth에 캘린더 scope 추가 필요). 과제·할 일 날짜도 캘린더에 표시.
 - 노트: 노션 같은 블록 편집기. 노트 속 체크박스+날짜 = 할 일(오늘·캘린더에 표시). 편집기 라이브러리 선택은 노트 단계에서.
 - 포트폴리오: 공개용과 개인용 구분. 세부는 차차.
-- 로그인: 비밀번호 로그인 먼저(`bun run set-password`(8자 이상, 기본값 kacarong), 5번 틀리면 15분 잠금). 구글 정보가 오면 구글 로그인·드라이브·캘린더를 켠다.
+- 로그인: 비밀번호 로그인(5번 틀리면 15분 잠금) + 관리자 구글 계정 로그인. 비밀번호는 12자 이상, "kacarong"이 들어가면 안 된다(옛 기본값이 공개 저장소 기록에 있어서, 그런 비밀번호는 맞아도 로그인을 거부). 바꾸기: 작업공간 왼쪽 아래 "비밀번호 바꾸기"(비밀번호 로그인이면 지금 비밀번호 필요) 또는 서버에서 `bun run set-password`. 바꾸면 다른 로그인은 모두 해제.
 - 순서: 오늘·과제/할 일(완료) → 캘린더 → 노트 → 클라우드 첨부 → 포트폴리오 공개/개인 구분.
 
 ## 결정 (2026-11-18 사용자와 합의)
@@ -26,6 +26,8 @@
 - 2026-11-19 배포: GitHub https://github.com/Kacarong/hanger (공개 저장소, main; 업데이트마다 푸시 — 사용자 요청). 서버 /home/claude/kacarong-folio (GitHub clone) + user systemd `kacarong-folio.service`, env `~/.config/kacarong-folio/env`, 데이터 `~/.local/share/kacarong-folio`. 터널 ingress kacarong.kr → 127.0.0.1:2992, DNS CNAME 덮어씀. 업데이트: `cd ~/kacarong-folio && git pull && systemctl --user restart kacarong-folio`.
 - 2026-11-19 디자인: 공개 페이지 = introck.studio 참고(검은 배경, 큰 타이포, 스크롤 등장·이미지 패럴랙스; public/site.css·site.js). 작업공간 = 어두운 사이드바 대시보드(요약 카드 + 표 + 대화상자; public/admin.css). 노트는 메뉴에 "준비 중".
 - 2026-11-19 캘린더: 월 달력(6주)에 구글 캘린더 일정 + 날짜 있는 할 일·과제. scope `calendar.readonly`(읽기만, 일정은 서버에 저장 안 함), 구글에서 체크된 캘린더만. `/api/calendar?from&to`(최대 62일), 구글 실패해도 할 일은 나옴. 받은 scope는 settings `granted_scopes`에 저장, 캘린더 scope가 없으면 /auth/login이 prompt=consent로 다시 동의를 받는다. 빈 칸을 누르면 그 날짜로 새 할 일.
+
+- 2026-11-19 보안: 모든 응답에 CSP(스크립트는 자기 파일만, 인라인 스크립트·핸들러 금지, connect-src는 자기+구글 API), X-Frame-Options DENY, nosniff, HSTS, Referrer-Policy. /admin·/api·/auth는 Cache-Control no-store. API의 POST/PATCH/DELETE는 Origin이 이 사이트일 때만.
 
 ## 남은 일
 1. 사용자: OAuth 클라이언트(웹 애플리케이션, 리디렉션 URI https://kacarong.kr/auth/callback, 프로덕션 게시, Drive·Calendar API 사용 설정) + 관리자 이메일.

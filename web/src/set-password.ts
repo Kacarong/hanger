@@ -2,18 +2,20 @@
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { openDb } from "./db";
+import { MIN_PASSWORD_LENGTH, passwordProblem } from "./password";
 
 const dataDir = process.env.DATA_DIR ?? join(import.meta.dir, "..", "data");
 mkdirSync(dataDir, { recursive: true });
 
-process.stdout.write("새 비밀번호 (8자 이상): ");
+process.stdout.write(`새 비밀번호 (${MIN_PASSWORD_LENGTH}자 이상): `);
 let password = "";
 for await (const line of console) {
   password = line.trim();
   break;
 }
-if (password.length < 8) {
-  console.error("\n8자 이상이어야 합니다.");
+const problem = passwordProblem(password);
+if (problem) {
+  console.error(`\n${problem}.`);
   process.exit(1);
 }
 const db = openDb(join(dataDir, "folio.db"));

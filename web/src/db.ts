@@ -84,6 +84,12 @@ export function openDb(path: string) {
     createSession(id: string, email: string, expiresAt: number) {
       db.query("INSERT INTO sessions (id, email, expires_at) VALUES (?, ?, ?)").run(id, email, expiresAt);
     },
+    deleteOtherSessions(keepId: string) {
+      db.query("DELETE FROM sessions WHERE id != ?").run(keepId);
+    },
+    deleteExpiredSessions() {
+      db.query("DELETE FROM sessions WHERE expires_at <= ?").run(Date.now());
+    },
     getSession(id: string): { email: string } | null {
       return db.query("SELECT email FROM sessions WHERE id = ? AND expires_at > ?").get(id, Date.now()) as { email: string } | null;
     },

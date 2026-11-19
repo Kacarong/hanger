@@ -145,6 +145,7 @@ export function createGoogle(cfg: GoogleConfig, db: Db) {
   }
 
   return {
+    apiOrigin: new URL(cfg.apiBase).origin, // where the browser sends upload bytes
     authRedirect,
     exchangeCode,
     saveTokens,

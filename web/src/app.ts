@@ -3,6 +3,7 @@ import { mkdirSync, existsSync, readdirSync, readFileSync, rmSync } from "node:f
 import { join } from "node:path";
 import { CATEGORIES, TASK_KINDS, type Db, type FileRow, type TaskFields } from "./db";
 import { GoogleError, type CalendarEvent, type Google } from "./google";
+import { passwordProblem } from "./password";
 
 export const MAX_FILE_SIZE = 1024 ** 3; // files must be under 1GB
 const SESSION_DAYS = 30;
@@ -96,12 +97,16 @@ export function createApp(cfg: AppConfig, db: Db, google: Google) {
   }
 
   // Sessions are only ever created for the owner (password or the admin Google account).
-  function isAdmin(req: Request): boolean {
+  // The subject is "password" or the Google email.
+  function session(req: Request): { id: string; subject: string } | null {
     const sid = cookies(req).sid;
-    return !!sid && !!db.getSession(sid);
+    const s = sid ? db.getSession(sid) : null;
+    return s ? { id: sid!, subject: s.email } : null;
   }
+  const isAdmin = (req: Request) => !!session(req);
 
   function startSession(subject: string, headers: Headers) {
+    db.deleteExpiredSessions();
     const sid = crypto.randomUUID() + crypto.randomUUID();
     db.createSession(sid, subject, Date.now() + SESSION_DAYS * 86400_000);
     headers.append("Set-Cookie", setCookie("sid", sid, SESSION_DAYS * 86400));
@@ -166,7 +171,7 @@ export function createApp(cfg: AppConfig, db: Db, google: Google) {
       .map(
         (f, i) => `<article class="work reveal">
 <a class="work-media" href="${escapeHtml(f.web_view_link)}" target="_blank" rel="noopener">
-<img src="/thumb/${f.id}" alt="" loading="lazy" onerror="this.parentNode.classList.add('no-thumb');this.remove()"><span class="work-media-label">${escapeHtml(f.title)}</span></a>
+<img src="/thumb/${f.id}" alt="" loading="lazy"><span class="work-media-label">${escapeHtml(f.title)}</span></a>
 <div class="work-info"><span class="work-num">${num(i)}</span>
 <h3><a href="${escapeHtml(f.web_view_link)}" target="_blank" rel="noopener">${escapeHtml(f.title)}</a></h3>
 <div class="chips">${chips(f)}</div>
@@ -227,8 +232,10 @@ ${items.length ? `<section class="index" id="index"><h2 class="section-title rev
     const method = req.method;
 
     if (path === "/api/me" && method === "GET") {
+      const s = session(req);
       return json({
-        admin: isAdmin(req),
+        admin: !!s,
+        loginMethod: s ? (s.subject === "password" ? "password" : "google") : null,
         googleEnabled: cfg.googleEnabled,
         driveConnected: !!db.getSetting("refresh_token"),
         calendarConnected: !!db.getSetting("refresh_token") && google.calendarGranted(),
@@ -241,10 +248,29 @@ ${items.length ? `<section class="index" id="index"><h2 class="section-title rev
       return json(db.listFiles({ publicOnly: true }).map(publicView));
     }
 
-    if (!isAdmin(req)) return json({ error: "로그인이 필요합니다" }, 401);
-    // Session cookies are SameSite=Lax; also refuse state changes from other origins.
-    if (method !== "GET" && req.headers.get("Origin") && req.headers.get("Origin") !== origin) {
+    const s = session(req);
+    if (!s) return json({ error: "로그인이 필요합니다" }, 401);
+    // Session cookies are SameSite=Lax; also refuse state changes that don't come from this site.
+    // Browsers always send Origin on POST/PATCH/DELETE from fetch.
+    if (method !== "GET" && req.headers.get("Origin") !== origin) {
       return json({ error: "잘못된 요청 출처" }, 403);
+    }
+
+    // Changing the password logs out every other session. A password session must prove the
+    // current password; a Google session already proved who it is.
+    if (path === "/api/password" && method === "POST") {
+      const b = await body(req);
+      const next = typeof b.password === "string" ? b.password : "";
+      const problem = passwordProblem(next);
+      if (problem) return json({ error: problem }, 400);
+      if (s.subject === "password") {
+        const hash = db.getSetting("password_hash");
+        const current = typeof b.current === "string" ? b.current : "";
+        if (!hash || !current || !(await Bun.password.verify(current, hash))) return json({ error: "지금 비밀번호가 틀렸습니다" }, 403);
+      }
+      db.setSetting("password_hash", await Bun.password.hash(next));
+      db.deleteOtherSessions(s.id);
+      return json({ ok: true });
     }
 
     if (path === "/api/today" && method === "GET") {
@@ -442,6 +468,11 @@ ${items.length ? `<section class="index" id="index"><h2 class="section-title rev
       if (!hash || typeof password !== "string" || !password || !(await Bun.password.verify(password, hash))) {
         return json({ error: hash ? "비밀번호가 틀렸습니다" : "비밀번호가 아직 설정되지 않았습니다" }, 401);
       }
+      // Right password, but one that is public or too short (the old default): don't let it in.
+      if (passwordProblem(password)) {
+        const how = cfg.googleEnabled ? "구글 계정으로 로그인한 뒤 왼쪽 아래 \"비밀번호 바꾸기\"에서" : "서버에서 bun run set-password로";
+        return json({ error: `이 비밀번호는 안전하지 않아 더는 쓸 수 없습니다. ${how} 새 비밀번호를 정해 주세요.` }, 403);
+      }
       const i = loginFailures.indexOf(t);
       if (i >= 0) loginFailures.splice(i, 1); // it succeeded after all
       const headers = new Headers();
@@ -486,13 +517,40 @@ ${items.length ? `<section class="index" id="index"><h2 class="section-title rev
     return new Response("not found", { status: 404 });
   }
 
+  // Only our own files may run or load; the browser talks to nothing but this site and Google's upload endpoint.
+  const csp = [
+    "default-src 'self'",
+    "script-src 'self'",
+    "style-src 'self' 'unsafe-inline'",
+    "img-src 'self'",
+    `connect-src 'self' ${google.apiOrigin}`,
+    "object-src 'none'",
+    "base-uri 'none'",
+    "form-action 'self'",
+    "frame-ancestors 'none'",
+  ].join("; ");
+
+  function withSecurityHeaders(res: Response, path: string): Response {
+    const h = res.headers;
+    h.set("Content-Security-Policy", csp);
+    h.set("X-Frame-Options", "DENY");
+    h.set("X-Content-Type-Options", "nosniff");
+    h.set("Referrer-Policy", "strict-origin-when-cross-origin");
+    h.set("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
+    if (secure) h.set("Strict-Transport-Security", "max-age=31536000");
+    // Private pages and data must never sit in Cloudflare's or the browser's cache.
+    if (path === "/admin" || path.startsWith("/api/") || path.startsWith("/auth/")) h.set("Cache-Control", "no-store");
+    return res;
+  }
+
   return async function fetch(req: Request): Promise<Response> {
+    const path = new URL(req.url).pathname;
     try {
-      return await handle(req);
+      return withSecurityHeaders(await handle(req), path);
     } catch (e) {
-      if (e instanceof GoogleError) return json({ error: e.message }, e.status === 401 || e.status === 400 ? e.status : 502);
+      if (e instanceof GoogleError) return withSecurityHeaders(json({ error: e.message }, e.status === 401 || e.status === 400 ? e.status : 502), path);
       console.error(e);
-      return json({ error: "서버 오류" }, 500);
+      return withSecurityHeaders(json({ error: "서버 오류" }, 500), path);
     }
   };
 }

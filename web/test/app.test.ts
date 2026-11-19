@@ -212,7 +212,7 @@ test("관리자 로그인 → 업로드 → 공유/공개 → 공개 페이지 �
     expect(drive.get(rootId)?.mimeType).toBe("application/vnd.google-apps.folder");
 
     const status = (u = uploadUrl) =>
-      call("/api/uploads/status", { method: "POST", cookie, headers: { "Content-Type": "application/json" }, body: JSON.stringify({ uploadUrl: u, size }) });
+      call("/api/uploads/status", { method: "POST", cookie, headers: JSON_ORIGIN, body: JSON.stringify({ uploadUrl: u, size }) });
     expect(await (await status()).json()).toEqual({ next: 0 });
 
     const first = await fetch(uploadUrl, { method: "PUT", headers: { "Content-Range": `bytes 0-262143/${size}` }, body: new Uint8Array(262144) });
@@ -230,7 +230,7 @@ test("관리자 로그인 → 업로드 → 공유/공개 → 공개 페이지 �
     const reg = await call("/api/files", {
       method: "POST",
       cookie,
-      headers: { "Content-Type": "application/json" },
+      headers: JSON_ORIGIN,
       body: JSON.stringify({ driveId: driveFile.id, category: "포트폴리오", tags: "로고,브랜딩", note: "2026 작업" }),
     });
     expect(reg.status).toBe(201);
@@ -247,7 +247,7 @@ test("관리자 로그인 → 업로드 → 공유/공개 → 공개 페이지 �
     expect((await call(`/thumb/${row.id}`)).status).toBe(404);
 
     // Publishing also turns on anyone-with-link sharing on Drive.
-    const pub = await call(`/api/files/${row.id}/public`, { method: "POST", cookie, headers: { "Content-Type": "application/json" }, body: JSON.stringify({ public: true }) });
+    const pub = await call(`/api/files/${row.id}/public`, { method: "POST", cookie, headers: JSON_ORIGIN, body: JSON.stringify({ public: true }) });
     expect(await pub.json()).toMatchObject({ shared: 1, public: 1 });
     expect(drive.get(driveFile.id)!.anyone).toBe(true);
     const page = await (await call("/")).text();
@@ -258,13 +258,13 @@ test("관리자 로그인 → 업로드 → 공유/공개 → 공개 페이지 �
     expect(await thumb.text()).toBe("PNGDATA");
 
     // Turning sharing off makes it private on Drive and drops it from the public page.
-    const off = await call(`/api/files/${row.id}/share`, { method: "POST", cookie, headers: { "Content-Type": "application/json" }, body: JSON.stringify({ shared: false }) });
+    const off = await call(`/api/files/${row.id}/share`, { method: "POST", cookie, headers: JSON_ORIGIN, body: JSON.stringify({ shared: false }) });
     expect(await off.json()).toMatchObject({ shared: 0, public: 0 });
     expect(drive.get(driveFile.id)!.anyone).toBe(false);
     expect(await (await call("/")).text()).not.toContain("작품.png");
 
     // Delete moves the Drive file to trash.
-    expect((await call(`/api/files/${row.id}`, { method: "DELETE", cookie })).status).toBe(200);
+    expect((await call(`/api/files/${row.id}`, { method: "DELETE", cookie, headers: JSON_ORIGIN })).status).toBe(200);
     expect(drive.get(driveFile.id)!.trashed).toBe(true);
     expect(await (await call("/api/files", { cookie })).json()).toHaveLength(0);
   } finally {
@@ -291,7 +291,7 @@ test("state 불일치, 1GB 이상, 파일함 밖 파일, 다른 출처 요청은
   try {
     expect((await call("/auth/callback?state=a&code=good-code", { cookie: "oauth_state=b" })).status).toBe(400);
     const { cookie } = await login(call);
-    const json = { "Content-Type": "application/json" };
+    const json = JSON_ORIGIN;
 
     const big = await call("/api/uploads", { method: "POST", cookie, headers: json, body: JSON.stringify({ name: "a.zip", size: 1024 ** 3, mimeType: "" }) });
     expect(big.status).toBe(413);
@@ -302,6 +302,8 @@ test("state 불일치, 1GB 이상, 파일함 밖 파일, 다른 출처 요청은
 
     const cross = await call("/api/uploads", { method: "POST", cookie, headers: { ...json, Origin: "https://evil.example" }, body: JSON.stringify({ name: "a", size: 1 }) });
     expect(cross.status).toBe(403);
+    const noOrigin = await call("/api/uploads", { method: "POST", cookie, headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: "a", size: 1 }) });
+    expect(noOrigin.status).toBe(403);
   } finally {
     cleanup();
   }
@@ -340,7 +342,7 @@ test("첫 업로드를 동시에 여러 개 시작해도 드라이브 폴더는 
     const { cookie } = await login(call);
     const before = foldersCreated;
     const start = () =>
-      call("/api/uploads", { method: "POST", cookie, headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: "a.txt", size: 10, mimeType: "text/plain" }) });
+      call("/api/uploads", { method: "POST", cookie, headers: JSON_ORIGIN, body: JSON.stringify({ name: "a.txt", size: 10, mimeType: "text/plain" }) });
     const results = await Promise.all([start(), start(), start()]);
     expect(results.map((r) => r.status)).toEqual([200, 200, 200]);
     expect(foldersCreated - before).toBe(1);
@@ -527,6 +529,77 @@ test("정적 파일 주소에 버전이 붙고, 그 주소로 파일이 열림",
     expect(admin).toMatch(/href="\/static\/admin\.css\?v=[0-9a-f]{10}"/);
     expect(await (await call(js!)).text()).toContain("loadCalendar");
     expect(await (await call("/")).text()).toMatch(/\/static\/site\.css\?v=[0-9a-f]{10}"[\s\S]*\/static\/site\.js\?v=[0-9a-f]{10}"/);
+  } finally {
+    cleanup();
+  }
+});
+
+test("공개된 옛 기본 비밀번호·짧은 비밀번호는 맞아도 로그인 거부", async () => {
+  const { call, db, cleanup } = makeApp();
+  try {
+    for (const weak of ["kacarong", "kacarong2026!!", "short1!"]) {
+      db.setSetting("password_hash", await Bun.password.hash(weak));
+      const { res, cookie } = await passwordLogin(call, weak);
+      expect(res.status).toBe(403);
+      expect(cookie).toBeUndefined();
+      expect(((await res.json()) as { error: string }).error).toContain("비밀번호 바꾸기");
+    }
+  } finally {
+    cleanup();
+  }
+});
+
+test("비밀번호 바꾸기: 비밀번호 로그인은 지금 비밀번호 확인, 바꾸면 다른 로그인은 모두 해제", async () => {
+  loginEmail = "owner@example.com";
+  const { call, db, cleanup } = makeApp();
+  try {
+    db.setSetting("password_hash", await Bun.password.hash("correct horse battery"));
+    const a = (await passwordLogin(call, "correct horse battery")).cookie!;
+    const b = (await passwordLogin(call, "correct horse battery")).cookie!;
+    expect(await (await call("/api/me", { cookie: a })).json()).toMatchObject({ admin: true, loginMethod: "password" });
+    const change = (cookie: string | undefined, body: object, headers: Record<string, string> = JSON_ORIGIN) =>
+      call("/api/password", { method: "POST", cookie, headers, body: JSON.stringify(body) });
+
+    expect((await change(undefined, { password: "a brand new secret" })).status).toBe(401);
+    expect((await change(a, { current: "correct horse battery", password: "a brand new secret" }, { "Content-Type": "application/json" })).status).toBe(403); // no Origin
+    expect((await change(a, { password: "a brand new secret" })).status).toBe(403); // current missing
+    expect((await change(a, { current: "wrong wrong wrong", password: "a brand new secret" })).status).toBe(403);
+    expect((await change(a, { current: "correct horse battery", password: "too short" })).status).toBe(400);
+    expect((await change(a, { current: "correct horse battery", password: "my kacarong password" })).status).toBe(400);
+
+    expect((await change(a, { current: "correct horse battery", password: "a brand new secret" })).status).toBe(200);
+    expect((await call("/api/tasks", { cookie: a })).status).toBe(200); // this device stays logged in
+    expect((await call("/api/tasks", { cookie: b })).status).toBe(401); // others are logged out
+    expect((await passwordLogin(call, "correct horse battery")).res.status).toBe(401);
+    expect((await passwordLogin(call, "a brand new secret")).res.status).toBe(204);
+
+    // A Google login can set it without the current one (e.g. when the old one was the public default).
+    const g = (await login(call)).cookie!;
+    expect(await (await call("/api/me", { cookie: g })).json()).toMatchObject({ loginMethod: "google" });
+    expect((await change(g, { password: "set from google login" })).status).toBe(200);
+    expect((await passwordLogin(call, "set from google login")).res.status).toBe(204);
+    expect((await call("/api/tasks", { cookie: a })).status).toBe(401);
+  } finally {
+    cleanup();
+  }
+});
+
+test("보안 헤더: CSP·프레임 금지·nosniff·HSTS, 개인 데이터는 캐시 금지", async () => {
+  const { call, cleanup } = makeApp({ googleEnabled: false });
+  try {
+    for (const path of ["/", "/admin", "/api/me", "/privacy", "/nope"]) {
+      const h = (await call(path)).headers;
+      expect(h.get("Content-Security-Policy")).toContain("script-src 'self';");
+      expect(h.get("Content-Security-Policy")).toContain("frame-ancestors 'none'");
+      expect(h.get("X-Frame-Options")).toBe("DENY");
+      expect(h.get("X-Content-Type-Options")).toBe("nosniff");
+      expect(h.get("Strict-Transport-Security")).toContain("max-age=");
+    }
+    expect((await call("/")).headers.get("Content-Security-Policy")).toContain(`connect-src 'self' ${fake.url.origin}`);
+    expect((await call("/admin")).headers.get("Cache-Control")).toBe("no-store");
+    expect((await call("/api/me")).headers.get("Cache-Control")).toBe("no-store");
+    expect((await call("/")).headers.get("Cache-Control")).toBeNull();
+    expect(await (await call("/")).text()).not.toContain("onerror="); // inline handlers would be blocked by the CSP
   } finally {
     cleanup();
   }
