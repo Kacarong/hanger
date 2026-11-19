@@ -435,7 +435,7 @@ ${items.length ? `<section class="index" id="index"><h2 class="section-title rev
     if (path === "/api/notion/import" && method === "POST") {
       if (notionJob?.status === "running") return json({ error: "이미 노션에서 가져오는 중입니다" }, 409);
       const token = str((await body(req)).token, 300);
-      if (!token) return json({ error: "노션 통합 시크릿을 넣어 주세요" }, 400);
+      if (!token) return json({ error: "노션 토큰을 넣어 주세요" }, 400);
       const job = (notionJob = newNotionJob());
       const saveFile = async (name: string, mime: string, bytes: Blob) => {
         const d = await google.upload(name, mime, bytes, origin);

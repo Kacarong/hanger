@@ -107,7 +107,7 @@ export async function importNotion(o: {
         await Bun.sleep(wait !== null ? Number(wait) * 1000 : 1000 * 2 ** attempt);
         continue;
       }
-      if (res.status === 401) throw new NotionError("노션 토큰이 올바르지 않습니다. 통합 시크릿을 다시 복사해 주세요.", 401);
+      if (res.status === 401) throw new NotionError("노션 토큰이 올바르지 않습니다. 토큰을 다시 복사해 주세요.", 401);
       throw new NotionError(`노션 요청 실패 (${res.status}): ${(await res.text()).slice(0, 200)}`, res.status);
     }
   }
