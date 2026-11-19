@@ -164,24 +164,47 @@ function attachBox(box, target) {
       const list = await call(`/api/attachments?${target}=${id}`).catch(fail);
       if (n === shown && list) (files = list), render();
     },
+    // Files without attachment_id are waiting (picked before the task was saved, or left by a failed save).
+    // A reply that arrives after the box moved on to another note/task must not touch what is shown now.
     async attach(f) {
       if (self.has(f.id)) return;
-      if (id === null) files.push(f);
-      else files = await call("/api/attachments", { method: "POST", body: { [target]: id, fileId: f.id } });
-      render();
+      if (id === null) return files.push(f), render();
+      const n = shown;
+      const list = await call("/api/attachments", { method: "POST", body: { [target]: id, fileId: f.id } });
+      if (n === shown) (files = [...list, ...files.filter((x) => !x.attachment_id)]), render();
     },
-    // Attaches the waiting files to the task that was just created (also waits for uploads still running).
-    async flush(newId) {
+    // Attaches the waiting files to the saved task (after uploads still running). Call on every save:
+    // when it fails, the files not yet attached stay waiting and the next save tries them again.
+    async flush(taskId) {
+      const n = shown;
       await uploads;
-      const waiting = id === null ? files : [];
-      id = newId;
-      for (const f of waiting) files = await call("/api/attachments", { method: "POST", body: { [target]: id, fileId: f.id } });
-      render();
+      if (n !== shown) return;
+      id = taskId;
+      const waiting = files.filter((f) => !f.attachment_id);
+      try {
+        for (let i = 0; i < waiting.length; i++) {
+          let list;
+          try {
+            list = await call("/api/attachments", { method: "POST", body: { [target]: id, fileId: waiting[i].id } });
+          } catch (e) {
+            if (e.status !== 409) throw e; // 409: an earlier try got it attached after all
+            list = await call(`/api/attachments?${target}=${id}`);
+          }
+          if (n !== shown) return;
+          files = [...list, ...waiting.slice(i + 1)];
+          render();
+        }
+      } catch (e) {
+        if (n === shown) render(), fail(e);
+        throw e;
+      }
     },
   };
 
   async function detach(f) {
-    if (id !== null) await call(`/api/attachments/${f.attachment_id}`, { method: "DELETE" });
+    const n = shown;
+    if (f.attachment_id) await call(`/api/attachments/${f.attachment_id}`, { method: "DELETE" });
+    if (n !== shown) return;
     files = files.filter((x) => x.id !== f.id);
     render();
   }
@@ -863,10 +886,8 @@ async function init() {
     const body = { kind: $("task-kind").value, title: $("task-title").value, course: $("task-course").value, due_date: $("task-date").value, due_time: $("task-time").value, note: $("task-note").value };
     try {
       if (editingTask) await call(`/api/tasks/${editingTask.id}`, { method: "PATCH", body });
-      else {
-        editingTask = await call("/api/tasks", { method: "POST", body }); // a retry after a failed attach must not add it twice
-        await taskFiles.flush(editingTask.id);
-      }
+      else editingTask = await call("/api/tasks", { method: "POST", body }); // a retry after a failed attach must not add it twice
+      await taskFiles.flush(editingTask.id);
       $("task-dialog").close();
       tabs[currentTab()].load().catch(showError);
     } catch (e) {
