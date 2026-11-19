@@ -116,7 +116,12 @@
 <dialog id="upload-dialog">
   <form method="dialog" id="upload">
     <h2>올리기 <span class="muted" style="font-weight:400;font-size:12px">파일당 1GB 미만</span></h2>
-    <label>파일<input class="input" type="file" id="files" multiple required style="padding-top:5px"></label>
+    <label class="dropzone" id="dropzone">
+      <input type="file" id="files" multiple>
+      <span data-icon="upload"></span>
+      <strong id="drop-text">파일을 여기로 끌어다 놓거나 눌러서 고르세요</strong>
+      <span class="muted">여러 개를 한 번에 올릴 수 있습니다</span>
+    </label>
     <div class="row">
       <label>분류<select class="input" id="up-category"></select></label>
       <label>태그<input class="input" id="up-tags" placeholder="쉼표로 구분"></label>

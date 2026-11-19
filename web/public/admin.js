@@ -126,9 +126,11 @@ async function uploadOne(file) {
     });
     name.textContent = `${file.name} · 완료`;
     fill.style.width = "100%";
+    return true;
   } catch (e) {
     name.textContent = `${file.name} · 실패: ${e.message}`;
     li.className = "error";
+    return false;
   }
 }
 
@@ -331,6 +333,35 @@ function openUpload() {
   $("upload-dialog").showModal();
 }
 
+function showPicked() {
+  const files = [...$("files").files];
+  $("drop-text").textContent = !files.length
+    ? "파일을 여기로 끌어다 놓거나 눌러서 고르세요"
+    : files.length === 1 ? files[0].name : `${files[0].name} 외 ${files.length - 1}개`;
+}
+
+// 파일함 화면 어디에 끌어다 놓아도 올리기 창이 열리고 그 파일들이 골라진다.
+function setupDrop() {
+  const canDrop = (ev) => ev.dataTransfer?.types.includes("Files") && currentTab() === "files" && me.driveConnected && !$("upload-btn").disabled;
+  document.addEventListener("dragover", (ev) => {
+    if (!canDrop(ev)) return;
+    ev.preventDefault();
+    document.body.classList.add("dragging");
+  });
+  document.addEventListener("dragleave", (ev) => {
+    if (!ev.relatedTarget) document.body.classList.remove("dragging"); // pointer left the window
+  });
+  document.addEventListener("drop", (ev) => {
+    document.body.classList.remove("dragging");
+    if (!canDrop(ev)) return;
+    ev.preventDefault();
+    if (!ev.dataTransfer.files.length) return;
+    if (!$("upload-dialog").open) openUpload();
+    $("files").files = ev.dataTransfer.files;
+    showPicked();
+  });
+}
+
 const currentTab = () => (location.hash.slice(1) in tabs ? location.hash.slice(1) : "today");
 function showTab() {
   const name = currentTab();
@@ -400,14 +431,21 @@ async function init() {
   $("upload").onsubmit = async (ev) => {
     ev.preventDefault();
     const files = [...$("files").files];
+    if (!files.length) return $("progress").replaceChildren(el("li", { className: "error", textContent: "올릴 파일을 골라 주세요." }));
     const tooBig = files.filter((f) => f.size >= me.maxFileSize);
     if (tooBig.length) return $("progress").replaceChildren(el("li", { className: "error", textContent: "1GB 미만 파일만 올릴 수 있습니다: " + tooBig.map((f) => f.name).join(", ") }));
     $("upload-btn").disabled = true;
-    for (const f of files) await uploadOne(f); // one at a time to keep bandwidth predictable
+    $("progress").replaceChildren();
+    let ok = true;
+    for (const f of files) ok = (await uploadOne(f)) && ok; // one at a time to keep bandwidth predictable
     $("upload-btn").disabled = false;
     $("files").value = "";
+    showPicked();
+    if (ok) $("upload-dialog").close(); // 실패가 있으면 이유를 볼 수 있게 창을 남긴다.
     loadList().catch(showError);
   };
+  $("files").onchange = showPicked;
+  setupDrop();
   $("search").onsubmit = (ev) => {
     ev.preventDefault();
     loadList().catch(showError);
