@@ -683,3 +683,87 @@ test("비밀번호 로그인: 성공한 시도는 실패 횟수에 남지 않음
     cleanup();
   }
 });
+
+test("노트: 블록 저장, 날짜 있는 체크박스는 할 일이 되어 오늘·캘린더에 나오고 양쪽이 서로 맞춰짐", async () => {
+  const clock = new Date("2026-11-19T03:00:00Z");
+  const { call, db, cleanup } = makeApp({ googleEnabled: false, now: () => clock });
+  try {
+    db.setSetting("password_hash", await Bun.password.hash("correct horse battery"));
+    const { cookie } = await passwordLogin(call, "correct horse battery");
+    expect((await call("/api/notes")).status).toBe(401);
+    const req = (path: string, method: string, b?: object) => call(path, { method, cookie, headers: JSON_ORIGIN, body: b ? JSON.stringify(b) : undefined });
+
+    const note = (await (await req("/api/notes", "POST", { title: "수업 메모" })).json()) as { id: number; blocks: { type: string }[] };
+    expect(note.blocks).toHaveLength(1);
+    const save = (blocks: object[], title = "수업 메모") => req(`/api/notes/${note.id}`, "PUT", { title, blocks });
+    const blocks = [
+      { id: "a", type: "h1", text: "디자인사", checked: true, date: "2026-11-19" }, // extra fields on non-todo blocks are dropped
+      { id: "b", type: "todo", text: "레포트 초안\n3쪽 이상", date: "2026-11-19", time: "18:00" },
+      { id: "c", type: "todo", text: "날짜 없는 체크", checked: false },
+      { id: "d", type: "todo", text: "전시 보기", date: "2026-11-25" },
+      { id: "e", type: "divider", text: "무시됨" },
+    ];
+    expect((await save(blocks)).status).toBe(200);
+    const saved = (await (await req(`/api/notes/${note.id}`, "GET")).json()) as { blocks: object[] };
+    expect(saved.blocks[0]).toEqual({ id: "a", type: "h1", text: "디자인사" });
+    expect(saved.blocks[4]).toEqual({ id: "e", type: "divider", text: "" });
+
+    // Only dated todos become tasks; the task title is the first line.
+    let today = (await (await req("/api/today", "GET")).json()) as { today: { id: number; title: string; due_time: string; note_id: number; note_title: string }[] };
+    expect(today.today).toHaveLength(1);
+    expect(today.today[0]).toMatchObject({ title: "레포트 초안", due_time: "18:00", note_id: note.id, note_title: "수업 메모" });
+    const cal = (await (await req("/api/calendar?from=2026-11-01&to=2026-11-30", "GET")).json()) as { tasks: { title: string }[] };
+    expect(cal.tasks.map((t) => t.title)).toEqual(["레포트 초안", "전시 보기"]);
+    const taskId = today.today[0]!.id;
+
+    // Checking it off on the today screen checks the box in the note; the kind set on the task stays.
+    await req(`/api/tasks/${taskId}`, "PATCH", { done: true, kind: "과제", title: "레포트 완성" });
+    let n = (await (await req(`/api/notes/${note.id}`, "GET")).json()) as { blocks: Record<string, unknown>[] };
+    expect(n.blocks[1]).toMatchObject({ id: "b", checked: true, text: "레포트 완성\n3쪽 이상", date: "2026-11-19", time: "18:00" });
+    expect(db.getTask(taskId)).toMatchObject({ done: 1, done_at: "2026-11-19", kind: "과제" });
+
+    // Saving the note again keeps the same task (same id, done date, kind).
+    n.blocks[1]!.text = "레포트 완성본\n3쪽 이상";
+    await save(n.blocks);
+    expect(db.getTask(taskId)).toMatchObject({ title: "레포트 완성본", done: 1, done_at: "2026-11-19", kind: "과제" });
+
+    // Taking the date off in the task dialog leaves a plain checkbox and removes the task.
+    const dated = db.listTasks({}).find((t) => t.title === "전시 보기")!;
+    expect((await req(`/api/tasks/${dated.id}`, "PATCH", { due_date: "" })).status).toBe(200);
+    expect(db.getTask(dated.id)).toBeNull();
+    n = (await (await req(`/api/notes/${note.id}`, "GET")).json()) as { blocks: Record<string, unknown>[] };
+    expect(n.blocks[3]).toEqual({ id: "d", type: "todo", text: "전시 보기", checked: false });
+
+    // Deleting the task removes its block; removing a block from the note removes its task.
+    await req(`/api/tasks/${taskId}`, "DELETE");
+    n = (await (await req(`/api/notes/${note.id}`, "GET")).json()) as { blocks: Record<string, unknown>[] };
+    expect(n.blocks.map((b) => b.id)).toEqual(["a", "c", "d", "e"]);
+    await save([...n.blocks, { id: "f", type: "todo", text: "새 할 일", date: "2026-11-20" }]);
+    expect(db.listTasks({}).map((t) => t.title)).toEqual(["새 할 일"]);
+    await save(n.blocks);
+    expect(db.listTasks({})).toEqual([]);
+
+    // Search covers titles and block text.
+    await save(n.blocks, "다른 제목");
+    expect(((await (await req("/api/notes?q=날짜 없는", "GET")).json()) as unknown[]).length).toBe(1);
+    expect(((await (await req("/api/notes?q=없는말", "GET")).json()) as unknown[]).length).toBe(0);
+
+    // Bad input is refused.
+    expect((await save([{ id: "a", type: "p", text: "" }, { id: "a", type: "p", text: "" }])).status).toBe(400);
+    expect((await save([{ id: "a", type: "script", text: "" }])).status).toBe(400);
+    expect((await save([{ id: "a b", type: "p", text: "" }])).status).toBe(400);
+    expect((await save([{ id: "a", type: "todo", text: "x", date: "2026-02-30" }])).status).toBe(400);
+    expect((await save([{ id: "a", type: "todo", text: "x", date: "2026-11-20", time: "24:00" }])).status).toBe(400);
+    expect((await save([{ id: "a", type: "p", text: "x".repeat(500_001) }])).status).toBe(400);
+    expect((await call(`/api/notes/${note.id}`, { method: "PUT", cookie, headers: { "Content-Type": "application/json", Origin: "https://evil.example" }, body: "{}" })).status).toBe(403);
+
+    // Deleting the note deletes its tasks.
+    await save([{ id: "g", type: "todo", text: "마지막", date: "2026-11-21" }]);
+    expect(db.listTasks({})).toHaveLength(1);
+    await req(`/api/notes/${note.id}`, "DELETE");
+    expect((await req(`/api/notes/${note.id}`, "GET")).status).toBe(404);
+    expect(db.listTasks({})).toEqual([]);
+  } finally {
+    cleanup();
+  }
+});

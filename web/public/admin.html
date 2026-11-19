@@ -31,7 +31,7 @@
     <div class="nav-group">작업</div>
     <a class="nav-item" href="#tasks" data-tab="tasks"><span data-icon="check"></span>할 일·과제</a>
     <a class="nav-item" href="#calendar" data-tab="calendar"><span data-icon="calendar"></span>캘린더</a>
-    <span class="nav-item disabled"><span data-icon="note"></span>노트<span class="soon">준비 중</span></span>
+    <a class="nav-item" href="#notes" data-tab="notes"><span data-icon="note"></span>노트</a>
 
     <div class="nav-group">보관</div>
     <a class="nav-item" href="#files" data-tab="files"><span data-icon="folder"></span>클라우드</a>
@@ -80,6 +80,16 @@
           <span class="muted" id="cal-google"></span>
         </div>
         <div class="cal" id="cal-grid"></div>
+      </div>
+
+      <div id="tab-notes" class="notes" hidden>
+        <nav class="note-list" id="note-list"></nav>
+        <article class="note-page" id="note-page" hidden>
+          <input class="note-title" id="note-title" placeholder="제목 없음" maxlength="200">
+          <div class="note-meta"><span id="note-status" class="muted"></span><span class="muted">· <kbd>/</kbd> 블록 고르기 · 체크박스에 날짜를 넣으면 오늘·캘린더에 나옵니다</span></div>
+          <div class="editor" id="note-editor"></div>
+        </article>
+        <p class="note-empty muted" id="note-empty" hidden>노트가 없습니다. 오른쪽 위 "새 노트"로 만들어 보세요.</p>
       </div>
 
       <div id="tab-files" hidden>

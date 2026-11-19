@@ -1,5 +1,7 @@
 // 작업공간(관리) 화면.
 const CHUNK = 16 * 1024 * 1024; // must be a multiple of 256 KiB for Drive resumable uploads
+// 같은 ?v= 로 불러야 배포 직후 캐시의 옛 편집기와 섞이지 않는다.
+const { createEditor } = await import("./notes.js" + new URL(import.meta.url).search);
 const $ = (id) => document.getElementById(id);
 let me = null;
 let categories = [];
@@ -227,7 +229,13 @@ function taskRow(t, today, reload, withActions) {
     "tr",
     {},
     el("td", {}, el("input", { type: "checkbox", checked: !!t.done, title: "끝냄 표시", onchange() { update({ done: this.checked }); } })),
-    el("td", {}, el("span", { className: "title" + (t.done ? " done" : ""), textContent: t.title }), t.note ? el("span", { className: "sub", textContent: t.note }) : null),
+    el(
+      "td",
+      {},
+      el("span", { className: "title" + (t.done ? " done" : ""), textContent: t.title }),
+      t.note ? el("span", { className: "sub", textContent: t.note }) : null,
+      t.note_id ? el("span", { className: "sub" }, el("a", { href: `#notes/${t.note_id}`, textContent: `노트 · ${t.note_title || "제목 없음"}` })) : null,
+    ),
     el("td", { className: "hide-sm" }, pill(t.kind, t.kind === "과제" ? "blue" : "gray")),
     el("td", { className: "hide-sm muted", textContent: t.course || "—" }),
     dueCell(t, today),
@@ -397,6 +405,105 @@ function updateOverdueBadge(n) {
   $("nav-overdue").textContent = n;
 }
 
+// 노트: 고치면 잠깐 뒤 저장한다. 화면을 옮기거나 창을 닫을 때도 남은 것을 저장한다.
+let editor = null;
+let noteId = null; // the open note
+let noteDirty = false;
+let noteSaving = null; // the save in flight
+let noteTimer;
+let focusTitle = false;
+const noteTime = (s) => new Intl.DateTimeFormat("ko-KR", { timeZone: "Asia/Seoul", month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(new Date(s.replace(" ", "T") + "Z"));
+
+function noteChanged() {
+  noteDirty = true;
+  $("note-status").textContent = "저장 전";
+  clearTimeout(noteTimer);
+  noteTimer = setTimeout(() => saveNote().catch(() => {}), 700);
+}
+
+async function saveNote(keepalive = false) {
+  clearTimeout(noteTimer);
+  while (noteSaving) await noteSaving.catch(() => {});
+  if (!noteDirty || noteId === null) return;
+  noteDirty = false;
+  const id = noteId;
+  const title = $("note-title").value;
+  $("note-status").textContent = "저장 중…";
+  noteSaving = call(`/api/notes/${id}`, { method: "PUT", body: { title, blocks: editor.get() }, keepalive });
+  try {
+    const r = await noteSaving;
+    if (id !== noteId) return;
+    if (!noteDirty) $("note-status").textContent = "저장됨";
+    const a = document.querySelector(`#note-list a[data-id="${id}"]`);
+    if (a) a.replaceChildren(title || "제목 없음", el("small", { textContent: noteTime(r.updated_at) }));
+  } catch (e) {
+    if (id === noteId) {
+      noteDirty = true; // 다음에 고치거나 화면을 옮길 때 다시 저장한다
+      $("note-status").textContent = "저장 실패: " + e.message;
+    }
+    throw e;
+  } finally {
+    noteSaving = null;
+  }
+}
+
+async function loadNoteList() {
+  const list = await call("/api/notes?" + new URLSearchParams({ q: searchText() }));
+  $("note-list").replaceChildren(
+    ...(list.length
+      ? list.map((n) => {
+          const a = el("a", { href: `#notes/${n.id}`, className: n.id === noteId ? "active" : "" }, n.title || "제목 없음", el("small", { textContent: noteTime(n.updated_at) }));
+          a.dataset.id = n.id;
+          return a;
+        })
+      : [el("span", { className: "muted", textContent: searchText() ? "검색 결과가 없습니다." : "노트가 없습니다." })]),
+  );
+  return list;
+}
+
+// 열 노트: 주소(#notes/3) → 지금 연 노트 → 지난번 노트 → 맨 위 노트. 늘 서버에서 새로 읽는다(오늘 화면에서 체크했을 수 있다).
+async function loadNotes() {
+  await saveNote().catch(() => {});
+  const list = await loadNoteList();
+  const wanted = [Number(location.hash.split("/")[1]), noteId, Number(localStorage.getItem("note")), list[0]?.id].filter(Boolean);
+  let note = null;
+  for (const id of new Set(wanted)) {
+    note = await call(`/api/notes/${id}`).catch(() => null);
+    if (note) break;
+  }
+  noteId = note?.id ?? null;
+  noteDirty = false;
+  $("note-page").hidden = !note;
+  $("note-empty").hidden = !!note;
+  $("note-delete").hidden = !note;
+  document.querySelectorAll("#note-list a").forEach((a) => a.classList.toggle("active", Number(a.dataset.id) === noteId));
+  if (!note) return localStorage.removeItem("note");
+  localStorage.setItem("note", note.id);
+  $("note-title").value = note.title;
+  $("note-status").textContent = "저장됨";
+  editor.set(note.blocks);
+  if (focusTitle) $("note-title").focus();
+  focusTitle = false;
+}
+
+async function newNote() {
+  await saveNote().catch(() => {});
+  const n = await call("/api/notes", { method: "POST", body: {} });
+  focusTitle = true;
+  location.hash = `#notes/${n.id}`;
+}
+
+async function deleteNote() {
+  if (noteId === null || !confirm(`"${$("note-title").value || "제목 없음"}" 노트를 삭제할까요? 이 노트에서 만든 할 일도 함께 지워집니다.`)) return;
+  clearTimeout(noteTimer);
+  noteDirty = false;
+  await call(`/api/notes/${noteId}`, { method: "DELETE" });
+  noteId = null;
+  localStorage.removeItem("note");
+  if (location.hash === "#notes") await loadNotes();
+  else location.hash = "#notes";
+}
+
 // 검색: 할 일은 화면에서 거르고, 파일은 서버에 묻는다.
 const searchText = () => $("global-search").value.trim().toLowerCase();
 const matches = (t, q) => !q || [t.title, t.course, t.note].some((v) => (v ?? "").toLowerCase().includes(q));
@@ -405,6 +512,14 @@ const tabs = {
   today: { title: "오늘", load: () => loadToday(), actions: () => [newTaskBtn()] },
   tasks: { title: "할 일·과제", load: () => loadTasks(), actions: () => [newTaskBtn()] },
   calendar: { title: "캘린더", load: () => loadCalendar(), actions: () => [newTaskBtn()] },
+  notes: {
+    title: "노트",
+    load: () => loadNotes(),
+    actions: () => [
+      el("button", { className: "btn ghost danger", type: "button", id: "note-delete", title: "노트 삭제", ariaLabel: "노트 삭제", hidden: true, onclick: () => deleteNote().catch(showError) }, icon("trash")),
+      el("button", { className: "btn primary", type: "button", onclick: () => newNote().catch(showError) }, icon("plus"), "새 노트", el("kbd", { textContent: "N" })),
+    ],
+  },
   files: {
     title: "클라우드",
     load: () => {
@@ -454,7 +569,10 @@ function setupDrop() {
   });
 }
 
-const currentTab = () => (location.hash.slice(1) in tabs ? location.hash.slice(1) : "today");
+const currentTab = () => {
+  const name = location.hash.slice(1).split("/")[0];
+  return name in tabs ? name : "today";
+};
 function showTab() {
   const name = currentTab();
   for (const key of Object.keys(tabs)) $(`tab-${key}`).hidden = key !== name;
@@ -463,7 +581,12 @@ function showTab() {
   $("page-title").textContent = tabs[name].title;
   $("bar-actions").replaceChildren(...tabs[name].actions());
   $("msg").textContent = "";
-  tabs[name].load().catch(showError);
+  editor.closeMenu();
+  // 노트를 저장하고 나서 읽어야 방금 노트에서 바꾼 할 일이 보인다.
+  saveNote()
+    .catch(() => {})
+    .then(() => tabs[name].load())
+    .catch(showError);
 }
 
 async function init() {
@@ -487,6 +610,15 @@ async function init() {
   $("task-kind").append(...opts(taskKinds));
   $("up-category").append(...opts(categories));
   $("file-category").append(...opts(categories));
+  editor = createEditor($("note-editor"), noteChanged);
+  $("note-title").oninput = noteChanged;
+  $("note-title").onkeydown = (ev) => {
+    if (ev.key !== "Enter" || ev.isComposing || ev.keyCode === 229) return;
+    ev.preventDefault();
+    editor.focusFirst();
+  };
+  addEventListener("pagehide", () => saveNote(true).catch(() => {}));
+  document.addEventListener("visibilitychange", () => document.visibilityState === "hidden" && saveNote(true).catch(() => {}));
   $("task-filter-kind").append(...taskKinds.map((k) => el("button", { type: "button", textContent: k })));
   $("task-filter-kind").querySelectorAll("button").forEach((b, i) => i && (b.dataset.v = taskKinds[i - 1]));
   $("filter-category").append(...categories.map((c) => el("button", { type: "button", textContent: c })));
@@ -551,12 +683,14 @@ async function init() {
       if (currentTab() === "files") {
         $("q").value = $("global-search").value;
         loadList().catch(showError);
-      } else tabs[currentTab()].load().catch(showError);
+      } else if (currentTab() === "notes") loadNoteList().catch(showError);
+      else tabs[currentTab()].load().catch(showError);
     }, 200);
   };
   document.addEventListener("keydown", (ev) => {
     if (ev.target.closest?.("input, textarea, select, dialog") || ev.metaKey || ev.ctrlKey || ev.altKey) return;
     if (ev.key === "/") (ev.preventDefault(), $("global-search").focus());
+    else if (ev.key.toLowerCase() === "n" && currentTab() === "notes") (ev.preventDefault(), newNote().catch(showError));
     else if (ev.key.toLowerCase() === "n" && currentTab() !== "files") (ev.preventDefault(), openTaskDialog());
     else if (ev.key.toLowerCase() === "u" && currentTab() === "files" && me.driveConnected) (ev.preventDefault(), openUpload());
   });

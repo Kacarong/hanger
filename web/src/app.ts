@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { mkdirSync, existsSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { CATEGORIES, TASK_KINDS, type Db, type FileRow, type TaskFields } from "./db";
+import { BLOCK_TYPES, CATEGORIES, TASK_KINDS, type Block, type Db, type FileRow, type TaskFields } from "./db";
 import { GoogleError, type CalendarEvent, type Google } from "./google";
 import { passwordProblem } from "./password";
 
@@ -9,6 +9,8 @@ export const MAX_FILE_SIZE = 1024 ** 3; // files must be under 1GB
 const SESSION_DAYS = 30;
 const CALENDAR_MAX_DAYS = 62; // longest range /api/calendar serves (a 6-week month grid is 42)
 const UPCOMING_DAYS = 3; // 과제 due within this many days show up on the today screen
+const NOTE_MAX_BLOCKS = 3000;
+const NOTE_MAX_TEXT = 500_000; // characters across all blocks of a note
 const LOGIN_FAIL_LIMIT = 5; // password failures allowed per LOGIN_FAIL_WINDOW
 const LOGIN_FAIL_WINDOW = 15 * 60_000;
 const PUBLIC_DIR = join(import.meta.dir, "..", "public");
@@ -31,6 +33,8 @@ function addDays(date: string, days: number): string {
   d.setUTCDate(d.getUTCDate() + days);
   return d.toISOString().slice(0, 10);
 }
+
+const isTime = (v: string) => /^([01]\d|2[0-3]):[0-5]\d$/.test(v);
 
 function isDate(v: string): boolean {
   const d = new Date(v + "T00:00:00Z");
@@ -152,8 +156,39 @@ export function createApp(cfg: AppConfig, db: Db, google: Google) {
     }
     if ("due_time" in b) {
       const v = str(b.due_time, 5);
-      if (v && !/^([01]\d|2[0-3]):[0-5]\d$/.test(v)) return "시간이 올바르지 않습니다";
+      if (v && !isTime(v)) return "시간이 올바르지 않습니다";
       out.due_time = v || null;
+    }
+    return out;
+  }
+
+  // Validates a note's block list and keeps only the fields each block type uses.
+  function noteBlocks(v: unknown): Block[] | string {
+    if (!Array.isArray(v) || v.length > NOTE_MAX_BLOCKS) return "블록 목록이 올바르지 않습니다";
+    const ids = new Set<string>();
+    let total = 0;
+    const out: Block[] = [];
+    for (const raw of v) {
+      const b = (raw ?? {}) as Record<string, unknown>;
+      if (typeof b.id !== "string" || !/^[\w-]{1,40}$/.test(b.id) || ids.has(b.id)) return "블록 id가 올바르지 않습니다";
+      if (!BLOCK_TYPES.includes(b.type as string)) return "블록 종류가 올바르지 않습니다";
+      const text = b.type === "divider" || typeof b.text !== "string" ? "" : b.text;
+      total += text.length;
+      if (total > NOTE_MAX_TEXT) return "노트가 너무 깁니다";
+      ids.add(b.id);
+      const block: Block = { id: b.id, type: b.type as string, text };
+      if (b.type === "todo") {
+        block.checked = b.checked === true;
+        if (typeof b.date === "string" && b.date) {
+          if (!isDate(b.date)) return "날짜가 올바르지 않습니다";
+          block.date = b.date;
+          if (typeof b.time === "string" && b.time) {
+            if (!isTime(b.time)) return "시간이 올바르지 않습니다";
+            block.time = b.time;
+          }
+        }
+      }
+      out.push(block);
     }
     return out;
   }
@@ -339,10 +374,52 @@ ${items.length ? `<section class="index" id="index"><h2 class="section-title rev
           if (done !== !!t.done) patch.done_at = done ? today() : null;
         }
         db.updateTask(t.id, patch);
-        return json(db.getTask(t.id));
+        const after = db.getTask(t.id)!;
+        // A task from a note is its todo block: write the change back to the block. Taking the
+        // date off turns it back into a plain checkbox in the note, and the task goes away.
+        if (after.note_id && after.block_id) {
+          db.editNoteBlock(after.note_id, after.block_id, (bl) => {
+            const rest = bl.text.split("\n").slice(1);
+            const next: Block = { ...bl, text: [after.title, ...rest].join("\n"), checked: !!after.done };
+            delete next.date;
+            delete next.time;
+            if (after.due_date) next.date = after.due_date;
+            if (after.due_date && after.due_time) next.time = after.due_time;
+            return next;
+          }, today());
+        }
+        return json(db.getTask(t.id) ?? { ...after, due_date: null, due_time: null });
       }
       if (method === "DELETE") {
+        if (t.note_id && t.block_id) db.editNoteBlock(t.note_id, t.block_id, () => null, today()); // also removes the task
         db.deleteTask(t.id);
+        return json({ ok: true });
+      }
+    }
+
+    if (path === "/api/notes" && method === "GET") {
+      return json(db.listNotes(url.searchParams.get("q")?.trim() || undefined));
+    }
+
+    if (path === "/api/notes" && method === "POST") {
+      const b = await body(req);
+      return json(db.insertNote(str(b.title, 200), [{ id: crypto.randomUUID().slice(0, 8), type: "p", text: "" }], today()), 201);
+    }
+
+    const nm = path.match(/^\/api\/notes\/(\d+)$/);
+    if (nm) {
+      const n = db.getNote(Number(nm[1]));
+      if (!n) return json({ error: "노트를 찾을 수 없습니다" }, 404);
+      if (method === "GET") return json(n);
+      if (method === "PUT") {
+        const b = await body(req);
+        const blocks = noteBlocks(b.blocks);
+        if (typeof blocks === "string") return json({ error: blocks }, 400);
+        db.saveNote(n.id, str(b.title, 200), blocks, today());
+        return json({ ok: true, updated_at: db.getNote(n.id)!.updated_at });
+      }
+      if (method === "DELETE") {
+        db.deleteNote(n.id);
         return json({ ok: true });
       }
     }

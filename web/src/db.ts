@@ -30,10 +30,23 @@ export type TaskRow = {
   done: number;
   done_at: string | null; // YYYY-MM-DD the task was checked off
   created_at: string;
+  note_id: number | null; // set when the task is a dated checkbox inside a note
+  block_id: string | null;
+  note_title?: string | null; // joined in by listTasks/getTask
 };
 
 export const TASK_KINDS = ["할 일", "과제"];
 export type TaskFields = Pick<TaskRow, "kind" | "title" | "course" | "due_date" | "due_time" | "note">;
+
+// A note is a list of blocks. A "todo" block with a date is also a task (tasks.note_id/block_id),
+// so it shows up on the today screen and the calendar.
+export const BLOCK_TYPES = ["p", "h1", "h2", "h3", "todo", "bullet", "number", "quote", "code", "divider"];
+export type Block = { id: string; type: string; text: string; checked?: boolean; date?: string; time?: string };
+export type NoteRow = { id: number; title: string; blocks: Block[]; created_at: string; updated_at: string };
+type NoteRecord = Omit<NoteRow, "blocks"> & { blocks: string };
+
+// The task title of a todo block: its first line.
+export const blockTitle = (b: Block) => b.text.split("\n")[0]!.trim().slice(0, 200);
 
 export function openDb(path: string) {
   const db = new Database(path, { create: true });
@@ -69,8 +82,49 @@ export function openDb(path: string) {
       done_at TEXT,
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
+    CREATE TABLE IF NOT EXISTS notes (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      title TEXT NOT NULL DEFAULT '',
+      blocks TEXT NOT NULL DEFAULT '[]',
+      text TEXT NOT NULL DEFAULT '', -- all block text, for search
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
   `);
-  const TASK_ORDER = "ORDER BY due_date IS NULL, due_date, due_time IS NULL, due_time, id";
+  const taskCols = (db.query("PRAGMA table_info(tasks)").all() as { name: string }[]).map((c) => c.name);
+  if (!taskCols.includes("note_id")) db.exec("ALTER TABLE tasks ADD COLUMN note_id INTEGER; ALTER TABLE tasks ADD COLUMN block_id TEXT;");
+  db.exec("CREATE INDEX IF NOT EXISTS tasks_note ON tasks (note_id)");
+  const TASK_SELECT = "SELECT tasks.*, notes.title AS note_title FROM tasks LEFT JOIN notes ON notes.id = tasks.note_id";
+  const TASK_ORDER = "ORDER BY due_date IS NULL, due_date, due_time IS NULL, due_time, tasks.id";
+  function getNote(id: number): NoteRow | null {
+    const r = db.query("SELECT id, title, blocks, created_at, updated_at FROM notes WHERE id = ?").get(id) as NoteRecord | null;
+    return r ? { ...r, blocks: JSON.parse(r.blocks) as Block[] } : null;
+  }
+
+  // Makes the note's tasks match its dated todo blocks. Kind, course and memo set on the task stay.
+  function syncNoteTasks(noteId: number, blocks: Block[], today: string) {
+    const existing = new Map((db.query("SELECT * FROM tasks WHERE note_id = ?").all(noteId) as TaskRow[]).map((t) => [t.block_id, t]));
+    for (const b of blocks) {
+      const title = blockTitle(b);
+      if (b.type !== "todo" || !b.date || !title) continue;
+      const done = b.checked ? 1 : 0;
+      const t = existing.get(b.id);
+      existing.delete(b.id);
+      if (!t) {
+        db.query("INSERT INTO tasks (title, due_date, due_time, done, done_at, note_id, block_id) VALUES (?, ?, ?, ?, ?, ?, ?)").run(title, b.date, b.time ?? null, done, done ? today : null, noteId, b.id);
+      } else {
+        const doneAt = done === t.done ? t.done_at : done ? today : null;
+        db.query("UPDATE tasks SET title = ?, due_date = ?, due_time = ?, done = ?, done_at = ? WHERE id = ?").run(title, b.date, b.time ?? null, done, doneAt, t.id);
+      }
+    }
+    for (const t of existing.values()) db.query("DELETE FROM tasks WHERE id = ?").run(t.id);
+  }
+
+  function writeNote(id: number, title: string, blocks: Block[], today: string) {
+    const text = blocks.map((b) => b.text).join("\n");
+    db.query("UPDATE notes SET title = ?, blocks = ?, text = ?, updated_at = datetime('now') WHERE id = ?").run(title, JSON.stringify(blocks), text, id);
+    syncNoteTasks(id, blocks, today);
+  }
 
   return {
     raw: db,
@@ -159,11 +213,11 @@ export function openDb(path: string) {
         where.push("done_at = ?");
         args.push(opts.doneOn);
       }
-      const sql = `SELECT * FROM tasks ${where.length ? "WHERE " + where.join(" AND ") : ""} ${TASK_ORDER}`;
+      const sql = `${TASK_SELECT} ${where.length ? "WHERE " + where.join(" AND ") : ""} ${TASK_ORDER}`;
       return db.query(sql).all(...args) as TaskRow[];
     },
     getTask(id: number): TaskRow | null {
-      return db.query("SELECT * FROM tasks WHERE id = ?").get(id) as TaskRow | null;
+      return db.query(`${TASK_SELECT} WHERE tasks.id = ?`).get(id) as TaskRow | null;
     },
     insertTask(t: TaskFields): TaskRow {
       return db
@@ -179,6 +233,29 @@ export function openDb(path: string) {
     deleteTask(id: number) {
       db.query("DELETE FROM tasks WHERE id = ?").run(id);
     },
+    listNotes(q?: string): Pick<NoteRow, "id" | "title" | "updated_at">[] {
+      const like = `%${q ?? ""}%`;
+      return db.query("SELECT id, title, updated_at FROM notes WHERE ? = '' OR title LIKE ? OR text LIKE ? ORDER BY updated_at DESC, id DESC").all(q ?? "", like, like) as Pick<NoteRow, "id" | "title" | "updated_at">[];
+    },
+    getNote,
+    insertNote: db.transaction((title: string, blocks: Block[], today: string): NoteRow => {
+      const id = (db.query("INSERT INTO notes (title) VALUES (?) RETURNING id").get(title) as { id: number }).id;
+      writeNote(id, title, blocks, today);
+      return getNote(id)!;
+    }),
+    saveNote: db.transaction((id: number, title: string, blocks: Block[], today: string) => writeNote(id, title, blocks, today)),
+    // Applies a change made from the task side (today screen, task dialog) to its block.
+    // edit returns the new block, or null to drop the block.
+    editNoteBlock: db.transaction((noteId: number, blockId: string, edit: (b: Block) => Block | null, today: string) => {
+      const n = getNote(noteId);
+      if (!n) return;
+      const blocks = n.blocks.flatMap((b) => (b.id !== blockId ? [b] : (edit(b) ?? [])));
+      writeNote(noteId, n.title, blocks, today);
+    }),
+    deleteNote: db.transaction((id: number) => {
+      db.query("DELETE FROM tasks WHERE note_id = ?").run(id);
+      db.query("DELETE FROM notes WHERE id = ?").run(id);
+    }),
   };
 }
 
