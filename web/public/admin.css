@@ -219,6 +219,21 @@ dialog .foot { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4
 .blk-menu-item.danger { color: var(--orange); }
 .table .sub a { color: var(--blue); }
 
+/* 클라우드 첨부 */
+.attach { display: grid; gap: 6px; }
+.note-page .attach { margin: -6px 0 16px; }
+.attach-head { display: flex; align-items: center; gap: 4px; color: var(--muted); font-size: 12px; }
+.attach-head > span { margin: 0 auto 0 2px; }
+.attach-list, .pick-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; }
+.attach-list li, .pick-list li { display: flex; align-items: center; gap: 10px; min-height: 32px; padding: 3px 4px 3px 10px; border-radius: 6px; background: var(--panel-2); }
+.attach-list a, .pick-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg); }
+.attach-list a:hover { color: var(--blue); }
+.attach-list .muted, .pick-list .muted { flex: none; font-size: 12px; }
+.pick-list { max-height: min(50vh, 420px); overflow-y: auto; }
+.pick-list li.muted, .pick-list li.error { background: none; padding: 12px 4px; }
+.clip { display: inline-flex; align-items: center; gap: 2px; margin-left: 6px; color: var(--muted); font-size: 12px; vertical-align: middle; }
+.clip svg { width: 12px; height: 12px; }
+
 @media (max-width: 860px) {
   .notes { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
   .note-list { flex-direction: row; overflow-x: auto; border-right: 0; border-bottom: 1px solid var(--line); }

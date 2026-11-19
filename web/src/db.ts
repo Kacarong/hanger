@@ -33,6 +33,7 @@ export type TaskRow = {
   note_id: number | null; // set when the task is a dated checkbox inside a note
   block_id: string | null;
   note_title?: string | null; // joined in by listTasks/getTask
+  files?: number; // how many cloud files are attached, joined in by listTasks/getTask
 };
 
 export const TASK_KINDS = ["할 일", "과제"];
@@ -45,6 +46,11 @@ export type Block = { id: string; type: string; text: string; checked?: boolean;
 // version goes up on every write; a save must name the version it started from (see saveNote).
 export type NoteRow = { id: number; title: string; blocks: Block[]; version: number; created_at: string; updated_at: string };
 type NoteRecord = Omit<NoteRow, "blocks"> & { blocks: string };
+
+// A cloud file attached to a note or a task. The file itself stays in the 파일함; detaching only drops the link.
+export const ATTACH_TARGETS = ["note", "task"] as const;
+export type AttachTarget = (typeof ATTACH_TARGETS)[number];
+export type AttachedFile = FileRow & { attachment_id: number };
 
 // The task title of a todo block: its first line.
 export const blockTitle = (b: Block) => b.text.split("\n")[0]!.trim().slice(0, 200);
@@ -91,13 +97,33 @@ export function openDb(path: string) {
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       updated_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
+    CREATE TABLE IF NOT EXISTS attachments (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      target TEXT NOT NULL CHECK (target IN ('note', 'task')),
+      target_id INTEGER NOT NULL,
+      file_id INTEGER NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE (target, target_id, file_id)
+    );
+    -- Whatever removes a note, task or file (including tasks a note save drops) also drops its attachments.
+    CREATE TRIGGER IF NOT EXISTS attachments_note_gone AFTER DELETE ON notes BEGIN
+      DELETE FROM attachments WHERE target = 'note' AND target_id = old.id;
+    END;
+    CREATE TRIGGER IF NOT EXISTS attachments_task_gone AFTER DELETE ON tasks BEGIN
+      DELETE FROM attachments WHERE target = 'task' AND target_id = old.id;
+    END;
+    CREATE TRIGGER IF NOT EXISTS attachments_file_gone AFTER DELETE ON files BEGIN
+      DELETE FROM attachments WHERE file_id = old.id;
+    END;
   `);
   const taskCols = (db.query("PRAGMA table_info(tasks)").all() as { name: string }[]).map((c) => c.name);
   if (!taskCols.includes("note_id")) db.exec("ALTER TABLE tasks ADD COLUMN note_id INTEGER; ALTER TABLE tasks ADD COLUMN block_id TEXT;");
   db.exec("CREATE INDEX IF NOT EXISTS tasks_note ON tasks (note_id)");
   const noteCols = (db.query("PRAGMA table_info(notes)").all() as { name: string }[]).map((c) => c.name);
   if (!noteCols.includes("version")) db.exec("ALTER TABLE notes ADD COLUMN version INTEGER NOT NULL DEFAULT 0");
-  const TASK_SELECT = "SELECT tasks.*, notes.title AS note_title FROM tasks LEFT JOIN notes ON notes.id = tasks.note_id";
+  const TASK_SELECT = `SELECT tasks.*, notes.title AS note_title,
+    (SELECT COUNT(*) FROM attachments WHERE target = 'task' AND target_id = tasks.id) AS files
+    FROM tasks LEFT JOIN notes ON notes.id = tasks.note_id`;
   const TASK_ORDER = "ORDER BY due_date IS NULL, due_date, due_time IS NULL, due_time, tasks.id";
   function getNote(id: number): NoteRow | null {
     const r = db.query("SELECT id, title, blocks, version, created_at, updated_at FROM notes WHERE id = ?").get(id) as NoteRecord | null;
@@ -261,6 +287,18 @@ export function openDb(path: string) {
       const blocks = n.blocks.flatMap((b) => (b.id !== blockId ? [b] : (edit(b) ?? [])));
       writeNote(noteId, n.title, blocks, today);
     }),
+    listAttachments(target: AttachTarget, targetId: number): AttachedFile[] {
+      return db
+        .query("SELECT files.*, attachments.id AS attachment_id FROM attachments JOIN files ON files.id = attachments.file_id WHERE target = ? AND target_id = ? ORDER BY attachments.id")
+        .all(target, targetId) as AttachedFile[];
+    },
+    // Returns false when the file is already attached there.
+    addAttachment(target: AttachTarget, targetId: number, fileId: number): boolean {
+      return db.query("INSERT OR IGNORE INTO attachments (target, target_id, file_id) VALUES (?, ?, ?)").run(target, targetId, fileId).changes > 0;
+    },
+    deleteAttachment(id: number): boolean {
+      return db.query("DELETE FROM attachments WHERE id = ?").run(id).changes > 0;
+    },
     deleteNote: db.transaction((id: number) => {
       db.query("DELETE FROM tasks WHERE note_id = ?").run(id);
       db.query("DELETE FROM notes WHERE id = ?").run(id);

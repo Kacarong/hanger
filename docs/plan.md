@@ -8,7 +8,7 @@
 - 노트: 노션 같은 블록 편집기. 노트 속 체크박스+날짜 = 할 일(오늘·캘린더에 표시). 편집기 라이브러리 선택은 노트 단계에서.
 - 포트폴리오: 공개용과 개인용 구분. 세부는 차차.
 - 로그인: 비밀번호 로그인(5번 틀리면 15분 잠금) + 관리자 구글 계정 로그인. 비밀번호는 12자 이상, "kacarong"이 들어가면 안 된다(옛 기본값이 공개 저장소 기록에 있어서, 그런 비밀번호는 맞아도 로그인을 거부). 바꾸기: 작업공간 왼쪽 아래 "비밀번호 바꾸기"(비밀번호 로그인이면 지금 비밀번호 필요) 또는 서버에서 `bun run set-password`. 바꾸면 다른 로그인은 모두 해제.
-- 순서: 오늘·과제/할 일(완료) → 캘린더(완료) → 노트(완료) → 클라우드 첨부 → 포트폴리오 공개/개인 구분.
+- 순서: 오늘·과제/할 일(완료) → 캘린더(완료) → 노트(완료) → 클라우드 첨부(완료) → 포트폴리오 공개/개인 구분.
 
 ## 결정 (2026-11-18 사용자와 합의)
 - 웹: kacarong.kr = 공개 포트폴리오, /admin = 관리 (관리자 구글 계정 1개만).
@@ -21,7 +21,7 @@
 ## 상태
 - web/ 1차 구현 (디자인 없음): Bun + bun:sqlite, 의존성 없음. `bun test` = 가짜 구글 서버로 전체 흐름 검증.
 - 2026-11-19: 비밀번호 로그인, 할 일·과제(tasks 테이블, /api/tasks, /api/today), /admin 탭(오늘/할 일·과제/파일함). 구글 환경변수 없이도 서버가 뜬다(구글 로그인 404, 파일함은 "연결 안 됨").
-- 실제 구글로는 아직 미검증: 특히 브라우저→구글 직접 업로드 CORS, 익명 공유/해제.
+- 2026-11-19 실제 구글 계정 점검(운영 DB 복사본 + 로컬 서버 + 헤드리스 크롬): 브라우저→구글 직접 PUT은 16MB 넘는 여러 조각 업로드까지 성공, 308 응답의 Range 헤더도 CORS로 읽혀 /api/uploads/status 없이 이어진다. 공개 켜기 → 로그인 안 한 사람이 보기 링크 200·공개 페이지·썸네일 표시, 공유 끄기 → 보기 401·받기는 구글 로그인 화면·공개 페이지에서 빠짐.
 
 - 2026-11-19 자동 로그인: 로그인 안 된 /admin은 바로 /auth/login(login_hint=ADMIN_EMAIL)으로 가서 구글이 클릭 없이 로그인시킨다. 탭마다 한 번만 시도(sessionStorage autoLoginTried)해 취소·실패 때 반복 없이 로그인 화면, 로그아웃하면 그 기기는 직접 로그인할 때까지 자동 로그인 안 함(localStorage noAutoLogin). 구글에서 취소하면 /auth/callback?error → /admin.
 - 2026-11-19 배포: GitHub https://github.com/Kacarong/hanger (공개 저장소, main; 업데이트마다 푸시 — 사용자 요청). 서버 /home/claude/kacarong-folio (GitHub clone) + user systemd `kacarong-folio.service`, env `~/.config/kacarong-folio/env`, 데이터 `~/.local/share/kacarong-folio`. 터널 ingress kacarong.kr → 127.0.0.1:2992, DNS CNAME 덮어씀. 업데이트: `cd ~/kacarong-folio && git pull && systemctl --user restart kacarong-folio`. 서비스 파일(deploy/kacarong-folio.service)이 바뀌면 `cp deploy/kacarong-folio.service ~/.config/systemd/user/ && systemctl --user daemon-reload` 도. 서비스는 Landlock(setpriv)으로 갇혀 있어 코드·데이터 폴더 밖을 못 읽는다(2026-11-19).
@@ -31,7 +31,9 @@
 - 2026-11-19 보안: 모든 응답에 CSP(스크립트는 자기 파일만, 인라인 스크립트·핸들러 금지, connect-src는 자기+구글 API), X-Frame-Options DENY, nosniff, HSTS, Referrer-Policy. /admin·/api·/auth는 Cache-Control no-store. API의 POST/PATCH/DELETE는 Origin이 이 사이트일 때만.
 - 2026-11-19 노트: 편집기 라이브러리 없이 직접 만든 블록 편집기(public/notes.js, 블록마다 textarea라 한글 입력이 안정적). 블록 = 텍스트·제목1~3·체크박스·글머리·번호·인용·코드·구분선. `/` 메뉴, 줄 앞 `# ` `- ` `1. ` `[] ` `> ` ```` ``` ```` `---` 단축, 붙여넣은 여러 줄은 블록으로 나눔, ⋮⋮ 손잡이로 끌어 옮기기·메뉴. 0.7초 뒤 자동 저장(화면 이동·창 닫을 때도). 저장이 실패하면 다른 노트로 넘어가지 않고 초안을 지킨다. notes.version으로 충돌 확인: 다른 탭·오늘 화면에서 바뀐 노트면 PUT이 409, 화면은 자동 저장을 멈추고 "덮어쓰기/바뀐 내용 불러오기"를 묻는다. 노트를 읽는 동안 편집기는 잠근다(inert). notes 테이블(blocks JSON + 검색용 text). 날짜 넣은 체크박스 = tasks 행(note_id, block_id): 노트 저장 때 맞추고, 오늘·할 일 화면에서 체크·수정·날짜 빼기·삭제하면 블록에도 반영. 종류·과목·메모는 할 일 쪽에만. 굵게·링크 같은 글자 꾸밈은 아직 없음.
 
+- 2026-11-19 클라우드 첨부: 노트와 할 일·과제에 파일함 파일을 붙인다. attachments 테이블(target note|task, target_id, file_id, 같은 곳에 같은 파일은 한 번). 파일은 파일함에 그대로 있고 떼면 연결만 없어진다. 노트·할 일·파일이 지워지면(노트 저장으로 사라지는 노트 할 일 포함) 트리거가 첨부도 지운다. API: GET /api/attachments?note=|task=, POST {note|task, fileId}, DELETE /api/attachments/:id. 화면: 노트 제목 아래와 할 일 대화상자에 "클라우드에서 고르기"(파일함 검색 창, 여러 개 연달아) · "새로 올리기"(파일함에 올리고 바로 붙임; 과제면 분류 "과제"). 새 할 일은 고른 파일을 들고 있다가 저장할 때 붙인다. 할 일 목록에 클립 아이콘과 개수.
+
 ## 남은 일
-1. 사용자: OAuth 클라이언트(웹 애플리케이션, 리디렉션 URI https://kacarong.kr/auth/callback, 프로덕션 게시, Drive·Calendar API 사용 설정) + 관리자 이메일.
+1. (완료) 사용자: OAuth 클라이언트 + 프로덕션 게시 + 관리자 이메일.
 2. (완료) DNS·배포.
-4. 실제 계정으로 업로드 CORS·공유 해제 확인 → 디자인 → PWA/TWA → Flutter PC.
+4. (완료) 실제 계정으로 업로드 CORS·공유 해제 확인. 다음: 포트폴리오 공개/개인 구분 → PWA/TWA → Flutter PC.

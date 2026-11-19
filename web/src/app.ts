@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { mkdirSync, existsSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { BLOCK_TYPES, CATEGORIES, TASK_KINDS, type Block, type Db, type FileRow, type TaskFields } from "./db";
+import { ATTACH_TARGETS, BLOCK_TYPES, CATEGORIES, TASK_KINDS, type Block, type Db, type FileRow, type TaskFields } from "./db";
 import { GoogleError, type CalendarEvent, type Google } from "./google";
 import { passwordProblem } from "./password";
 
@@ -426,6 +426,26 @@ ${items.length ? `<section class="index" id="index"><h2 class="section-title rev
         db.deleteNote(n.id);
         return json({ ok: true });
       }
+    }
+
+    // Cloud files attached to a note or a task: ?note=ID or ?task=ID (POST: { note | task, fileId }).
+    if (path === "/api/attachments" && (method === "GET" || method === "POST")) {
+      const b = method === "POST" ? await body(req) : Object.fromEntries(url.searchParams);
+      const target = ATTACH_TARGETS.find((t) => t in b);
+      const targetId = Number(target && b[target]);
+      if (!target || !Number.isInteger(targetId)) return json({ error: "노트나 할 일을 지정해 주세요" }, 400);
+      if (!(target === "note" ? db.getNote(targetId) : db.getTask(targetId))) return json({ error: target === "note" ? "노트를 찾을 수 없습니다" : "할 일을 찾을 수 없습니다" }, 404);
+      if (method === "GET") return json(db.listAttachments(target, targetId));
+      const file = db.getFile(Number(b.fileId));
+      if (!file) return json({ error: "파일을 찾을 수 없습니다" }, 404);
+      if (!db.addAttachment(target, targetId, file.id)) return json({ error: "이미 붙인 파일입니다" }, 409);
+      return json(db.listAttachments(target, targetId), 201);
+    }
+
+    const am = path.match(/^\/api\/attachments\/(\d+)$/);
+    if (am && method === "DELETE") {
+      if (!db.deleteAttachment(Number(am[1]))) return json({ error: "첨부를 찾을 수 없습니다" }, 404);
+      return json({ ok: true });
     }
 
     if (path === "/api/files" && method === "GET") {

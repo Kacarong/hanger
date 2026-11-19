@@ -832,3 +832,72 @@ test("노트: 블록 저장, 날짜 있는 체크박스는 할 일이 되어 오
     cleanup();
   }
 });
+
+test("클라우드 첨부: 노트·할 일에 파일함 파일을 붙이고 떼기, 지우면 첨부도 사라짐", async () => {
+  loginEmail = "owner@example.com";
+  const clock = new Date("2026-11-19T03:00:00Z");
+  const { call, db, cleanup } = makeApp({ now: () => clock });
+  try {
+    const { cookie } = await login(call);
+    const req = (path: string, method: string, b?: object) => call(path, { method, cookie, headers: JSON_ORIGIN, body: b ? JSON.stringify(b) : undefined });
+    const addFile = (name: string) => {
+      const id = `att${nextId++}`;
+      drive.set(id, { id, name, mimeType: "application/pdf", parents: [], trashed: false, anyone: false, bytes: 10 });
+      return db.insertFile({ drive_id: id, name, title: name, mime: "application/pdf", size: 10, category: "과제", tags: "", note: "", web_view_link: `https://drive.example/view/${id}`, web_content_link: "" });
+    };
+    const a = addFile("강의자료.pdf");
+    const b = addFile("레포트.pdf");
+    const note = (await (await req("/api/notes", "POST", { title: "유체역학" })).json()) as { id: number };
+    const task = (await (await req("/api/tasks", "POST", { title: "레포트 제출", kind: "과제" })).json()) as { id: number };
+
+    expect((await call(`/api/attachments?note=${note.id}`)).status).toBe(401);
+    const list = async (q: string) => (await (await req(`/api/attachments?${q}`, "GET")).json()) as { attachment_id: number; title: string; web_view_link: string }[];
+
+    // Attach: the reply is the new list. The same file can go on a note and a task, but only once on each.
+    const added = await req("/api/attachments", "POST", { note: note.id, fileId: a.id });
+    expect(added.status).toBe(201);
+    expect(((await added.json()) as { title: string }[]).map((f) => f.title)).toEqual(["강의자료.pdf"]);
+    expect((await req("/api/attachments", "POST", { note: note.id, fileId: b.id })).status).toBe(201);
+    expect((await req("/api/attachments", "POST", { note: note.id, fileId: a.id })).status).toBe(409);
+    expect((await req("/api/attachments", "POST", { task: task.id, fileId: a.id })).status).toBe(201);
+    expect((await list(`note=${note.id}`)).map((f) => f.title)).toEqual(["강의자료.pdf", "레포트.pdf"]);
+    expect((await list(`task=${task.id}`))[0]).toMatchObject({ title: "강의자료.pdf", web_view_link: `https://drive.example/view/${a.drive_id}` });
+    // Task lists say how many files a task has.
+    expect(((await (await req("/api/tasks", "GET")).json()) as { files: number }[])[0]!.files).toBe(1);
+
+    // Bad targets and files are refused, and so are other sites.
+    expect((await req("/api/attachments", "POST", { note: 9999, fileId: a.id })).status).toBe(404);
+    expect((await req("/api/attachments", "POST", { task: task.id, fileId: 9999 })).status).toBe(404);
+    expect((await req("/api/attachments", "POST", { fileId: a.id })).status).toBe(400);
+    expect((await req("/api/attachments?folder=1", "GET")).status).toBe(400);
+    expect((await call("/api/attachments", { method: "POST", cookie, headers: { "Content-Type": "application/json", Origin: "https://evil.example" }, body: JSON.stringify({ note: note.id, fileId: b.id }) })).status).toBe(403);
+
+    // Detaching keeps the file in the 파일함.
+    const first = (await list(`note=${note.id}`))[0]!;
+    expect((await req(`/api/attachments/${first.attachment_id}`, "DELETE")).status).toBe(200);
+    expect((await req(`/api/attachments/${first.attachment_id}`, "DELETE")).status).toBe(404);
+    expect((await list(`note=${note.id}`)).map((f) => f.title)).toEqual(["레포트.pdf"]);
+    expect(db.getFile(a.id)).not.toBeNull();
+
+    // Trashing a file takes it off everything it was attached to.
+    expect((await req(`/api/files/${a.id}`, "DELETE")).status).toBe(200);
+    expect(await list(`task=${task.id}`)).toEqual([]);
+
+    // Deleting a note or task drops its attachments, including a note task that a note save removes.
+    await req("/api/attachments", "POST", { task: task.id, fileId: b.id });
+    await req(`/api/tasks/${task.id}`, "DELETE");
+    const count = () => (db.raw.query("SELECT COUNT(*) AS n FROM attachments").get() as { n: number }).n;
+    expect(count()).toBe(1); // 레포트.pdf on the note
+    expect((await req(`/api/notes/${note.id}`, "PUT", { title: "유체역학", version: 1, blocks: [{ id: "t", type: "todo", text: "실험 보고서", date: "2026-11-20" }] })).status).toBe(200);
+    const noteTask = db.listTasks({}).find((t) => t.note_id === note.id)!;
+    expect((await req("/api/attachments", "POST", { task: noteTask.id, fileId: b.id })).status).toBe(201);
+    expect(count()).toBe(2);
+    expect((await req(`/api/notes/${note.id}`, "PUT", { title: "유체역학", version: 2, blocks: [] })).status).toBe(200);
+    expect(count()).toBe(1);
+    await req(`/api/notes/${note.id}`, "DELETE");
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM attachments").get()).toEqual({ n: 0 });
+    expect(db.getFile(b.id)).not.toBeNull();
+  } finally {
+    cleanup();
+  }
+});

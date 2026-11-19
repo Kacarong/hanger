@@ -24,6 +24,8 @@ const ICONS = {
   download: '<path d="M12 4v11M7 10l5 5 5-5M4 20h16"/>',
   chevrons: '<path d="m8 9 4-4 4 4M8 15l4 4 4-4"/>',
   menu: '<path d="M4 6h16M4 12h16M4 18h16"/>',
+  clip: '<path d="m20 11-8.5 8.5a5 5 0 0 1-7-7L13 4a3.5 3.5 0 0 1 5 5l-8.5 8.5a2 2 0 0 1-3-3L14 7"/>',
+  x: '<path d="M6 6l12 12M18 6 6 18"/>',
 };
 const icon = (name) => {
   const t = document.createElement("template");
@@ -112,29 +114,162 @@ async function uploadToDrive(url, file, onProgress) {
   }
 }
 
-async function uploadOne(file) {
+// Uploads one file into the 파일함 with its progress line in `list`. Returns the new file row, or null on failure.
+async function uploadOne(file, list, meta) {
   const name = el("span", { textContent: `${file.name} · 준비 중` });
   const fill = el("div", { className: "bar-fill" });
   const li = el("li", {}, name, el("div", { className: "bar-track" }, fill));
-  $("progress").append(li);
+  list.append(li);
   try {
     const { uploadUrl } = await call("/api/uploads", { method: "POST", body: { name: file.name, size: file.size, mimeType: file.type } });
     const driveFile = await uploadToDrive(uploadUrl, file, (p) => {
       name.textContent = `${file.name} · ${Math.floor(p * 100)}%`;
       fill.style.width = `${p * 100}%`;
     });
-    await call("/api/files", {
-      method: "POST",
-      body: { driveId: driveFile.id, category: $("up-category").value, tags: $("up-tags").value, note: $("up-note").value },
-    });
+    const row = await call("/api/files", { method: "POST", body: { driveId: driveFile.id, ...meta } });
     name.textContent = `${file.name} · 완료`;
     fill.style.width = "100%";
-    return true;
+    return row;
   } catch (e) {
     name.textContent = `${file.name} · 실패: ${e.message}`;
     li.className = "error";
-    return false;
+    return null;
   }
+}
+
+// 클라우드 첨부: 노트·할 일에 파일함의 파일을 붙인다(파일은 파일함에 그대로 있고 떼면 연결만 없어진다).
+// 아직 저장 안 한 새 할 일은 고른 파일을 들고 있다가 저장할 때 붙인다(flush).
+function attachBox(box, target) {
+  let id = null; // null: not saved yet
+  let shown = 0; // goes up whenever the box switches to another note/task
+  let files = [];
+  let category = "기타"; // for files uploaded from here
+  let uploads = Promise.resolve();
+  const err = el("span", { className: "error" });
+  const progress = el("ul", { className: "progress" });
+  const input = el("input", { type: "file", multiple: true, hidden: true });
+  const fail = (e) => (err.textContent = e.message);
+
+  const self = {
+    has: (fileId) => files.some((f) => f.id === fileId),
+    async show(newId, cat = "기타") {
+      const n = ++shown;
+      id = newId;
+      category = cat;
+      files = [];
+      err.textContent = "";
+      progress.replaceChildren();
+      render();
+      if (id === null) return;
+      const list = await call(`/api/attachments?${target}=${id}`).catch(fail);
+      if (n === shown && list) (files = list), render();
+    },
+    async attach(f) {
+      if (self.has(f.id)) return;
+      if (id === null) files.push(f);
+      else files = await call("/api/attachments", { method: "POST", body: { [target]: id, fileId: f.id } });
+      render();
+    },
+    // Attaches the waiting files to the task that was just created (also waits for uploads still running).
+    async flush(newId) {
+      await uploads;
+      const waiting = id === null ? files : [];
+      id = newId;
+      for (const f of waiting) files = await call("/api/attachments", { method: "POST", body: { [target]: id, fileId: f.id } });
+      render();
+    },
+  };
+
+  async function detach(f) {
+    if (id !== null) await call(`/api/attachments/${f.attachment_id}`, { method: "DELETE" });
+    files = files.filter((x) => x.id !== f.id);
+    render();
+  }
+
+  input.onchange = () => {
+    const picked = [...input.files];
+    input.value = "";
+    const tooBig = picked.filter((f) => f.size >= me.maxFileSize);
+    if (tooBig.length) return (err.textContent = "1GB 미만 파일만 올릴 수 있습니다: " + tooBig.map((f) => f.name).join(", "));
+    err.textContent = "";
+    const [n, forId] = [shown, id];
+    uploads = uploads.then(async () => {
+      for (const file of picked) {
+        const row = await uploadOne(file, progress, { category });
+        if (!row) continue;
+        // The box may have moved on to another note/task meanwhile: the file still goes where it was picked.
+        if (n === shown) await self.attach(row).catch(fail);
+        else if (forId !== null) await call("/api/attachments", { method: "POST", body: { [target]: forId, fileId: row.id } }).catch(() => {});
+      }
+    });
+  };
+
+  function render() {
+    box.replaceChildren(
+      el(
+        "div",
+        { className: "attach-head" },
+        icon("clip"),
+        el("span", { textContent: files.length ? `첨부 파일 ${files.length}개` : "첨부 파일" }),
+        el("button", { type: "button", className: "btn ghost sm", onclick: () => openPicker(self) }, icon("folder"), "클라우드에서 고르기"),
+        me.driveConnected ? el("button", { type: "button", className: "btn ghost sm", onclick: () => input.click() }, icon("upload"), "새로 올리기") : null,
+      ),
+      el(
+        "ul",
+        { className: "attach-list", hidden: !files.length },
+        ...files.map((f) =>
+          el(
+            "li",
+            {},
+            el("a", { href: f.web_view_link, target: "_blank", rel: "noopener", textContent: f.title, title: f.name }),
+            el("span", { className: "muted", textContent: sizeText(f.size) }),
+            iconBtn("떼기", "x", () => detach(f).catch(fail), "danger"),
+          ),
+        ),
+      ),
+      progress,
+      err,
+      input,
+    );
+  }
+  return self;
+}
+
+// 파일함에서 골라 붙이는 창. 여러 개를 연달아 붙일 수 있게 붙여도 닫지 않는다.
+let pickFor = null;
+let pickTimer;
+function openPicker(box) {
+  pickFor = box;
+  $("pick-q").value = "";
+  $("pick-dialog").showModal();
+  loadPickList().catch(showPickError);
+}
+const showPickError = (e) => $("pick-list").replaceChildren(el("li", { className: "error", textContent: e.message }));
+
+async function loadPickList() {
+  const q = $("pick-q").value;
+  const files = await call("/api/files?" + new URLSearchParams({ q }));
+  if (q !== $("pick-q").value) return;
+  $("pick-list").replaceChildren(
+    ...(files.length
+      ? files.map((f) => {
+          const on = pickFor.has(f.id);
+          return el(
+            "li",
+            {},
+            el("span", { className: "pick-name", textContent: f.title }),
+            el("span", { className: "muted", textContent: `${f.category} · ${sizeText(f.size)}` }),
+            el("button", {
+              type: "button",
+              className: "btn sm" + (on ? " ghost" : ""),
+              disabled: on,
+              textContent: on ? "붙임" : "붙이기",
+              onclick: () => pickFor.attach(f).then(loadPickList).catch(showPickError),
+            }),
+          );
+        })
+      : [el("li", { className: "muted", textContent: q ? "검색 결과가 없습니다." : "파일함이 비어 있습니다. \"새로 올리기\"로 올려 보세요." })]),
+  );
 }
 
 // 클라우드(파일함)
@@ -191,7 +326,7 @@ async function loadList() {
         f.web_content_link ? el("a", { className: "btn ghost sm", href: f.web_content_link, title: "받기" }, icon("download")) : "",
         iconBtn("수정", "edit", () => openFileDialog(f)),
         iconBtn("삭제", "trash", () => {
-          if (confirm(`"${f.title}" 을(를) 드라이브 휴지통으로 보낼까요? (30일 뒤 자동 삭제)`)) call(`/api/files/${f.id}`, { method: "DELETE" }).then(loadList, showError);
+          if (confirm(`"${f.title}" 을(를) 드라이브 휴지통으로 보낼까요? (30일 뒤 자동 삭제, 노트·할 일에 붙인 것도 떨어집니다)`)) call(`/api/files/${f.id}`, { method: "DELETE" }).then(loadList, showError);
         }, "danger"),
       ),
     );
@@ -233,6 +368,7 @@ function taskRow(t, today, reload, withActions) {
       "td",
       {},
       el("span", { className: "title" + (t.done ? " done" : ""), textContent: t.title }),
+      t.files ? el("span", { className: "clip", title: `첨부 파일 ${t.files}개` }, icon("clip"), String(t.files)) : null,
       t.note ? el("span", { className: "sub", textContent: t.note }) : null,
       t.note_id ? el("span", { className: "sub" }, el("a", { href: `#notes/${t.note_id}`, textContent: `노트 · ${t.note_title || "제목 없음"}` })) : null,
     ),
@@ -263,6 +399,7 @@ function openTaskDialog(t = null, date = "") {
   $("task-date").value = t?.due_date ?? date;
   $("task-time").value = t?.due_time ?? "";
   $("task-note").value = t?.note ?? "";
+  taskFiles.show(t?.id ?? null, t?.kind === "과제" ? "과제" : "기타");
   $("task-dialog").showModal();
 }
 
@@ -409,6 +546,8 @@ function updateOverdueBadge(n) {
 // 저장하지 못한 초안은 버리지 않는다: 저장이 실패하면 다른 노트를 열지 않고, 다른 곳(다른 탭, 오늘 화면)에서
 // 노트가 바뀌었으면(409) 자동 저장을 멈추고 덮어쓸지 새로 불러올지 묻는다.
 let editor = null;
+let noteFiles = null; // attachBox of the open note
+let taskFiles = null; // attachBox of the task dialog
 let noteId = null; // the open note
 let noteVersion = 0; // the server version the editor content started from
 let noteDirty = false;
@@ -534,6 +673,7 @@ async function loadNotes() {
     $("note-title").value = note.title;
     $("note-status").textContent = "저장됨";
     editor.set(note.blocks);
+    noteFiles.show(note.id);
     page.inert = false;
     if (focusTitle) $("note-title").focus();
     focusTitle = false;
@@ -692,6 +832,13 @@ async function init() {
   $("up-category").append(...opts(categories));
   $("file-category").append(...opts(categories));
   editor = createEditor($("note-editor"), noteChanged);
+  noteFiles = attachBox($("note-files"), "note");
+  taskFiles = attachBox($("task-files"), "task");
+  $("pick-q").oninput = () => {
+    clearTimeout(pickTimer);
+    pickTimer = setTimeout(() => loadPickList().catch(showPickError), 200);
+  };
+  $("pick-form").onsubmit = (ev) => ev.preventDefault(); // Enter in the search box must not close it
   $("note-title").oninput = noteChanged;
   $("note-title").onkeydown = (ev) => {
     if (ev.key !== "Enter" || ev.isComposing || ev.keyCode === 229) return;
@@ -716,7 +863,10 @@ async function init() {
     const body = { kind: $("task-kind").value, title: $("task-title").value, course: $("task-course").value, due_date: $("task-date").value, due_time: $("task-time").value, note: $("task-note").value };
     try {
       if (editingTask) await call(`/api/tasks/${editingTask.id}`, { method: "PATCH", body });
-      else await call("/api/tasks", { method: "POST", body });
+      else {
+        editingTask = await call("/api/tasks", { method: "POST", body }); // a retry after a failed attach must not add it twice
+        await taskFiles.flush(editingTask.id);
+      }
       $("task-dialog").close();
       tabs[currentTab()].load().catch(showError);
     } catch (e) {
@@ -742,7 +892,8 @@ async function init() {
     $("upload-btn").disabled = true;
     $("progress").replaceChildren();
     let ok = true;
-    for (const f of files) ok = (await uploadOne(f)) && ok; // one at a time to keep bandwidth predictable
+    const meta = { category: $("up-category").value, tags: $("up-tags").value, note: $("up-note").value };
+    for (const f of files) ok = !!(await uploadOne(f, $("progress"), meta)) && ok; // one at a time to keep bandwidth predictable
     $("upload-btn").disabled = false;
     $("files").value = "";
     showPicked();
