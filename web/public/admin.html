@@ -169,6 +169,21 @@
   </form>
 </dialog>
 
+<dialog id="notion-dialog">
+  <form method="dialog" id="notion-form">
+    <h2>노션에서 가져오기</h2>
+    <ol class="muted steps">
+      <li><a href="https://www.notion.so/profile/integrations" target="_blank" rel="noopener">노션 통합 페이지</a>에서 새 통합을 만들고(유형: 내부) "내부 통합 시크릿"을 복사합니다.</li>
+      <li>가져올 노션 페이지에서 오른쪽 위 ··· → 연결 → 방금 만든 통합을 추가합니다. 맨 위 페이지만 연결하면 그 아래 페이지와 데이터베이스도 함께 들어옵니다.</li>
+      <li>시크릿을 아래에 붙여 넣고 가져오기를 누릅니다. 시크릿은 이번에만 쓰고 저장하지 않습니다.</li>
+    </ol>
+    <p class="muted" style="margin:0">페이지마다 노트 하나가 됩니다. 노션의 이미지·파일은 파일함에 복사해 노트에 붙입니다. 다시 가져오면 노션에서 바뀐 페이지만 갱신하고, 여기서 고친 노트는 건드리지 않습니다.</p>
+    <label>내부 통합 시크릿<input class="input" type="password" id="notion-token" autocomplete="off" placeholder="ntn_…"></label>
+    <p class="muted" id="notion-status" style="margin:0;white-space:pre-line"></p>
+    <div class="foot"><button class="btn" type="button" data-close>닫기</button><button class="btn primary" value="ok" id="notion-go">가져오기</button></div>
+  </form>
+</dialog>
+
 <dialog id="pick-dialog">
   <form method="dialog" id="pick-form">
     <h2>클라우드에서 고르기</h2>

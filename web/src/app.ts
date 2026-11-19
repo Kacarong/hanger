@@ -1,16 +1,15 @@
 import { createHash } from "node:crypto";
 import { mkdirSync, existsSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { ATTACH_TARGETS, BLOCK_TYPES, CATEGORIES, TASK_KINDS, type Block, type Db, type FileRow, type TaskFields } from "./db";
+import { ATTACH_TARGETS, BLOCK_TYPES, CATEGORIES, NOTE_MAX_BLOCKS, NOTE_MAX_TEXT, TASK_KINDS, type Block, type Db, type FileRow, type TaskFields } from "./db";
 import { GoogleError, type CalendarEvent, type Google } from "./google";
+import { importNotion, newNotionJob, NotionError, type NotionJob } from "./notion";
 import { passwordProblem } from "./password";
 
 export const MAX_FILE_SIZE = 1024 ** 3; // files must be under 1GB
 const SESSION_DAYS = 30;
 const CALENDAR_MAX_DAYS = 62; // longest range /api/calendar serves (a 6-week month grid is 42)
 const UPCOMING_DAYS = 3; // 과제 due within this many days show up on the today screen
-const NOTE_MAX_BLOCKS = 3000;
-const NOTE_MAX_TEXT = 500_000; // characters across all blocks of a note
 const LOGIN_FAIL_LIMIT = 5; // password failures allowed per LOGIN_FAIL_WINDOW
 const LOGIN_FAIL_WINDOW = 15 * 60_000;
 const PUBLIC_DIR = join(import.meta.dir, "..", "public");
@@ -20,6 +19,7 @@ export type AppConfig = {
   adminEmail: string; // only used by Google login
   dataDir: string;
   googleEnabled: boolean; // false until the OAuth client is configured
+  notionApi?: string; // https://api.notion.com unless a test points elsewhere
   now?: () => Date; // for tests
 };
 
@@ -119,6 +119,7 @@ export function createApp(cfg: AppConfig, db: Db, google: Google) {
   const now = cfg.now ?? (() => new Date());
   const today = () => seoulDate(now());
   let loginFailures: number[] = [];
+  let notionJob: NotionJob | null = null; // the latest Notion import, while the server runs
 
   async function body(req: Request): Promise<Record<string, unknown>> {
     try {
@@ -426,6 +427,29 @@ ${items.length ? `<section class="index" id="index"><h2 class="section-title rev
         db.deleteNote(n.id);
         return json({ ok: true });
       }
+    }
+
+    // Notion import: POST { token } starts it in the background, GET tells how far it got.
+    // The token is used for this run only and never stored.
+    if (path === "/api/notion/import" && method === "GET") return json(notionJob ?? { status: "idle" });
+    if (path === "/api/notion/import" && method === "POST") {
+      if (notionJob?.status === "running") return json({ error: "이미 노션에서 가져오는 중입니다" }, 409);
+      const token = str((await body(req)).token, 300);
+      if (!token) return json({ error: "노션 통합 시크릿을 넣어 주세요" }, 400);
+      const job = (notionJob = newNotionJob());
+      const saveFile = async (name: string, mime: string, bytes: Blob) => {
+        const d = await google.upload(name, mime, bytes, origin);
+        return db.insertFile({ drive_id: d.id, name: d.name, title: d.name, mime: d.mimeType, size: Number(d.size ?? bytes.size), category: "기타", tags: "노션", note: "", web_view_link: d.webViewLink ?? "", web_content_link: d.webContentLink ?? "" });
+      };
+      importNotion({ token, apiBase: cfg.notionApi ?? "https://api.notion.com", db, saveFile, job }).then(
+        () => (job.status = "done"),
+        (e) => {
+          if (!(e instanceof NotionError)) console.error("notion import:", e);
+          job.status = "failed";
+          job.error = e instanceof NotionError ? e.message : "가져오다가 서버 오류가 났습니다";
+        },
+      );
+      return json(job, 202);
     }
 
     // Cloud files attached to a note or a task: ?note=ID or ?task=ID (POST: { note | task, fileId }).

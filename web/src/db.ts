@@ -42,6 +42,8 @@ export type TaskFields = Pick<TaskRow, "kind" | "title" | "course" | "due_date" 
 // A note is a list of blocks. A "todo" block with a date is also a task (tasks.note_id/block_id),
 // so it shows up on the today screen and the calendar.
 export const BLOCK_TYPES = ["p", "h1", "h2", "h3", "todo", "bullet", "number", "quote", "code", "divider"];
+export const NOTE_MAX_BLOCKS = 3000;
+export const NOTE_MAX_TEXT = 500_000; // characters across all blocks of a note
 export type Block = { id: string; type: string; text: string; checked?: boolean; date?: string; time?: string };
 // version goes up on every write; a save must name the version it started from (see saveNote).
 export type NoteRow = { id: number; title: string; blocks: Block[]; version: number; created_at: string; updated_at: string };
@@ -106,6 +108,10 @@ export function openDb(path: string) {
       UNIQUE (target, target_id, file_id)
     );
     -- Whatever removes a note, task or file (including tasks a note save drops) also drops its attachments.
+    -- What the Notion import brought in, so running it again updates instead of duplicating.
+    -- version is the note version right after the import: a different one means it was edited here since.
+    CREATE TABLE IF NOT EXISTS notion_pages (page_id TEXT PRIMARY KEY, note_id INTEGER NOT NULL, edited TEXT NOT NULL, version INTEGER NOT NULL);
+    CREATE TABLE IF NOT EXISTS notion_files (block_id TEXT PRIMARY KEY, file_id INTEGER NOT NULL);
     CREATE TRIGGER IF NOT EXISTS attachments_note_gone AFTER DELETE ON notes BEGIN
       DELETE FROM attachments WHERE target = 'note' AND target_id = old.id;
     END;
@@ -298,6 +304,23 @@ export function openDb(path: string) {
     },
     deleteAttachment(id: number): boolean {
       return db.query("DELETE FROM attachments WHERE id = ?").run(id).changes > 0;
+    },
+    // Notion import: dates come from Notion so the list keeps Notion's order.
+    setNoteTimes(id: number, created: string, updated: string) {
+      db.query("UPDATE notes SET created_at = ?, updated_at = ? WHERE id = ?").run(created, updated, id);
+    },
+    notionPage(pageId: string): { note_id: number; edited: string; version: number } | null {
+      return db.query("SELECT note_id, edited, version FROM notion_pages WHERE page_id = ?").get(pageId) as { note_id: number; edited: string; version: number } | null;
+    },
+    setNotionPage(pageId: string, noteId: number, edited: string, version: number) {
+      db.query("INSERT OR REPLACE INTO notion_pages (page_id, note_id, edited, version) VALUES (?, ?, ?, ?)").run(pageId, noteId, edited, version);
+    },
+    // The 파일함 copy of a Notion file block, if it is still there.
+    notionFile(blockId: string): FileRow | null {
+      return db.query("SELECT files.* FROM notion_files JOIN files ON files.id = notion_files.file_id WHERE block_id = ?").get(blockId) as FileRow | null;
+    },
+    setNotionFile(blockId: string, fileId: number) {
+      db.query("INSERT OR REPLACE INTO notion_files (block_id, file_id) VALUES (?, ?)").run(blockId, fileId);
     },
     deleteNote: db.transaction((id: number) => {
       db.query("DELETE FROM tasks WHERE note_id = ?").run(id);

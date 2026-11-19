@@ -222,6 +222,13 @@ export function createGoogle(cfg: GoogleConfig, db: Db) {
       return { next: range ? Number(range.split("-")[1]) + 1 : 0 };
     },
 
+    // Uploads bytes the server already holds (the Notion import) in one PUT to a resumable session.
+    async upload(name: string, mimeType: string, bytes: Blob, origin: string): Promise<DriveFile> {
+      const location = await this.startUpload({ name, mimeType, size: bytes.size, origin });
+      const res = await check(await fetch(location, { method: "PUT", headers: { "Content-Type": mimeType }, body: bytes }), "업로드");
+      return (await res.json()) as DriveFile;
+    },
+
     async share(id: string) {
       await api(
         `/drive/v3/files/${encodeURIComponent(id)}/permissions?fields=id`,

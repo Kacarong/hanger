@@ -723,6 +723,35 @@ async function deleteNote() {
   else location.hash = "#notes";
 }
 
+// 노션 가져오기는 서버에서 돌고, 화면은 1초마다 어디까지 했는지 묻는다(창을 닫아도 계속된다).
+let notionTimer;
+function notionText(j) {
+  const counts = `새 노트 ${j.added} · 갱신 ${j.updated} · 그대로 ${j.unchanged}${j.files ? ` · 파일 ${j.files}개 복사` : ""}`;
+  if (j.status === "running") return `가져오는 중… 페이지 ${j.done}/${j.total || "?"}\n${counts}`;
+  if (j.status === "failed") return `가져오지 못했습니다: ${j.error}${j.done ? `\n(멈추기 전까지: ${counts})` : ""}`;
+  return [
+    `다 가져왔습니다. ${counts}`,
+    !j.total && "통합에 연결된 페이지가 없습니다. 2번(페이지에 통합 연결)을 확인해 주세요.",
+    j.skipped.length && `여기서 고친 노트라 노션 내용으로 덮지 않음: ${j.skipped.join(", ")}`,
+    j.failed.length && `가져오지 못한 페이지: ${j.failed.join(", ")}`,
+    j.fileProblems && `가져오지 못한 파일 ${j.fileProblems}개 (노트에 "가져오지 못함"으로 표시)`,
+  ].filter(Boolean).join("\n");
+}
+async function watchNotion(wasRunning = false) {
+  clearTimeout(notionTimer);
+  const j = await call("/api/notion/import");
+  $("notion-status").textContent = j.status === "idle" ? "" : notionText(j);
+  $("notion-go").disabled = j.status === "running";
+  if (j.status === "running") notionTimer = setTimeout(() => watchNotion(true).catch(showError), 1000);
+  else if (wasRunning && currentTab() === "notes") loadNotes().catch(showError);
+}
+function openNotion() {
+  $("notion-token").value = "";
+  $("notion-status").textContent = "";
+  $("notion-dialog").showModal();
+  watchNotion().catch(showError);
+}
+
 // 검색: 할 일은 화면에서 거르고, 파일은 서버에 묻는다.
 const searchText = () => $("global-search").value.trim().toLowerCase();
 const matches = (t, q) => !q || [t.title, t.course, t.note].some((v) => (v ?? "").toLowerCase().includes(q));
@@ -736,6 +765,7 @@ const tabs = {
     load: () => loadNotes(),
     actions: () => [
       el("button", { className: "btn ghost danger", type: "button", id: "note-delete", title: "노트 삭제", ariaLabel: "노트 삭제", hidden: true, onclick: () => deleteNote().catch(showError) }, icon("trash")),
+      el("button", { className: "btn", type: "button", onclick: openNotion }, icon("download"), "노션에서 가져오기"),
       el("button", { className: "btn primary", type: "button", onclick: () => newNote().catch(showError) }, icon("plus"), "새 노트", el("kbd", { textContent: "N" })),
     ],
   },
@@ -970,6 +1000,16 @@ async function init() {
       $("msg").textContent = "비밀번호를 바꿨습니다. 다른 기기의 로그인은 모두 풀렸습니다.";
     } catch (e) {
       $("pw-msg").textContent = e.message;
+    }
+  };
+  $("notion-form").onsubmit = async (ev) => {
+    ev.preventDefault();
+    try {
+      await call("/api/notion/import", { method: "POST", body: { token: $("notion-token").value.trim() } });
+      $("notion-token").value = "";
+      await watchNotion(true);
+    } catch (e) {
+      $("notion-status").textContent = e.message;
     }
   };
   $("logout").onclick = () => {

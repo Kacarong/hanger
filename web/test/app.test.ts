@@ -149,7 +149,7 @@ beforeAll(() => {
 
 afterAll(() => fake.stop(true));
 
-function makeApp(opts: { googleEnabled?: boolean; now?: () => Date } = {}) {
+function makeApp(opts: { googleEnabled?: boolean; now?: () => Date; notionApi?: string } = {}) {
   const dataDir = mkdtempSync(join(tmpdir(), "folio-test-"));
   const db = openDb(join(dataDir, "t.db"));
   const google = createGoogle(
@@ -164,7 +164,7 @@ function makeApp(opts: { googleEnabled?: boolean; now?: () => Date } = {}) {
     db,
   );
   const fetch = createApp(
-    { baseUrl: "https://kacarong.kr", adminEmail: "owner@example.com", dataDir, googleEnabled: opts.googleEnabled ?? true, now: opts.now },
+    { baseUrl: "https://kacarong.kr", adminEmail: "owner@example.com", dataDir, googleEnabled: opts.googleEnabled ?? true, now: opts.now, notionApi: opts.notionApi },
     db,
     google,
   );
@@ -898,6 +898,186 @@ test("클라우드 첨부: 노트·할 일에 파일함 파일을 붙이고 떼�
     expect(db.raw.query("SELECT COUNT(*) AS n FROM attachments").get()).toEqual({ n: 0 });
     expect(db.getFile(b.id)).not.toBeNull();
   } finally {
+    cleanup();
+  }
+});
+
+test("노션 가져오기: 페이지·데이터베이스 행은 노트로, 파일은 파일함으로, 다시 돌리면 노션에서 바뀐 것만 갱신", async () => {
+  loginEmail = "owner@example.com";
+  const uid = (n: number) => `00000000-0000-0000-0000-${String(n).padStart(12, "0")}`;
+  const rt = (text: string, extra: object = {}) => ({ type: "text", plain_text: text, href: null, ...extra });
+  const children = new Map<string, object[]>();
+  let n = 100;
+  const blk = (type: string, data: object, kids?: object[]) => {
+    const id = uid(n++);
+    if (kids) children.set(id, kids);
+    return { object: "block", id, type, has_children: !!kids, [type]: data };
+  };
+  const [A, SUB, ROW, OLD] = [1, 2, 3, 4].map(uid) as [string, string, string, string];
+  const title = (t: string) => ({ 이름: { type: "title", title: [rt(t)] } });
+  const pages: Record<string, unknown>[] = [
+    { object: "page", id: A, created_time: "2026-09-01T00:00:00.000Z", last_edited_time: "2026-11-10T01:00:00.000Z", icon: { type: "emoji", emoji: "📚" }, properties: title("강의 노트") },
+    { object: "page", id: SUB, created_time: "2026-09-02T00:00:00.000Z", last_edited_time: "2026-11-05T00:00:00.000Z", properties: title("하위 페이지") },
+    {
+      object: "page", id: ROW, created_time: "2026-11-01T00:00:00.000Z", last_edited_time: "2026-11-12T00:00:00.000Z",
+      properties: {
+        ...title("회의"),
+        날짜: { type: "date", date: { start: "2026-11-21", end: null } },
+        태그: { type: "multi_select", multi_select: [{ name: "학교" }, { name: "팀" }] },
+        상태: { type: "status", status: { name: "진행 중" } },
+        메모: { type: "rich_text", rich_text: [] },
+      },
+    },
+    { object: "page", id: OLD, archived: true, created_time: "2026-01-01T00:00:00.000Z", last_edited_time: "2026-01-01T00:00:00.000Z", properties: title("지운 페이지") },
+  ];
+  let notion: ReturnType<typeof Bun.serve>;
+  const fileUrl = (name: string) => `${notion!.url}files/${name}?X-Amz-Signature=abc`;
+  let throttled = false;
+  let childCalls = 0;
+  notion = Bun.serve({
+    port: 0,
+    async fetch(req) {
+      const url = new URL(req.url);
+      if (url.pathname === "/files/board.png") return new Response("PNGBYTES", { headers: { "Content-Type": "image/png" } });
+      if (url.pathname.startsWith("/files/")) return new Response("gone", { status: 404 });
+      if (req.headers.get("Authorization") !== "Bearer ntn_good") return Response.json({ code: "unauthorized" }, { status: 401 });
+      if (req.headers.get("Notion-Version") !== "2022-06-28") return new Response("version", { status: 400 });
+      const slice = (list: unknown[], cursor: string | null | undefined, size: number) => {
+        const i = Number(cursor ?? 0);
+        const more = i + size < list.length;
+        return Response.json({ results: list.slice(i, i + size), has_more: more, next_cursor: more ? String(i + size) : null });
+      };
+      if (url.pathname === "/v1/search" && req.method === "POST") {
+        if (!throttled) return ((throttled = true), new Response("slow down", { status: 429, headers: { "Retry-After": "0" } }));
+        const b = await req.json();
+        if (b.filter?.value !== "page") return new Response("filter", { status: 400 });
+        return slice(pages, b.start_cursor, 2);
+      }
+      const m = url.pathname.match(/^\/v1\/blocks\/([^/]+)\/children$/);
+      const list = m && children.get(m[1]!);
+      if (!list) return new Response("not found", { status: 404 });
+      childCalls++;
+      return slice(list, url.searchParams.get("start_cursor"), 4);
+    },
+  });
+  const file = (name: string) => ({ type: "file", file: { url: fileUrl(name), expiry_time: "2026-11-19T04:00:00.000Z" }, caption: [] });
+  children.set(A, [
+    blk("heading_1", { rich_text: [rt("1주차")] }),
+    blk("paragraph", { rich_text: [rt("굵게 "), rt("링크", { href: "https://example.com" })] }),
+    blk("to_do", { checked: false, rich_text: [rt("과제 제출 "), { type: "mention", plain_text: "2026년 11월 20일", mention: { type: "date", date: { start: "2026-11-20T09:00:00.000+09:00" } } }] }),
+    blk("to_do", { checked: true, rich_text: [rt("끝난 일")] }),
+    blk("bulleted_list_item", { rich_text: [rt("항목")] }, [blk("bulleted_list_item", { rich_text: [rt("하위 항목")] })]),
+    blk("toggle", { rich_text: [rt("접기")] }, [blk("paragraph", { rich_text: [rt("숨은 글")] })]),
+    blk("table", { table_width: 2 }, [blk("table_row", { cells: [[rt("a")], [rt("b")]] }), blk("table_row", { cells: [[rt("1")], [rt("2")]] })]),
+    blk("image", file("board.png")),
+    blk("image", file("missing.png")),
+    blk("image", { type: "external", external: { url: "https://img.example/x.png" }, caption: [rt("외부 그림")] }),
+    blk("child_page", { title: "하위 페이지" }),
+    blk("code", { rich_text: [rt("print(1)")], language: "python" }),
+    blk("divider", {}),
+    blk("callout", { rich_text: [rt("주의")], icon: { type: "emoji", emoji: "💡" } }),
+    blk("column_list", {}, [blk("column", {}, [blk("paragraph", { rich_text: [rt("왼쪽")] })])]),
+    blk("unsupported", {}),
+  ]);
+  children.set(SUB, [blk("paragraph", { rich_text: [rt("하위 내용")] })]);
+  children.set(ROW, []);
+
+  const { call, db, cleanup } = makeApp({ notionApi: notion.url.toString().replace(/\/$/, "") });
+  try {
+    const { cookie } = await login(call);
+    const req = (path: string, method: string, b?: object) => call(path, { method, cookie, headers: JSON_ORIGIN, body: b ? JSON.stringify(b) : undefined });
+    const status = async () => (await (await req("/api/notion/import", "GET")).json()) as Record<string, unknown>;
+    const finish = async () => {
+      for (let i = 0; i < 1000; i++) {
+        const j = await status();
+        if (j.status !== "running") return j;
+        await Bun.sleep(5);
+      }
+      throw new Error("가져오기가 끝나지 않음");
+    };
+
+    expect((await call("/api/notion/import", { method: "POST", headers: JSON_ORIGIN, body: JSON.stringify({ token: "ntn_good" }) })).status).toBe(401);
+    expect(await status()).toEqual({ status: "idle" });
+    expect((await req("/api/notion/import", "POST", {})).status).toBe(400);
+    expect((await req("/api/notion/import", "POST", { token: "ntn_bad" })).status).toBe(202);
+    const bad = await finish();
+    expect(bad.status).toBe("failed");
+    expect(bad.error).toContain("토큰");
+
+    // One run at a time; Notion's "slow down" (429) is waited out.
+    expect((await req("/api/notion/import", "POST", { token: "ntn_good" })).status).toBe(202);
+    expect((await req("/api/notion/import", "POST", { token: "ntn_good" })).status).toBe(409);
+    expect(await finish()).toMatchObject({ status: "done", total: 3, done: 3, added: 3, updated: 0, unchanged: 0, skipped: [], failed: [], files: 1, fileProblems: 1 });
+
+    // Notes keep Notion's titles (with the page icon) and edit times, so the list is in Notion's order.
+    const list = (await (await req("/api/notes", "GET")).json()) as { id: number; title: string; updated_at: string }[];
+    expect(list.map((x) => [x.title, x.updated_at])).toEqual([
+      ["회의", "2026-11-12 00:00:00"],
+      ["📚 강의 노트", "2026-11-10 01:00:00"],
+      ["하위 페이지", "2026-11-05 00:00:00"],
+    ]);
+    const [rowId, aId, subId] = list.map((x) => x.id) as [number, number, number];
+    const a = db.getNote(aId)!;
+    expect(a.blocks.map((b) => [b.type, b.text])).toEqual([
+      ["h1", "1주차"],
+      ["p", "굵게 링크 (https://example.com)"],
+      ["todo", "과제 제출"],
+      ["todo", "끝난 일"],
+      ["bullet", "항목"],
+      ["bullet", "하위 항목"],
+      ["p", "▸ 접기"],
+      ["p", "숨은 글"],
+      ["p", "a | b"],
+      ["p", "1 | 2"],
+      ["p", "🖼 board.png"],
+      ["p", "🖼 missing.png (가져오지 못함: 다운로드 실패 (404))"],
+      ["p", "🖼 외부 그림 https://img.example/x.png"],
+      ["p", "📄 하위 페이지"],
+      ["code", "print(1)"],
+      ["divider", ""],
+      ["quote", "💡 주의"],
+      ["p", "왼쪽"],
+    ]);
+    // A dated checkbox is a task on the today screen and calendar; a checked one stays checked.
+    expect(a.blocks[2]).toMatchObject({ checked: false, date: "2026-11-20", time: "09:00" });
+    expect(a.blocks[3]).toMatchObject({ checked: true });
+    const task = db.listTasks({}).find((t) => t.note_id === aId)!;
+    expect(task).toMatchObject({ title: "과제 제출", due_date: "2026-11-20", due_time: "09:00", done: 0 });
+    // Database columns become lines at the top of the row's note.
+    expect(db.getNote(rowId)!.blocks.map((b) => b.text)).toEqual(["날짜: 2026-11-21\n태그: 학교, 팀\n상태: 진행 중"]);
+    expect(db.getNote(subId)!.blocks.map((b) => b.text)).toEqual(["하위 내용"]);
+
+    // The Notion-hosted image is copied into the 파일함 and attached to its note.
+    const files = (await (await req(`/api/attachments?note=${aId}`, "GET")).json()) as { title: string; tags: string; drive_id: string; mime: string }[];
+    expect(files.map((f) => [f.title, f.tags, f.mime])).toEqual([["board.png", "노션", "image/png"]]);
+    expect(drive.get(files[0]!.drive_id)).toMatchObject({ name: "board.png", bytes: 8 });
+
+    // Imported notes save normally from the editor. Editing one here...
+    const row = db.getNote(rowId)!;
+    expect((await req(`/api/notes/${rowId}`, "PUT", { title: "회의", version: row.version, blocks: [...row.blocks, { id: "mine", type: "p", text: "사이트에서 쓴 글" }] })).status).toBe(200);
+    // ...and deleting one.
+    await req(`/api/notes/${subId}`, "DELETE");
+
+    // Nothing new in Notion: nothing is read again or copied again.
+    const calls = childCalls;
+    expect(await (await req("/api/notion/import", "POST", { token: "ntn_good" })).json()).toMatchObject({ status: "running" });
+    expect(await finish()).toMatchObject({ status: "done", added: 0, updated: 0, unchanged: 3, skipped: [], files: 0 });
+    expect(childCalls).toBe(calls);
+
+    // Edited in Notion: the page updates (same image, same task); the note edited here and the deleted one stay as they are.
+    for (const p of pages) p.last_edited_time = "2026-11-15T00:00:00.000Z";
+    children.get(A)!.push(blk("paragraph", { rich_text: [rt("추가한 글")] }));
+    const driveCount = drive.size;
+    await req("/api/notion/import", "POST", { token: "ntn_good" });
+    expect(await finish()).toMatchObject({ status: "done", added: 0, updated: 1, unchanged: 1, skipped: ["회의"], failed: [], files: 0 });
+    expect(db.getNote(aId)!.blocks.at(-1)).toMatchObject({ type: "p", text: "추가한 글" });
+    expect(db.getNote(rowId)!.blocks.at(-1)).toMatchObject({ text: "사이트에서 쓴 글" });
+    expect(db.getNote(subId)).toBeNull();
+    expect(drive.size).toBe(driveCount);
+    expect((await (await req(`/api/attachments?note=${aId}`, "GET")).json()) as unknown[]).toHaveLength(1);
+    expect(db.listTasks({}).find((t) => t.note_id === aId)!.id).toBe(task.id);
+  } finally {
+    notion.stop(true);
     cleanup();
   }
 });
