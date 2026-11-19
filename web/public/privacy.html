@@ -19,7 +19,8 @@ p, li { color: #cfcfcf; } a { color: #f3c7ad; } .muted { color: #8b8b8b; font-si
 </ul>
 
 <h2>2. 구글 사용자 데이터의 사용</h2>
-<p>사이트는 구글 로그인(openid, email)과 구글 드라이브(drive.file) 권한만 요청합니다. drive.file 권한으로는 사이트가 직접 만든 파일과 폴더에만 접근하며, 운영자가 올린 파일을 운영자 본인의 구글 드라이브에 저장하고 공유 설정을 바꾸는 데만 씁니다. 그 밖의 드라이브 파일은 읽지 않습니다.</p>
+<p>사이트는 구글 로그인(openid, email), 구글 드라이브(drive.file), 구글 캘린더 읽기(calendar.readonly) 권한만 요청합니다. drive.file 권한으로는 사이트가 직접 만든 파일과 폴더에만 접근하며, 운영자가 올린 파일을 운영자 본인의 구글 드라이브에 저장하고 공유 설정을 바꾸는 데만 씁니다. 그 밖의 드라이브 파일은 읽지 않습니다.</p>
+<p>calendar.readonly 권한으로는 운영자의 캘린더 목록과 일정을 읽어 관리 화면의 캘린더에 보여 주기만 합니다. 일정을 만들거나 고치거나 지우지 않고, 일정 내용을 사이트 서버에 저장하지 않습니다.</p>
 <p>사이트가 구글 API로 받은 정보의 사용과 다른 앱으로의 전송은 제한적 사용(Limited Use) 요건을 포함한 <a href="https://developers.google.com/terms/api-services-user-data-policy" target="_blank" rel="noopener">Google API 서비스 사용자 데이터 정책</a>을 따릅니다. 구글 사용자 데이터를 광고에 쓰거나 판매하지 않고, 제3자에게 제공하지 않습니다.</p>
 
 <h2>3. 보관과 삭제</h2>

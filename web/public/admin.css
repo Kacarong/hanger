@@ -151,6 +151,29 @@ dialog .foot { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4
 .progress .bar-fill { height: 100%; width: 0; background: var(--blue); transition: width .2s; }
 .progress li.error { color: var(--orange); }
 
+/* 캘린더 */
+.cal-month { min-width: 92px; text-align: center; font-size: 14px; font-weight: 600; }
+.cal { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); border-top: 1px solid var(--line); }
+.cal-head { padding: 6px 8px; font-size: 12px; color: var(--muted); border-bottom: 1px solid var(--line); }
+.cal-head:first-child { color: var(--orange); }
+.cal-day { min-height: 108px; max-height: 160px; overflow-y: auto; padding: 4px 4px 6px; border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); cursor: pointer; }
+.cal-day:nth-child(7n) { border-right: 0; }
+.cal-day:hover { background: rgba(255,255,255,.018); }
+.cal-day.other { background: rgba(0,0,0,.25); }
+.cal-day.other .cal-num { color: var(--dim); }
+.cal-num { display: inline-grid; place-items: center; min-width: 22px; height: 22px; margin: 0 0 2px 2px; border-radius: 11px; font-size: 12px; color: var(--fg-2); }
+.cal-day.today .cal-num { background: var(--blue); color: #111; font-weight: 600; }
+.cal-item { display: flex; align-items: center; gap: 5px; width: 100%; min-height: 20px; padding: 1px 5px; border: 0; border-radius: 4px; background: none; font-size: 12px; text-align: left; cursor: pointer; overflow: hidden; white-space: nowrap; }
+.cal-item:hover { background: var(--hover); }
+.cal-item span { overflow: hidden; text-overflow: ellipsis; }
+.cal-item .t { flex: none; color: var(--muted); font-variant-numeric: tabular-nums; }
+.cal-item .dot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--blue); }
+.cal-item.task .dot { border-radius: 2px; background: none; box-shadow: inset 0 0 0 1.5px var(--fg-2); }
+.cal-item.task.hw .dot { box-shadow: inset 0 0 0 1.5px var(--blue); }
+.cal-item.task.done { color: var(--muted); text-decoration: line-through; }
+.cal-item.task.done .dot { background: var(--muted); box-shadow: none; }
+.cal-item.task.late { color: var(--orange); }
+
 @media (max-width: 860px) {
   .app { grid-template-columns: 1fr; padding: 0; }
   .side { position: fixed; inset: 0 auto 0 0; width: 260px; z-index: 20; background: var(--bg); border-right: 1px solid var(--line); padding: 12px; transform: translateX(-100%); transition: transform .25s; }
@@ -160,4 +183,7 @@ dialog .foot { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4
   .table .hide-sm { display: none; }
   .table .actions { opacity: 1; }
   .bar kbd { display: none; }
+  .cal-day { min-height: 72px; padding: 2px; }
+  .cal-item { padding: 1px 2px; font-size: 11px; }
+  .cal-item .t { display: none; }
 }

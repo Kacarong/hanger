@@ -10,7 +10,8 @@ export type GoogleConfig = {
   apiBase: string; // https://www.googleapis.com
 };
 
-export const SCOPES = "openid email https://www.googleapis.com/auth/drive.file";
+export const CALENDAR_SCOPE = "https://www.googleapis.com/auth/calendar.readonly";
+export const SCOPES = `openid email https://www.googleapis.com/auth/drive.file ${CALENDAR_SCOPE}`;
 const FILE_FIELDS = "id,name,mimeType,size,parents,trashed,webViewLink,webContentLink,thumbnailLink";
 
 export type DriveFile = {
@@ -23,6 +24,17 @@ export type DriveFile = {
   webViewLink?: string;
   webContentLink?: string;
   thumbnailLink?: string;
+};
+
+// One event from the user's Google Calendar, tagged with the calendar it came from.
+export type CalendarEvent = {
+  id: string;
+  summary?: string;
+  htmlLink?: string;
+  start: { date?: string; dateTime?: string };
+  end: { date?: string; dateTime?: string };
+  calendar: string;
+  color: string;
 };
 
 export class GoogleError extends Error {
@@ -61,7 +73,7 @@ export function createGoogle(cfg: GoogleConfig, db: Db) {
       body: new URLSearchParams({ client_id: cfg.clientId, client_secret: cfg.clientSecret, ...params }),
     });
     await check(res, "구글 토큰 요청");
-    return (await res.json()) as { access_token: string; expires_in: number; refresh_token?: string; id_token?: string };
+    return (await res.json()) as { access_token: string; expires_in: number; refresh_token?: string; id_token?: string; scope?: string };
   }
 
   // Exchanges the login code. The id_token comes straight from Google's token endpoint over TLS,
@@ -78,8 +90,9 @@ export function createGoogle(cfg: GoogleConfig, db: Db) {
     };
   }
 
-  function saveTokens(t: { access_token: string; expires_in: number; refresh_token?: string }) {
+  function saveTokens(t: { access_token: string; expires_in: number; refresh_token?: string; scope?: string }) {
     if (t.refresh_token) db.setSetting("refresh_token", t.refresh_token);
+    if (t.scope) db.setSetting("granted_scopes", t.scope); // the user may untick some scopes on the consent screen
     accessToken = { token: t.access_token, expiresAt: Date.now() + (t.expires_in - 60) * 1000 };
   }
 
@@ -126,12 +139,36 @@ export function createGoogle(cfg: GoogleConfig, db: Db) {
     return (await res.json()) as DriveFile;
   }
 
+  // Tokens saved before the calendar scope was added have no granted_scopes, so they count as not granted.
+  function calendarGranted(): boolean {
+    return (db.getSetting("granted_scopes") ?? "").split(" ").includes(CALENDAR_SCOPE);
+  }
+
   return {
     authRedirect,
     exchangeCode,
     saveTokens,
     rootFolder,
     getFile,
+    calendarGranted,
+
+    // Events between two instants from every calendar the user has checked in Google Calendar.
+    async events(timeMin: string, timeMax: string): Promise<CalendarEvent[]> {
+      const res = await api("/calendar/v3/users/me/calendarList?fields=items(id,summary,backgroundColor,selected,primary)", {}, "캘린더 목록 조회");
+      type Cal = { id: string; summary?: string; backgroundColor?: string; selected?: boolean; primary?: boolean };
+      const cals = (((await res.json()) as { items?: Cal[] }).items ?? []).filter((c) => c.selected || c.primary);
+      const q = new URLSearchParams({ timeMin, timeMax, singleEvents: "true", orderBy: "startTime", maxResults: "2500", timeZone: "Asia/Seoul" });
+      const lists = await Promise.all(
+        cals.map(async (c) => {
+          const r = await api(`/calendar/v3/calendars/${encodeURIComponent(c.id)}/events?${q}`, {}, "캘린더 일정 조회");
+          const items = ((await r.json()) as { items?: (Omit<CalendarEvent, "calendar" | "color"> & { status?: string })[] }).items ?? [];
+          return items
+            .filter((e) => e.status !== "cancelled" && e.start && e.end)
+            .map((e) => ({ id: e.id, summary: e.summary, htmlLink: e.htmlLink, start: e.start, end: e.end, calendar: c.summary ?? "", color: c.backgroundColor ?? "" }));
+        }),
+      );
+      return lists.flat();
+    },
 
     // Starts a resumable upload session; the browser then PUTs the bytes straight to Google.
     // Passing Origin here is what makes Google answer the browser's CORS requests on the session URI.

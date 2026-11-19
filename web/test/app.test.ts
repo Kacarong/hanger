@@ -12,6 +12,10 @@ const drive = new Map<string, FakeFile>();
 const uploads = new Map<string, { name: string; mimeType: string; parents: string[]; size: number; received: number; origin: string | null; fileId?: string }>();
 let foldersCreated = 0;
 let loginEmail = "owner@example.com";
+const FULL_SCOPE = "openid email https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/calendar.readonly";
+let grantedScope = FULL_SCOPE; // what the fake consent screen lets through
+let calendarFails = false;
+const eventQueries: URLSearchParams[] = [];
 let nextId = 1;
 let fake: ReturnType<typeof Bun.serve>;
 
@@ -43,7 +47,7 @@ beforeAll(() => {
       if (p === "/token") {
         const form = new URLSearchParams(await req.text());
         if (form.get("grant_type") === "authorization_code" && form.get("code") !== "good-code") return new Response("bad code", { status: 400 });
-        return Response.json({ access_token: "at", expires_in: 3600, refresh_token: "rt", id_token: idToken(loginEmail) });
+        return Response.json({ access_token: "at", expires_in: 3600, refresh_token: "rt", id_token: idToken(loginEmail), scope: grantedScope });
       }
       if (p.startsWith("/thumbs/")) {
         if (req.headers.get("Authorization") !== "Bearer at") return new Response("no", { status: 403 });
@@ -86,6 +90,33 @@ beforeAll(() => {
         const f: FakeFile = { id: `folder${nextId++}`, name: meta.name, mimeType: meta.mimeType, parents: [], trashed: false, anyone: false, bytes: 0 };
         drive.set(f.id, f);
         return Response.json({ id: f.id });
+      }
+      if (p === "/calendar/v3/users/me/calendarList") {
+        return Response.json({
+          items: [
+            { id: "me@example.com", summary: "내 캘린더", backgroundColor: "#9fe1e7", primary: true },
+            { id: "ko#holiday@group.v.calendar.google.com", summary: "대한민국의 휴일", backgroundColor: "red;x", selected: true },
+            { id: "hidden", summary: "꺼 둔 캘린더", backgroundColor: "#000000", selected: false },
+          ],
+        });
+      }
+      const cal = p.match(/^\/calendar\/v3\/calendars\/([^/]+)\/events$/);
+      if (cal) {
+        if (calendarFails) return new Response("Calendar API has not been used in project", { status: 403 });
+        eventQueries.push(url.searchParams);
+        const id = decodeURIComponent(cal[1]!);
+        const items =
+          id === "me@example.com"
+            ? [
+                { id: "e1", summary: "새벽 회의", start: { dateTime: "2026-11-18T15:30:00Z" }, end: { dateTime: "2026-11-18T16:30:00Z" }, htmlLink: "https://cal.example/e1" },
+                { id: "e2", summary: "전시 준비", start: { date: "2026-11-20" }, end: { date: "2026-11-23" } },
+                { id: "e3", summary: "자정에 끝남", start: { dateTime: "2026-11-20T23:00:00+09:00" }, end: { dateTime: "2026-11-21T00:00:00+09:00" } },
+                { id: "e4", summary: "취소됨", status: "cancelled", start: { date: "2026-11-19" }, end: { date: "2026-11-20" } },
+              ]
+            : id === "ko#holiday@group.v.calendar.google.com"
+              ? [{ id: "h1", start: { date: "2026-11-25" }, end: { date: "2026-11-26" } }]
+              : [{ id: "x", summary: "보이면 안 됨", start: { date: "2026-11-19" }, end: { date: "2026-11-20" } }];
+        return Response.json({ items });
       }
       if (p === "/drive/v3/about") return Response.json({ storageQuota: { limit: String(400 * 1024 ** 3), usage: "1024", usageInDriveTrash: "0" } });
 
@@ -424,6 +455,79 @@ test("할 일·과제: 추가 → 오늘 화면 분류 → 완료 → 수정·�
 
     expect((await call(`/api/tasks/${soon.id}`, { method: "DELETE", cookie, headers: JSON_ORIGIN })).status).toBe(200);
     expect(db.getTask(soon.id)).toBeNull();
+  } finally {
+    cleanup();
+  }
+});
+
+test("캘린더: 권한 없으면 다시 동의 요청, 구글 일정 + 할 일을 한국 날짜로", async () => {
+  loginEmail = "owner@example.com";
+  const { call, cleanup } = makeApp();
+  try {
+    // A grant without the calendar scope (old token, or unticked on the consent screen).
+    grantedScope = "openid email https://www.googleapis.com/auth/drive.file";
+    const { cookie } = await login(call);
+    expect(await (await call("/api/me", { cookie })).json()).toMatchObject({ driveConnected: true, calendarConnected: false });
+    let r = (await (await call("/api/calendar?from=2026-11-15&to=2026-11-30", { cookie })).json()) as Record<string, unknown>;
+    expect(r.google).toBe("need_consent");
+    const again = new URL((await call("/auth/login")).headers.get("Location")!);
+    expect(again.searchParams.get("prompt")).toBe("consent"); // refresh token exists, but a new grant is needed
+    expect(again.searchParams.get("scope")).toContain("calendar.readonly");
+
+    grantedScope = FULL_SCOPE;
+    await login(call);
+    expect(await (await call("/api/me", { cookie })).json()).toMatchObject({ calendarConnected: true });
+    expect(new URL((await call("/auth/login")).headers.get("Location")!).searchParams.get("prompt")).toBeNull();
+
+    await call("/api/tasks", { method: "POST", cookie, headers: JSON_ORIGIN, body: JSON.stringify({ kind: "과제", title: "레포트", due_date: "2026-11-22" }) });
+    await call("/api/tasks", { method: "POST", cookie, headers: JSON_ORIGIN, body: JSON.stringify({ title: "범위 밖", due_date: "2026-12-05" }) });
+    await call("/api/tasks", { method: "POST", cookie, headers: JSON_ORIGIN, body: JSON.stringify({ title: "날짜 없음" }) });
+
+    eventQueries.length = 0;
+    r = (await (await call("/api/calendar?from=2026-11-15&to=2026-11-30", { cookie })).json()) as Record<string, unknown>;
+    expect(r.google).toBe("ok");
+    expect((r.tasks as { title: string }[]).map((t) => t.title)).toEqual(["레포트"]);
+    expect(eventQueries).toHaveLength(2); // the calendar switched off in Google is skipped
+    expect(eventQueries[0]!.get("timeMin")).toBe("2026-11-15T00:00:00+09:00");
+    expect(eventQueries[0]!.get("timeMax")).toBe("2026-12-01T00:00:00+09:00");
+    expect(eventQueries[0]!.get("singleEvents")).toBe("true");
+    const byId = Object.fromEntries((r.events as { id: string }[]).map((e) => [e.id, e]));
+    expect(Object.keys(byId).sort()).toEqual(["e1", "e2", "e3", "h1"]);
+    // 15:30 UTC on 11-18 is 00:30 on 11-19 in Korea.
+    expect(byId.e1).toMatchObject({ title: "새벽 회의", startDate: "2026-11-19", endDate: "2026-11-19", time: "00:30", link: "https://cal.example/e1", calendar: "내 캘린더", color: "#9fe1e7" });
+    expect(byId.e2).toMatchObject({ startDate: "2026-11-20", endDate: "2026-11-22", time: null }); // all-day end is exclusive
+    expect(byId.e3).toMatchObject({ startDate: "2026-11-20", endDate: "2026-11-20", time: "23:00" });
+    expect(byId.h1).toMatchObject({ title: "(제목 없음)", calendar: "대한민국의 휴일", color: "" }); // odd color dropped
+
+    // Google trouble still shows the tasks.
+    calendarFails = true;
+    r = (await (await call("/api/calendar?from=2026-11-15&to=2026-11-30", { cookie })).json()) as Record<string, unknown>;
+    calendarFails = false;
+    expect(r.google).toBe("error");
+    expect(String(r.error)).toContain("403");
+    expect(r.tasks).toHaveLength(1);
+
+    for (const q of ["from=2026-11-30&to=2026-11-01", "from=2026-11-01&to=2027-01-02", "from=2026-11-01", "from=2026-11-01&to=2026-11-31"]) {
+      expect((await call(`/api/calendar?${q}`, { cookie })).status).toBe(400);
+    }
+    expect((await call("/api/calendar?from=2026-11-01&to=2027-01-01", { cookie })).status).toBe(200); // exactly 62 days
+  } finally {
+    grantedScope = FULL_SCOPE;
+    calendarFails = false;
+    cleanup();
+  }
+});
+
+test("캘린더: 구글이 꺼져 있으면 할 일만", async () => {
+  const { call, db, cleanup } = makeApp({ googleEnabled: false });
+  try {
+    db.setSetting("password_hash", await Bun.password.hash("correct horse battery"));
+    const { cookie } = await passwordLogin(call, "correct horse battery");
+    expect((await call("/api/calendar?from=2026-11-01&to=2026-11-30")).status).toBe(401);
+    await call("/api/tasks", { method: "POST", cookie, headers: JSON_ORIGIN, body: JSON.stringify({ title: "장보기", due_date: "2026-11-19" }) });
+    const r = (await (await call("/api/calendar?from=2026-11-01&to=2026-11-30", { cookie })).json()) as Record<string, unknown>;
+    expect(r).toMatchObject({ google: "off", events: [] });
+    expect(r.tasks).toHaveLength(1);
   } finally {
     cleanup();
   }

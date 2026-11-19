@@ -245,13 +245,13 @@ function taskRow(t, today, reload, withActions) {
 }
 
 let editingTask = null;
-function openTaskDialog(t = null) {
+function openTaskDialog(t = null, date = "") {
   editingTask = t;
   $("task-dialog-title").textContent = t ? "할 일 수정" : "새 할 일";
   $("task-kind").value = t?.kind ?? taskKinds[0];
   $("task-title").value = t?.title ?? "";
   $("task-course").value = t?.course ?? "";
-  $("task-date").value = t?.due_date ?? "";
+  $("task-date").value = t?.due_date ?? date;
   $("task-time").value = t?.due_time ?? "";
   $("task-note").value = t?.note ?? "";
   $("task-dialog").showModal();
@@ -305,6 +305,92 @@ async function loadTasks() {
   $("task-list").replaceChildren(...(shown.length ? shown.map((x) => taskRow(x, today.date, reload, true)) : [emptyRow(7, q ? "검색 결과가 없습니다." : "없습니다.")]));
 }
 
+// 캘린더: 한 달(6주) 칸에 구글 캘린더 일정과 날짜 있는 할 일·과제를 함께 보여 준다.
+const seoulToday = () => new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Seoul" }).format(new Date());
+const isoDay = (d) => d.toISOString().slice(0, 10);
+const plusDays = (date, n) => isoDay(new Date(Date.parse(date + "T00:00:00Z") + n * DAY));
+let calMonth = seoulToday().slice(0, 7); // YYYY-MM
+
+function moveMonth(n) {
+  const d = new Date(calMonth + "-01T00:00:00Z");
+  d.setUTCMonth(d.getUTCMonth() + n);
+  calMonth = isoDay(d).slice(0, 7);
+  loadCalendar().catch(showError);
+}
+
+async function loadCalendar() {
+  const first = calMonth + "-01";
+  const from = plusDays(first, -new Date(first + "T00:00:00Z").getUTCDay()); // the Sunday on or before the 1st
+  const to = plusDays(from, 41);
+  const month = calMonth;
+  const data = await call(`/api/calendar?from=${from}&to=${to}`);
+  if (month !== calMonth) return; // a newer month was asked for meanwhile
+  const today = seoulToday();
+  const reload = () => loadCalendar().catch(showError);
+  $("cal-month").textContent = `${Number(month.slice(0, 4))}년 ${Number(month.slice(5))}월`;
+  const google = $("cal-google");
+  google.className = data.google === "error" ? "error" : "muted";
+  google.replaceChildren(
+    ...({
+      ok: ["구글 캘린더 연결됨"],
+      off: ["구글 캘린더 연결 안 됨"],
+      need_consent: ["구글 캘린더 권한이 없습니다. ", el("a", { href: "/auth/login", className: "date-main", textContent: "구글로 다시 로그인" })],
+      error: ["구글 캘린더를 불러오지 못했습니다: " + data.error],
+    }[data.google] ?? []),
+  );
+
+  const q = searchText();
+  const byDay = new Map();
+  const put = (day, item) => (byDay.get(day) ?? byDay.set(day, []).get(day)).push(item);
+  for (const e of data.events) {
+    if (q && !e.title.toLowerCase().includes(q)) continue;
+    for (let d = e.startDate < from ? from : e.startDate; d <= e.endDate && d <= to; d = plusDays(d, 1)) {
+      put(d, { sort: d === e.startDate && e.time ? e.time : "", node: () => eventItem(e, d) });
+    }
+  }
+  for (const t of data.tasks) if (matches(t, q)) put(t.due_date, { sort: t.due_time ?? "~", node: () => taskItem(t, today, reload) });
+
+  const heads = ["일", "월", "화", "수", "목", "금", "토"].map((w) => el("div", { className: "cal-head", textContent: w }));
+  const days = [];
+  for (let i = 0; i < 42; i++) {
+    const d = plusDays(from, i);
+    const items = (byDay.get(d) ?? []).sort((a, b) => (a.sort < b.sort ? -1 : a.sort > b.sort ? 1 : 0));
+    const cls = "cal-day" + (d.slice(0, 7) !== month ? " other" : "") + (d === today ? " today" : "");
+    days.push(
+      el(
+        "div",
+        { className: cls, title: `${md(d)}에 할 일 추가`, onclick: (ev) => ev.target === ev.currentTarget || ev.target.classList.contains("cal-num") ? openTaskDialog(null, d) : null },
+        el("span", { className: "cal-num", textContent: Number(d.slice(8)) }),
+        ...items.map((x) => x.node()),
+      ),
+    );
+  }
+  $("cal-grid").replaceChildren(...heads, ...days);
+}
+
+// 구글 일정은 눌러서 구글 캘린더에서 연다. 여러 날 일정의 시간은 첫날에만 쓴다.
+function eventItem(e, day) {
+  const time = e.time && day === e.startDate ? e.time : "";
+  return el(
+    "a",
+    { className: "cal-item", href: e.link || "https://calendar.google.com/", target: "_blank", rel: "noopener", title: `${e.title}${time ? " · " + time : ""}${e.calendar ? " · " + e.calendar : ""}` },
+    el("i", { className: "dot", style: e.color ? `background:${e.color}` : "" }),
+    time ? el("span", { className: "t", textContent: time }) : null,
+    el("span", { textContent: e.title }),
+  );
+}
+
+function taskItem(t, today, reload) {
+  const late = !t.done && t.due_date < today;
+  return el(
+    "button",
+    { type: "button", className: `cal-item task${t.kind === "과제" ? " hw" : ""}${t.done ? " done" : ""}${late ? " late" : ""}`, title: `${t.kind}${t.course ? " · " + t.course : ""} · ${t.title}`, onclick: () => openTaskDialog(t) },
+    el("i", { className: "dot" }),
+    t.due_time ? el("span", { className: "t", textContent: t.due_time }) : null,
+    el("span", { textContent: (t.course ? `[${t.course}] ` : "") + t.title }),
+  );
+}
+
 function updateOverdueBadge(n) {
   $("nav-overdue").hidden = !n;
   $("nav-overdue").textContent = n;
@@ -317,6 +403,7 @@ const matches = (t, q) => !q || [t.title, t.course, t.note].some((v) => (v ?? ""
 const tabs = {
   today: { title: "오늘", load: () => loadToday(), actions: () => [newTaskBtn()] },
   tasks: { title: "할 일·과제", load: () => loadTasks(), actions: () => [newTaskBtn()] },
+  calendar: { title: "캘린더", load: () => loadCalendar(), actions: () => [newTaskBtn()] },
   files: {
     title: "클라우드",
     load: () => {
@@ -472,6 +559,12 @@ async function init() {
     else if (ev.key.toLowerCase() === "n" && currentTab() !== "files") (ev.preventDefault(), openTaskDialog());
     else if (ev.key.toLowerCase() === "u" && currentTab() === "files" && me.driveConnected) (ev.preventDefault(), openUpload());
   });
+  $("cal-prev").onclick = () => moveMonth(-1);
+  $("cal-next").onclick = () => moveMonth(1);
+  $("cal-today").onclick = () => {
+    calMonth = seoulToday().slice(0, 7);
+    loadCalendar().catch(showError);
+  };
   $("menu-btn").onclick = () => $("main").classList.toggle("nav-open");
   $("logout").onclick = () => call("/auth/logout", { method: "POST" }).then(() => location.reload());
 

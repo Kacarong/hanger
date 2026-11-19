@@ -30,7 +30,7 @@
 
     <div class="nav-group">작업</div>
     <a class="nav-item" href="#tasks" data-tab="tasks"><span data-icon="check"></span>할 일·과제</a>
-    <span class="nav-item disabled"><span data-icon="calendar"></span>캘린더<span class="soon">준비 중</span></span>
+    <a class="nav-item" href="#calendar" data-tab="calendar"><span data-icon="calendar"></span>캘린더</a>
     <span class="nav-item disabled"><span data-icon="note"></span>노트<span class="soon">준비 중</span></span>
 
     <div class="nav-group">보관</div>
@@ -67,6 +67,18 @@
         </div>
         <table class="table"><thead><tr><th class="w1"></th><th>제목</th><th class="hide-sm">종류</th><th class="hide-sm">과목</th><th>마감</th><th>상태</th><th></th></tr></thead>
           <tbody id="task-list"></tbody></table>
+      </div>
+
+      <div id="tab-calendar" hidden>
+        <div class="toolbar">
+          <button class="btn ghost sm" type="button" id="cal-prev" aria-label="이전 달">‹</button>
+          <strong id="cal-month" class="cal-month"></strong>
+          <button class="btn ghost sm" type="button" id="cal-next" aria-label="다음 달">›</button>
+          <button class="btn sm" type="button" id="cal-today">오늘</button>
+          <span class="grow"></span>
+          <span class="muted" id="cal-google"></span>
+        </div>
+        <div class="cal" id="cal-grid"></div>
       </div>
 
       <div id="tab-files" hidden>

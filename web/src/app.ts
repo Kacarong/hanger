@@ -1,10 +1,11 @@
 import { mkdirSync, existsSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { CATEGORIES, TASK_KINDS, type Db, type FileRow, type TaskFields } from "./db";
-import { GoogleError, type Google } from "./google";
+import { GoogleError, type CalendarEvent, type Google } from "./google";
 
 export const MAX_FILE_SIZE = 1024 ** 3; // files must be under 1GB
 const SESSION_DAYS = 30;
+const CALENDAR_MAX_DAYS = 62; // longest range /api/calendar serves (a 6-week month grid is 42)
 const UPCOMING_DAYS = 3; // 과제 due within this many days show up on the today screen
 const LOGIN_FAIL_LIMIT = 5; // password failures allowed per LOGIN_FAIL_WINDOW
 const LOGIN_FAIL_WINDOW = 15 * 60_000;
@@ -32,6 +33,24 @@ function addDays(date: string, days: number): string {
 function isDate(v: string): boolean {
   const d = new Date(v + "T00:00:00Z");
   return /^\d{4}-\d{2}-\d{2}$/.test(v) && !Number.isNaN(d.getTime()) && d.toISOString().startsWith(v);
+}
+
+// Turns a Google event into the days it covers in Korea (endDate inclusive) and its start time.
+function calendarItem(e: CalendarEvent) {
+  const hm = (d: Date) => new Intl.DateTimeFormat("en-GB", { timeZone: "Asia/Seoul", hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(d);
+  let startDate: string, endDate: string, time: string | null;
+  if (e.start.date) {
+    startDate = e.start.date;
+    endDate = e.end.date ? addDays(e.end.date, -1) : startDate; // Google's all-day end date is exclusive
+    time = null;
+  } else {
+    const start = new Date(e.start.dateTime!);
+    startDate = seoulDate(start);
+    endDate = seoulDate(new Date(new Date(e.end.dateTime ?? e.start.dateTime!).getTime() - 1)); // ending at 00:00 doesn't touch that day
+    time = hm(start);
+  }
+  if (endDate < startDate) endDate = startDate;
+  return { id: e.id, title: e.summary || "(제목 없음)", startDate, endDate, time, link: e.htmlLink ?? "", calendar: e.calendar, color: /^#[0-9a-f]{6}$/i.test(e.color) ? e.color : "" };
 }
 
 function json(data: unknown, status = 200): Response {
@@ -201,6 +220,7 @@ ${items.length ? `<section class="index" id="index"><h2 class="section-title rev
         admin: isAdmin(req),
         googleEnabled: cfg.googleEnabled,
         driveConnected: !!db.getSetting("refresh_token"),
+        calendarConnected: !!db.getSetting("refresh_token") && google.calendarGranted(),
         categories: CATEGORIES,
         taskKinds: TASK_KINDS,
         maxFileSize: MAX_FILE_SIZE,
@@ -226,6 +246,24 @@ ${items.length ? `<section class="index" id="index"><h2 class="section-title rev
         upcoming: open.filter((t) => t.due_date! > d && t.kind === "과제"),
         doneToday: db.listTasks({ done: true, doneOn: d }),
       });
+    }
+
+    // Tasks with a date in [from, to] plus Google Calendar events of those days.
+    // A Google failure still returns the tasks, with google = "error" and the reason.
+    if (path === "/api/calendar" && method === "GET") {
+      const from = url.searchParams.get("from") ?? "";
+      const to = url.searchParams.get("to") ?? "";
+      if (!isDate(from) || !isDate(to) || to < from || to > addDays(from, CALENDAR_MAX_DAYS - 1)) return json({ error: "날짜 범위가 올바르지 않습니다" }, 400);
+      const tasks = db.listTasks({ from, to });
+      if (!cfg.googleEnabled || !db.getSetting("refresh_token")) return json({ tasks, events: [], google: "off" });
+      if (!google.calendarGranted()) return json({ tasks, events: [], google: "need_consent" });
+      try {
+        const events = await google.events(`${from}T00:00:00+09:00`, `${addDays(to, 1)}T00:00:00+09:00`);
+        return json({ tasks, events: events.map(calendarItem).filter((e) => e.endDate >= from && e.startDate <= to), google: "ok" });
+      } catch (e) {
+        if (!(e instanceof GoogleError)) throw e;
+        return json({ tasks, events: [], google: "error", error: e.message });
+      }
     }
 
     if (path === "/api/tasks" && method === "GET") {
@@ -407,7 +445,8 @@ ${items.length ? `<section class="index" id="index"><h2 class="section-title rev
       return new Response(null, {
         status: 302,
         headers: {
-          Location: google.authRedirect(state, !db.getSetting("refresh_token")),
+          // Ask again when the saved grant lacks a scope (e.g. calendar, added later) so Google issues a new refresh token.
+          Location: google.authRedirect(state, !db.getSetting("refresh_token") || !google.calendarGranted()),
           "Set-Cookie": setCookie("oauth_state", state, 600),
         },
       });
