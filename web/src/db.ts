@@ -42,7 +42,8 @@ export type TaskFields = Pick<TaskRow, "kind" | "title" | "course" | "due_date" 
 // so it shows up on the today screen and the calendar.
 export const BLOCK_TYPES = ["p", "h1", "h2", "h3", "todo", "bullet", "number", "quote", "code", "divider"];
 export type Block = { id: string; type: string; text: string; checked?: boolean; date?: string; time?: string };
-export type NoteRow = { id: number; title: string; blocks: Block[]; created_at: string; updated_at: string };
+// version goes up on every write; a save must name the version it started from (see saveNote).
+export type NoteRow = { id: number; title: string; blocks: Block[]; version: number; created_at: string; updated_at: string };
 type NoteRecord = Omit<NoteRow, "blocks"> & { blocks: string };
 
 // The task title of a todo block: its first line.
@@ -94,10 +95,12 @@ export function openDb(path: string) {
   const taskCols = (db.query("PRAGMA table_info(tasks)").all() as { name: string }[]).map((c) => c.name);
   if (!taskCols.includes("note_id")) db.exec("ALTER TABLE tasks ADD COLUMN note_id INTEGER; ALTER TABLE tasks ADD COLUMN block_id TEXT;");
   db.exec("CREATE INDEX IF NOT EXISTS tasks_note ON tasks (note_id)");
+  const noteCols = (db.query("PRAGMA table_info(notes)").all() as { name: string }[]).map((c) => c.name);
+  if (!noteCols.includes("version")) db.exec("ALTER TABLE notes ADD COLUMN version INTEGER NOT NULL DEFAULT 0");
   const TASK_SELECT = "SELECT tasks.*, notes.title AS note_title FROM tasks LEFT JOIN notes ON notes.id = tasks.note_id";
   const TASK_ORDER = "ORDER BY due_date IS NULL, due_date, due_time IS NULL, due_time, tasks.id";
   function getNote(id: number): NoteRow | null {
-    const r = db.query("SELECT id, title, blocks, created_at, updated_at FROM notes WHERE id = ?").get(id) as NoteRecord | null;
+    const r = db.query("SELECT id, title, blocks, version, created_at, updated_at FROM notes WHERE id = ?").get(id) as NoteRecord | null;
     return r ? { ...r, blocks: JSON.parse(r.blocks) as Block[] } : null;
   }
 
@@ -122,7 +125,7 @@ export function openDb(path: string) {
 
   function writeNote(id: number, title: string, blocks: Block[], today: string) {
     const text = blocks.map((b) => b.text).join("\n");
-    db.query("UPDATE notes SET title = ?, blocks = ?, text = ?, updated_at = datetime('now') WHERE id = ?").run(title, JSON.stringify(blocks), text, id);
+    db.query("UPDATE notes SET title = ?, blocks = ?, text = ?, version = version + 1, updated_at = datetime('now') WHERE id = ?").run(title, JSON.stringify(blocks), text, id);
     syncNoteTasks(id, blocks, today);
   }
 
@@ -243,7 +246,13 @@ export function openDb(path: string) {
       writeNote(id, title, blocks, today);
       return getNote(id)!;
     }),
-    saveNote: db.transaction((id: number, title: string, blocks: Block[], today: string) => writeNote(id, title, blocks, today)),
+    // Refuses (returns false) when the note changed since `version`, e.g. a task of it was checked
+    // off in another tab; writing anyway would undo that.
+    saveNote: db.transaction((id: number, version: number, title: string, blocks: Block[], today: string): boolean => {
+      if (getNote(id)?.version !== version) return false;
+      writeNote(id, title, blocks, today);
+      return true;
+    }),
     // Applies a change made from the task side (today screen, task dialog) to its block.
     // edit returns the new block, or null to drop the block.
     editNoteBlock: db.transaction((noteId: number, blockId: string, edit: (b: Block) => Block | null, today: string) => {

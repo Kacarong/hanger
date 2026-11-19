@@ -43,7 +43,7 @@ async function call(path, opts = {}) {
     body: opts.body ? JSON.stringify(opts.body) : undefined,
   });
   const data = res.headers.get("Content-Type")?.includes("json") ? await res.json() : null;
-  if (!res.ok) throw new Error(data?.error ?? `요청 실패 (${res.status})`);
+  if (!res.ok) throw Object.assign(new Error(data?.error ?? `요청 실패 (${res.status})`), { status: res.status });
   return data;
 }
 
@@ -406,40 +406,76 @@ function updateOverdueBadge(n) {
 }
 
 // 노트: 고치면 잠깐 뒤 저장한다. 화면을 옮기거나 창을 닫을 때도 남은 것을 저장한다.
+// 저장하지 못한 초안은 버리지 않는다: 저장이 실패하면 다른 노트를 열지 않고, 다른 곳(다른 탭, 오늘 화면)에서
+// 노트가 바뀌었으면(409) 자동 저장을 멈추고 덮어쓸지 새로 불러올지 묻는다.
 let editor = null;
 let noteId = null; // the open note
+let noteVersion = 0; // the server version the editor content started from
 let noteDirty = false;
+let noteConflict = false;
 let noteSaving = null; // the save in flight
+let noteLoadSeq = 0; // only the newest loadNotes may fill the editor
 let noteTimer;
 let focusTitle = false;
 const noteTime = (s) => new Intl.DateTimeFormat("ko-KR", { timeZone: "Asia/Seoul", month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(new Date(s.replace(" ", "T") + "Z"));
 
 function noteChanged() {
   noteDirty = true;
+  if (noteConflict) return; // 덮어쓸지 불러올지 고를 때까지 저장하지 않는다
   $("note-status").textContent = "저장 전";
   clearTimeout(noteTimer);
   noteTimer = setTimeout(() => saveNote().catch(() => {}), 700);
 }
 
+function showConflict() {
+  $("note-status").replaceChildren(
+    el("span", { className: "error", textContent: "다른 곳에서 이 노트가 바뀌어 저장을 멈췄습니다. " }),
+    el("button", { className: "btn sm", type: "button", textContent: "내 내용으로 덮어쓰기", onclick: () => overwriteNote().catch(showError) }),
+    " ",
+    el("button", { className: "btn sm ghost", type: "button", textContent: "바뀐 내용 불러오기", onclick: () => reloadNote().catch(showError) }),
+  );
+}
+
+async function overwriteNote() {
+  const n = await call(`/api/notes/${noteId}`);
+  noteVersion = n.version;
+  noteConflict = false;
+  noteDirty = true;
+  await saveNote();
+}
+
+async function reloadNote() {
+  if (!confirm("이 화면에서 고친 내용은 버리고 바뀐 노트를 불러올까요?")) return;
+  noteConflict = false;
+  noteDirty = false;
+  await loadNotes();
+}
+
+// Resolves once everything typed so far is stored; rejects (keeping the draft) when it can't be.
 async function saveNote(keepalive = false) {
   clearTimeout(noteTimer);
   while (noteSaving) await noteSaving.catch(() => {});
   if (!noteDirty || noteId === null) return;
+  if (noteConflict) throw new Error("다른 곳에서 바뀐 노트라 저장하지 않았습니다. 노트 위의 버튼으로 골라 주세요.");
   noteDirty = false;
   const id = noteId;
   const title = $("note-title").value;
   $("note-status").textContent = "저장 중…";
-  noteSaving = call(`/api/notes/${id}`, { method: "PUT", body: { title, blocks: editor.get() }, keepalive });
+  noteSaving = call(`/api/notes/${id}`, { method: "PUT", body: { title, blocks: editor.get(), version: noteVersion }, keepalive });
   try {
     const r = await noteSaving;
     if (id !== noteId) return;
+    noteVersion = r.version;
     if (!noteDirty) $("note-status").textContent = "저장됨";
     const a = document.querySelector(`#note-list a[data-id="${id}"]`);
     if (a) a.replaceChildren(title || "제목 없음", el("small", { textContent: noteTime(r.updated_at) }));
   } catch (e) {
     if (id === noteId) {
       noteDirty = true; // 다음에 고치거나 화면을 옮길 때 다시 저장한다
-      $("note-status").textContent = "저장 실패: " + e.message;
+      if (e.status === 409) {
+        noteConflict = true;
+        showConflict();
+      } else $("note-status").textContent = "저장 실패: " + e.message;
     }
     throw e;
   } finally {
@@ -462,32 +498,52 @@ async function loadNoteList() {
 }
 
 // 열 노트: 주소(#notes/3) → 지금 연 노트 → 지난번 노트 → 맨 위 노트. 늘 서버에서 새로 읽는다(오늘 화면에서 체크했을 수 있다).
+// 읽는 동안에는 편집을 잠가서, 그사이 친 글이 도착한 내용에 덮이지 않게 한다.
 async function loadNotes() {
-  await saveNote().catch(() => {});
-  const list = await loadNoteList();
-  const wanted = [Number(location.hash.split("/")[1]), noteId, Number(localStorage.getItem("note")), list[0]?.id].filter(Boolean);
-  let note = null;
-  for (const id of new Set(wanted)) {
-    note = await call(`/api/notes/${id}`).catch(() => null);
-    if (note) break;
+  const seq = ++noteLoadSeq;
+  const page = $("note-page");
+  page.inert = true;
+  try {
+    try {
+      await saveNote();
+    } catch (e) {
+      if (noteId !== null) history.replaceState(null, "", `#notes/${noteId}`); // 지금 노트에 머문다
+      $("note-delete").hidden = noteId === null; // the bar was rebuilt by showTab
+      showError("노트를 저장하지 못해 다른 노트를 열지 않았습니다: " + e.message);
+      return;
+    }
+    const list = await loadNoteList();
+    if (seq !== noteLoadSeq) return;
+    const wanted = [Number(location.hash.split("/")[1]), noteId, Number(localStorage.getItem("note")), list[0]?.id].filter(Boolean);
+    let note = null;
+    for (const id of new Set(wanted)) {
+      note = await call(`/api/notes/${id}`).catch(() => null);
+      if (seq !== noteLoadSeq) return; // a newer navigation took over
+      if (note) break;
+    }
+    noteId = note?.id ?? null;
+    noteVersion = note?.version ?? 0;
+    noteDirty = false;
+    noteConflict = false;
+    page.hidden = !note;
+    $("note-empty").hidden = !!note;
+    $("note-delete").hidden = !note;
+    document.querySelectorAll("#note-list a").forEach((a) => a.classList.toggle("active", Number(a.dataset.id) === noteId));
+    if (!note) return localStorage.removeItem("note");
+    localStorage.setItem("note", note.id);
+    $("note-title").value = note.title;
+    $("note-status").textContent = "저장됨";
+    editor.set(note.blocks);
+    page.inert = false;
+    if (focusTitle) $("note-title").focus();
+    focusTitle = false;
+  } finally {
+    if (seq === noteLoadSeq) page.inert = false;
   }
-  noteId = note?.id ?? null;
-  noteDirty = false;
-  $("note-page").hidden = !note;
-  $("note-empty").hidden = !!note;
-  $("note-delete").hidden = !note;
-  document.querySelectorAll("#note-list a").forEach((a) => a.classList.toggle("active", Number(a.dataset.id) === noteId));
-  if (!note) return localStorage.removeItem("note");
-  localStorage.setItem("note", note.id);
-  $("note-title").value = note.title;
-  $("note-status").textContent = "저장됨";
-  editor.set(note.blocks);
-  if (focusTitle) $("note-title").focus();
-  focusTitle = false;
 }
 
 async function newNote() {
-  await saveNote().catch(() => {});
+  await saveNote(); // 저장하지 못하면 지금 노트에 머문다
   const n = await call("/api/notes", { method: "POST", body: {} });
   focusTitle = true;
   location.hash = `#notes/${n.id}`;
@@ -584,7 +640,7 @@ function showTab() {
   editor.closeMenu();
   // 노트를 저장하고 나서 읽어야 방금 노트에서 바꾼 할 일이 보인다.
   saveNote()
-    .catch(() => {})
+    .catch((e) => showError("노트를 저장하지 못했습니다(노트 화면에 그대로 남아 있습니다): " + e.message))
     .then(() => tabs[name].load())
     .catch(showError);
 }

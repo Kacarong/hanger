@@ -270,6 +270,7 @@ export function createEditor(root, onChange) {
     const tail = b.text.slice(ta.selectionEnd);
     b.text = b.text.slice(0, ta.selectionStart) + lines[0];
     const added = linesToBlocks(lines.slice(1));
+    if (added.at(-1).type === "divider" && tail) added.push({ ...emptyBlock(), text: "" }); // 구분선에는 글이 못 들어간다
     const last = added.at(-1);
     const pos = last.text.length;
     last.text += tail;

@@ -695,7 +695,8 @@ test("노트: 블록 저장, 날짜 있는 체크박스는 할 일이 되어 오
 
     const note = (await (await req("/api/notes", "POST", { title: "수업 메모" })).json()) as { id: number; blocks: { type: string }[] };
     expect(note.blocks).toHaveLength(1);
-    const save = (blocks: object[], title = "수업 메모") => req(`/api/notes/${note.id}`, "PUT", { title, blocks });
+    const version = async () => ((await (await req(`/api/notes/${note.id}`, "GET")).json()) as { version: number }).version;
+    const save = async (blocks: object[], title = "수업 메모", v?: number) => req(`/api/notes/${note.id}`, "PUT", { title, blocks, version: v ?? (await version()) });
     const blocks = [
       { id: "a", type: "h1", text: "디자인사", checked: true, date: "2026-11-19" }, // extra fields on non-todo blocks are dropped
       { id: "b", type: "todo", text: "레포트 초안\n3쪽 이상", date: "2026-11-19", time: "18:00" },
@@ -747,6 +748,20 @@ test("노트: 블록 저장, 날짜 있는 체크박스는 할 일이 되어 오
     await save(n.blocks, "다른 제목");
     expect(((await (await req("/api/notes?q=날짜 없는", "GET")).json()) as unknown[]).length).toBe(1);
     expect(((await (await req("/api/notes?q=없는말", "GET")).json()) as unknown[]).length).toBe(0);
+
+    // A save from a copy older than a task-side change is refused and changes nothing, so checking
+    // a task off in one tab can't be undone by typing in a stale note in another tab.
+    await save([{ id: "h", type: "todo", text: "충돌 확인", date: "2026-11-21" }]);
+    const stale = await version();
+    const conflictTask = db.listTasks({}).find((t) => t.title === "충돌 확인")!;
+    await req(`/api/tasks/${conflictTask.id}`, "PATCH", { done: true });
+    const conflict = await save([{ id: "h", type: "todo", text: "충돌 확인 고침", date: "2026-11-21" }], "수업 메모", stale);
+    expect(conflict.status).toBe(409);
+    expect(((await conflict.json()) as { version: number }).version).toBe(stale + 1);
+    expect(db.getTask(conflictTask.id)).toMatchObject({ title: "충돌 확인", done: 1 });
+    const ok = await save([{ id: "h", type: "todo", text: "충돌 확인 고침", checked: true, date: "2026-11-21" }], "수업 메모", stale + 1);
+    expect(((await ok.json()) as { version: number }).version).toBe(stale + 2);
+    expect((await req(`/api/notes/${note.id}`, "PUT", { title: "x", blocks: [] })).status).toBe(400); // no version
 
     // Bad input is refused.
     expect((await save([{ id: "a", type: "p", text: "" }, { id: "a", type: "p", text: "" }])).status).toBe(400);

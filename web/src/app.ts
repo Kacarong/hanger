@@ -415,8 +415,12 @@ ${items.length ? `<section class="index" id="index"><h2 class="section-title rev
         const b = await body(req);
         const blocks = noteBlocks(b.blocks);
         if (typeof blocks === "string") return json({ error: blocks }, 400);
-        db.saveNote(n.id, str(b.title, 200), blocks, today());
-        return json({ ok: true, updated_at: db.getNote(n.id)!.updated_at });
+        if (!Number.isInteger(b.version)) return json({ error: "노트 버전이 없습니다" }, 400);
+        if (!db.saveNote(n.id, b.version as number, str(b.title, 200), blocks, today())) {
+          return json({ error: "다른 곳에서 이 노트가 바뀌었습니다", version: n.version }, 409);
+        }
+        const saved = db.getNote(n.id)!;
+        return json({ ok: true, version: saved.version, updated_at: saved.updated_at });
       }
       if (method === "DELETE") {
         db.deleteNote(n.id);
