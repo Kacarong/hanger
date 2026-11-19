@@ -1,4 +1,5 @@
-import { mkdirSync, existsSync, rmSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { mkdirSync, existsSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { CATEGORIES, TASK_KINDS, type Db, type FileRow, type TaskFields } from "./db";
 import { GoogleError, type CalendarEvent, type Google } from "./google";
@@ -74,7 +75,17 @@ function publicView(f: FileRow) {
   return { id: f.id, title: f.title, category: f.category, tags: f.tags, note: f.note, mime: f.mime, link: f.web_view_link };
 }
 
+// Hash of everything in public/. Static URLs carry it as ?v= so a deploy never pairs new HTML
+// with an old /static/ file still sitting in Cloudflare's cache (it keeps them for hours).
+function assetVersion(): string {
+  const h = createHash("sha256");
+  for (const name of readdirSync(PUBLIC_DIR).sort()) h.update(name).update(readFileSync(join(PUBLIC_DIR, name)));
+  return h.digest("hex").slice(0, 10);
+}
+
 export function createApp(cfg: AppConfig, db: Db, google: Google) {
+  const v = assetVersion();
+  const adminHtml = readFileSync(join(PUBLIC_DIR, "admin.html"), "utf8").replace(/"(\/static\/[\w.-]+)"/g, `"$1?v=${v}"`);
   const origin = new URL(cfg.baseUrl).origin;
   const secure = cfg.baseUrl.startsWith("https://") ? "; Secure" : "";
   const thumbDir = join(cfg.dataDir, "thumbs");
@@ -171,7 +182,7 @@ ${f.note ? `<p class="work-note">${escapeHtml(f.note)}</p>` : ""}</div>
       .join("\n");
     const html = `<!doctype html><html lang="ko"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1"><title>kacarong — 포트폴리오</title>
-<link rel="stylesheet" href="/static/site.css"></head><body>
+<link rel="stylesheet" href="/static/site.css?v=${v}"></head><body>
 <header class="top">
 <a class="brand" href="/">KACARONG <span class="spark">✳</span></a>
 <nav><a href="#work">WORK</a><a href="#index">INDEX</a><a href="#contact">CONTACT</a></nav>
@@ -192,7 +203,7 @@ ${items.length ? `<section class="index" id="index"><h2 class="section-title rev
 <p class="foot-big reveal">LET'S MAKE<br>SOMETHING.</p>
 <div class="foot-row"><span>KACARONG.KR</span><a href="/privacy">PRIVACY</a><a href="/admin">WORKSPACE</a></div>
 </footer>
-<script src="/static/site.js" defer></script>
+<script src="/static/site.js?v=${v}" defer></script>
 </body></html>`;
     return new Response(html, { headers: { "Content-Type": "text/html; charset=utf-8" } });
   }
@@ -406,7 +417,7 @@ ${items.length ? `<section class="index" id="index"><h2 class="section-title rev
     const path = url.pathname;
 
     if (path === "/" && req.method === "GET") return renderPublic();
-    if (path === "/admin" && req.method === "GET") return new Response(Bun.file(join(PUBLIC_DIR, "admin.html")));
+    if (path === "/admin" && req.method === "GET") return new Response(adminHtml, { headers: { "Content-Type": "text/html; charset=utf-8" } });
     if (path === "/privacy" && req.method === "GET") return new Response(Bun.file(join(PUBLIC_DIR, "privacy.html")));
 
     const t = path.match(/^\/thumb\/(\d+)$/);

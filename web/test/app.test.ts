@@ -518,6 +518,20 @@ test("캘린더: 권한 없으면 다시 동의 요청, 구글 일정 + 할 일�
   }
 });
 
+test("정적 파일 주소에 버전이 붙고, 그 주소로 파일이 열림", async () => {
+  const { call, cleanup } = makeApp({ googleEnabled: false });
+  try {
+    const admin = await (await call("/admin")).text();
+    const js = admin.match(/src="(\/static\/admin\.js\?v=[0-9a-f]{10})"/)?.[1];
+    expect(js).toBeTruthy();
+    expect(admin).toMatch(/href="\/static\/admin\.css\?v=[0-9a-f]{10}"/);
+    expect(await (await call(js!)).text()).toContain("loadCalendar");
+    expect(await (await call("/")).text()).toMatch(/\/static\/site\.css\?v=[0-9a-f]{10}"[\s\S]*\/static\/site\.js\?v=[0-9a-f]{10}"/);
+  } finally {
+    cleanup();
+  }
+});
+
 test("캘린더: 구글이 꺼져 있으면 할 일만", async () => {
   const { call, db, cleanup } = makeApp({ googleEnabled: false });
   try {
