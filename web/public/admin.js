@@ -696,6 +696,7 @@ async function loadNoteList() {
       ? [el("span", { className: "muted", textContent: searchText() ? "검색 결과가 없습니다." : "노트가 없습니다." })]
       : searchText() ? list.map(noteLink) : noteTree(list)),
   );
+  if (noteId !== null) revealNote(noteId); // 검색을 지워 목록을 다시 그려도 연 노트가 접힌 곳에 숨지 않게
   return list;
 }
 

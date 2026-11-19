@@ -246,11 +246,8 @@ span.note-fold { cursor: default; }
 
 @media (max-width: 860px) {
   .notes { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
-  .note-list { flex-direction: row; overflow-x: auto; border-right: 0; border-bottom: 1px solid var(--line); }
-  .note-list a { flex: none; max-width: 160px; }
-  .note-row { flex: none; }
-  .note-kids { display: contents; }
-  .note-kids[hidden] { display: none; }
+  /* 좁은 화면에서도 하위 노트의 들여쓰기가 보이게 세로 트리 그대로, 높이만 줄여 스크롤 */
+  .note-list { max-height: 36vh; overflow-y: auto; border-right: 0; border-bottom: 1px solid var(--line); }
   .note-page { padding: 20px 16px 100px 30px; }
   .blk-handle { opacity: .5; }
   .app { grid-template-columns: 1fr; padding: 0; }
