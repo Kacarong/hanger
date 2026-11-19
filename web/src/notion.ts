@@ -10,7 +10,8 @@ export const NOTION_MAX_FILE = 50 * 1024 ** 2; // held in memory while copied to
 
 // Notion's block and property shapes are many and loose, so most of them stay `any`.
 type RichText = { type: string; plain_text: string; href?: string | null; mention?: { type: string; date?: { start: string } } };
-type Page = { id: string; object: string; created_time: string; last_edited_time: string; archived?: boolean; in_trash?: boolean; icon?: { type: string; emoji?: string } | null; properties: Record<string, any> };
+type Parent = { type: string; page_id?: string; database_id?: string };
+type Page = { id: string; object: string; parent?: Parent; created_time: string; last_edited_time: string; archived?: boolean; in_trash?: boolean; icon?: { type: string; emoji?: string } | null; properties: Record<string, any> };
 type NBlock = { id: string; type: string; has_children?: boolean } & Record<string, any>;
 
 export type NotionJob = {
@@ -318,9 +319,17 @@ export async function importNotion(o: {
     queue.push(p);
     job.total = queue.length;
   };
+  // Where each page sits in Notion, so its note can sit under its parent's note:
+  // pages and databases by the page they were found in, then by their own parent field.
+  const parentOf = new Map<string, string>();
+  const dbParent = new Map<string, string>();
+  const parentPage = (p: Page) =>
+    parentOf.get(p.id) ?? (p.parent?.type === "page_id" ? p.parent.page_id : p.parent?.type === "database_id" ? dbParent.get(p.parent.database_id!) : undefined);
+
   // Returns false when a database can't be read (e.g. a linked view of a database not shared with the integration).
-  async function follow(kid: string): Promise<boolean> {
+  async function follow(kid: string, from?: string): Promise<boolean> {
     const [kind, id] = kid.split(":") as [string, string];
+    if (from) (kind === "page" ? parentOf : dbParent).set(id, from);
     if (seen.has(kid) || seen.has(id)) return true;
     seen.add(kid);
     try {
@@ -347,7 +356,7 @@ export async function importNotion(o: {
   for (const p of await all("/v1/search", { filter: { property: "object", value: "page" } })) enqueue(p);
   // Databases shared with the integration directly (no shared parent page): their rows too.
   for (const d of await all("/v1/search", { filter: { property: "object", value: "database" } })) {
-    if (!d.archived && !d.in_trash && !(await follow("db:" + d.id))) job.partial.push(`🗂 ${plain(d.title) || "제목 없는 데이터베이스"}`);
+    if (!d.archived && !d.in_trash && !(await follow("db:" + d.id, d.parent?.type === "page_id" ? d.parent.page_id : undefined))) job.partial.push(`🗂 ${plain(d.title) || "제목 없는 데이터베이스"}`);
   }
   for (let i = 0; i < queue.length; i++) {
     const page = queue[i]!;
@@ -385,7 +394,7 @@ export async function importNotion(o: {
         kids = c.kids;
         incomplete = c.incomplete;
       }
-      for (const k of kids) if (!(await follow(k))) incomplete = true;
+      for (const k of kids) if (!(await follow(k, page.id))) incomplete = true;
       if (incomplete) job.partial.push(title);
     } catch (e) {
       if (e instanceof NotionError && e.status === 401) throw e;
@@ -394,5 +403,24 @@ export async function importNotion(o: {
     } finally {
       job.done++;
     }
+  }
+  // Last, once every page has its note: each note goes under the note of its nearest Notion ancestor that is
+  // still here (a parent deleted here is skipped, as deleting a note moves its notes up), else to the top level.
+  // Running it again also fixes notes imported flat before.
+  const byId = new Map(queue.map((p) => [p.id, p]));
+  for (const page of queue) {
+    const note = db.notionPage(page.id)?.note_id;
+    if (!note || !db.getNote(note)) continue;
+    let parent: number | null = null;
+    const passed = new Set([page.id]);
+    for (let up = parentPage(page); up && !passed.has(up); up = byId.has(up) ? parentPage(byId.get(up)!) : undefined) {
+      passed.add(up);
+      const n = db.notionPage(up)?.note_id;
+      if (n && db.getNote(n)) {
+        parent = n;
+        break;
+      }
+    }
+    db.setNoteParent(note, parent);
   }
 }

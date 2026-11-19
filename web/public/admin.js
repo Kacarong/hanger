@@ -645,16 +645,56 @@ async function saveNote(keepalive = false) {
   }
 }
 
+// 노트 목록은 노션처럼 상위 노트 밑에 하위 노트를 접어 둔 트리다(검색할 때는 맞는 노트만 평평하게).
+// 펼친 노트는 기억하고, 연 노트의 상위 노트는 늘 펼친다.
+let noteList = [];
+const openNotes = new Set(JSON.parse(localStorage.getItem("noteOpen") || "[]"));
+function noteLink(n) {
+  const a = el("a", { href: `#notes/${n.id}`, className: n.id === noteId ? "active" : "" }, n.title || "제목 없음", el("small", { textContent: noteTime(n.updated_at) }));
+  a.dataset.id = n.id;
+  return a;
+}
+function noteTree(list) {
+  const ids = new Set(list.map((n) => n.id));
+  const kids = new Map();
+  for (const n of list) {
+    const up = ids.has(n.parent_id) ? n.parent_id : null;
+    kids.set(up, [...(kids.get(up) ?? []), n]);
+  }
+  const placed = new Set();
+  const branch = (n) => {
+    placed.add(n.id);
+    const under = (kids.get(n.id) ?? []).filter((k) => !placed.has(k.id));
+    if (!under.length) return [el("div", { className: "note-row" }, el("span", { className: "note-fold" }), noteLink(n))];
+    const group = el("div", { className: "note-kids", hidden: !openNotes.has(n.id) }, ...under.flatMap(branch));
+    const fold = el("button", { type: "button", className: "note-fold", ariaLabel: "하위 노트 펼치기·접기", textContent: "▸" });
+    fold.ariaExpanded = String(!group.hidden);
+    fold.onclick = () => {
+      group.hidden = !group.hidden;
+      fold.ariaExpanded = String(!group.hidden);
+      group.hidden ? openNotes.delete(n.id) : openNotes.add(n.id);
+      localStorage.setItem("noteOpen", JSON.stringify([...openNotes]));
+    };
+    return [el("div", { className: "note-row" }, fold, noteLink(n)), group];
+  };
+  const out = (kids.get(null) ?? []).flatMap(branch);
+  for (const n of list) if (!placed.has(n.id)) out.push(...branch(n)); // 부모가 서로를 가리키는 경우에도 빠뜨리지 않는다
+  return out;
+}
+function revealNote(id) {
+  for (let g = document.querySelector(`#note-list a[data-id="${id}"]`)?.closest(".note-kids"); g; g = g.parentElement.closest(".note-kids")) {
+    g.hidden = false;
+    g.previousElementSibling.querySelector(".note-fold").ariaExpanded = "true";
+  }
+}
+
 async function loadNoteList() {
   const list = await call("/api/notes?" + new URLSearchParams({ q: searchText() }));
+  noteList = list;
   $("note-list").replaceChildren(
-    ...(list.length
-      ? list.map((n) => {
-          const a = el("a", { href: `#notes/${n.id}`, className: n.id === noteId ? "active" : "" }, n.title || "제목 없음", el("small", { textContent: noteTime(n.updated_at) }));
-          a.dataset.id = n.id;
-          return a;
-        })
-      : [el("span", { className: "muted", textContent: searchText() ? "검색 결과가 없습니다." : "노트가 없습니다." })]),
+    ...(!list.length
+      ? [el("span", { className: "muted", textContent: searchText() ? "검색 결과가 없습니다." : "노트가 없습니다." })]
+      : searchText() ? list.map(noteLink) : noteTree(list)),
   );
   return list;
 }
@@ -691,6 +731,7 @@ async function loadNotes() {
     $("note-empty").hidden = !!note;
     $("note-delete").hidden = !note;
     document.querySelectorAll("#note-list a").forEach((a) => a.classList.toggle("active", Number(a.dataset.id) === noteId));
+    if (note) revealNote(note.id);
     if (!note) return localStorage.removeItem("note");
     localStorage.setItem("note", note.id);
     $("note-title").value = note.title;
@@ -713,7 +754,8 @@ async function newNote() {
 }
 
 async function deleteNote() {
-  if (noteId === null || !confirm(`"${$("note-title").value || "제목 없음"}" 노트를 삭제할까요? 이 노트에서 만든 할 일도 함께 지워집니다.`)) return;
+  const kidsNote = noteList.some((n) => n.parent_id === noteId) ? " 하위 노트는 지우지 않고 한 단계 위로 옮깁니다." : "";
+  if (noteId === null || !confirm(`"${$("note-title").value || "제목 없음"}" 노트를 삭제할까요? 이 노트에서 만든 할 일도 함께 지워집니다.${kidsNote}`)) return;
   clearTimeout(noteTimer);
   noteDirty = false;
   await call(`/api/notes/${noteId}`, { method: "DELETE" });

@@ -1270,3 +1270,49 @@ test("노션 가져오기: 깊이 제한에 걸린 노트도 편집기에서 그
     t.done();
   }
 });
+
+test("노션 가져오기: 노션의 상위·하위 페이지 구조를 노트 목록에서도 그대로 둠", async () => {
+  loginEmail = "owner@example.com";
+  const t = await notionSetup();
+  try {
+    // 개인 페이지 TODO LIST 밑에 하위 페이지(토글 안 포함)와 데이터베이스가 있고, 하위 페이지 밑에 또 페이지가 있다.
+    const top = t.page("TODO LIST");
+    const sub = t.page("하위");
+    const inToggle = t.page("토글 안 하위");
+    const grand = t.page("손자");
+    const other = t.page("ETC");
+    const db = t.id();
+    const row = t.page("DB 행");
+    t.pages.get(row)!.parent = { type: "database_id", database_id: db };
+    t.rows.set(db, [row]);
+    t.children.set(top, [
+      t.block("child_page", { title: "하위" }, sub),
+      t.block("toggle", { rich_text: [] }, t.id(), [t.block("child_page", { title: "토글 안 하위" }, inToggle)]),
+      t.block("child_database", { title: "DB" }, db),
+    ]);
+    t.children.set(sub, [t.block("child_page", { title: "손자" }, grand)]);
+    t.search.page.push(grand, row, sub, top, other); // search lists children before their parents
+    t.search.database.push({ id: db, title: "DB" });
+    expect(await t.run()).toMatchObject({ status: "done", added: 6, failed: [] });
+    const parentOf = (title: string) => {
+      const p = t.noteOf(title)!.parent_id;
+      return p === null ? null : t.db.getNote(p)!.title;
+    };
+    expect(["TODO LIST", "하위", "토글 안 하위", "손자", "DB 행", "ETC"].map(parentOf)).toEqual([null, "TODO LIST", "TODO LIST", "하위", "TODO LIST", null]);
+
+    // Notes imported flat before this change get their parents on the next run, even with nothing new in Notion.
+    for (const n of t.db.listNotes()) t.db.setNoteParent(n.id, null);
+    expect(await t.run()).toMatchObject({ status: "done", unchanged: 6 });
+    expect(parentOf("손자")).toBe("하위");
+
+    // Deleting a note here moves the notes under it up one level instead of deleting them, and the next import keeps them there.
+    await t.req(`/api/notes/${t.noteOf("하위")!.id}`, "DELETE");
+    expect(parentOf("손자")).toBe("TODO LIST");
+    expect(await t.run()).toMatchObject({ status: "done" });
+    expect(t.noteOf("하위")).toBeUndefined();
+    expect(parentOf("손자")).toBe("TODO LIST");
+    expect(parentOf("토글 안 하위")).toBe("TODO LIST");
+  } finally {
+    t.done();
+  }
+});
