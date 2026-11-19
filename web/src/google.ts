@@ -12,6 +12,9 @@ export type GoogleConfig = {
 
 export const CALENDAR_SCOPE = "https://www.googleapis.com/auth/calendar.readonly";
 export const SCOPES = `openid email https://www.googleapis.com/auth/drive.file ${CALENDAR_SCOPE}`;
+// Just who is signing in. Asking for the calendar scope again on every sign-in makes Google show
+// its "unverified app" warning every time, even when the grant already exists.
+const LOGIN_SCOPES = "openid email";
 const FILE_FIELDS = "id,name,mimeType,size,parents,trashed,webViewLink,webContentLink,thumbnailLink";
 
 export type DriveFile = {
@@ -52,18 +55,19 @@ export function createGoogle(cfg: GoogleConfig, db: Db) {
   let accessToken: { token: string; expiresAt: number } | null = null;
 
   // loginHint makes Google pick that account by itself, so a returning owner signs in without a click.
-  function authRedirect(state: string, forceConsent: boolean, loginHint: string): string {
+  // needGrant asks for every scope with a fresh consent, so Google issues a new refresh token.
+  function authRedirect(state: string, needGrant: boolean, loginHint: string): string {
     const u = new URL(cfg.authUrl);
     u.search = new URLSearchParams({
       client_id: cfg.clientId,
       redirect_uri: cfg.redirectUri,
       response_type: "code",
-      scope: SCOPES,
+      scope: needGrant ? SCOPES : LOGIN_SCOPES,
       access_type: "offline",
       include_granted_scopes: "true",
       state,
       ...(loginHint ? { login_hint: loginHint } : {}),
-      ...(forceConsent ? { prompt: "consent" } : {}),
+      ...(needGrant ? { prompt: "consent" } : {}),
     }).toString();
     return u.toString();
   }

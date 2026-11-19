@@ -575,7 +575,7 @@ ${items.length ? `<section class="index" id="index"><h2 class="section-title rev
       return new Response(null, {
         status: 302,
         headers: {
-          // Ask again when the saved grant lacks a scope (e.g. calendar, added later) so Google issues a new refresh token.
+          // Ask for the full grant only when none is saved or it lacks a scope (e.g. calendar, added later).
           Location: google.authRedirect(state, !db.getSetting("refresh_token") || !google.calendarGranted(), cfg.adminEmail),
           "Set-Cookie": setCookie("oauth_state", state, 600),
         },
@@ -590,7 +590,8 @@ ${items.length ? `<section class="index" id="index"><h2 class="section-title rev
       if (!state || state !== cookies(req).oauth_state || !code) return new Response("로그인 요청이 올바르지 않습니다. 다시 시도해 주세요.", { status: 400 });
       const r = await google.exchangeCode(code);
       if (!r.emailVerified || !cfg.adminEmail || r.email !== cfg.adminEmail) return new Response("관리자 계정이 아닙니다.", { status: 403 });
-      google.saveTokens(r.tokens);
+      // A plain sign-in gets no refresh token; keep the saved grant then.
+      if (r.tokens.refresh_token) google.saveTokens(r.tokens);
       const headers = new Headers({ Location: "/admin" });
       startSession(r.email, headers);
       headers.append("Set-Cookie", setCookie("oauth_state", "", 0));

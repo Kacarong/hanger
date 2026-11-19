@@ -14,6 +14,7 @@ let foldersCreated = 0;
 let loginEmail = "owner@example.com";
 const FULL_SCOPE = "openid email https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/calendar.readonly";
 let grantedScope = FULL_SCOPE; // what the fake consent screen lets through
+let lastPrompt: string | null = null; // like Google, a refresh token comes only from a consent screen
 let calendarFails = false;
 const eventQueries: URLSearchParams[] = [];
 let nextId = 1;
@@ -47,7 +48,8 @@ beforeAll(() => {
       if (p === "/token") {
         const form = new URLSearchParams(await req.text());
         if (form.get("grant_type") === "authorization_code" && form.get("code") !== "good-code") return new Response("bad code", { status: 400 });
-        return Response.json({ access_token: "at", expires_in: 3600, refresh_token: "rt", id_token: idToken(loginEmail), scope: grantedScope });
+        const refresh = form.get("grant_type") === "authorization_code" && lastPrompt === "consent" ? { refresh_token: "rt" } : {};
+        return Response.json({ access_token: "at", expires_in: 3600, ...refresh, id_token: idToken(loginEmail), scope: grantedScope });
       }
       if (p.startsWith("/thumbs/")) {
         if (req.headers.get("Authorization") !== "Bearer at") return new Response("no", { status: 403 });
@@ -176,7 +178,9 @@ async function login(call: ReturnType<typeof makeApp>["call"], code = "good-code
   const start = await call("/auth/login");
   expect(start.status).toBe(302);
   const redirect = new URL(start.headers.get("Location")!);
-  expect(redirect.searchParams.get("scope")).toContain("drive.file");
+  lastPrompt = redirect.searchParams.get("prompt");
+  // The full grant only when none is saved yet; after that just "who is this", so Google skips its unverified-app warning.
+  expect(redirect.searchParams.get("scope")).toBe(lastPrompt === "consent" ? FULL_SCOPE : "openid email");
   expect(redirect.searchParams.get("access_type")).toBe("offline");
   expect(redirect.searchParams.get("login_hint")).toBe("owner@example.com"); // Google picks the owner account by itself
   const state = redirect.searchParams.get("state")!;
@@ -485,6 +489,13 @@ test("캘린더: 권한 없으면 다시 동의 요청, 구글 일정 + 할 일�
     await login(call);
     expect(await (await call("/api/me", { cookie })).json()).toMatchObject({ calendarConnected: true });
     expect(new URL((await call("/auth/login")).headers.get("Location")!).searchParams.get("prompt")).toBeNull();
+
+    // A plain sign-in (no refresh token, narrower scope in the reply) keeps the saved grant.
+    grantedScope = "openid email";
+    const plain = await login(call);
+    expect(plain.res.status).toBe(302);
+    expect(await (await call("/api/me", { cookie: plain.cookie })).json()).toMatchObject({ admin: true, driveConnected: true, calendarConnected: true });
+    grantedScope = FULL_SCOPE;
 
     await call("/api/tasks", { method: "POST", cookie, headers: JSON_ORIGIN, body: JSON.stringify({ kind: "과제", title: "레포트", due_date: "2026-11-22" }) });
     await call("/api/tasks", { method: "POST", cookie, headers: JSON_ORIGIN, body: JSON.stringify({ title: "범위 밖", due_date: "2026-12-05" }) });
