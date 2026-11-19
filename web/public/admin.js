@@ -645,13 +645,27 @@ function showTab() {
     .catch(showError);
 }
 
+// Web Storage access throws when the browser blocks it for this site.
+function storage(fn) {
+  try {
+    return fn();
+  } catch {
+    return null;
+  }
+}
+
 async function init() {
   me = await call("/api/me");
   if (!me.admin) {
     // Go straight to Google, which signs the owner in without a click. Only once per tab, so a
     // cancelled or failed login shows this screen instead of looping, and not after a logout.
-    if (me.googleEnabled && !localStorage.getItem("noAutoLogin") && !sessionStorage.getItem("autoLoginTried")) {
+    // If the browser blocks Web Storage the attempt can't be recorded, so auto login is skipped.
+    const autoLogin = storage(() => {
+      if (localStorage.getItem("noAutoLogin") || sessionStorage.getItem("autoLoginTried")) return false;
       sessionStorage.setItem("autoLoginTried", "1");
+      return true;
+    });
+    if (me.googleEnabled && autoLogin) {
       location.replace("/auth/login");
       return;
     }
@@ -666,8 +680,10 @@ async function init() {
     };
     return;
   }
-  sessionStorage.removeItem("autoLoginTried");
-  localStorage.removeItem("noAutoLogin");
+  storage(() => {
+    sessionStorage.removeItem("autoLoginTried");
+    localStorage.removeItem("noAutoLogin");
+  });
   categories = me.categories;
   taskKinds = me.taskKinds;
   $("main").hidden = false;
@@ -785,7 +801,7 @@ async function init() {
     }
   };
   $("logout").onclick = () => {
-    localStorage.setItem("noAutoLogin", "1"); // otherwise the reload would sign straight back in
+    storage(() => localStorage.setItem("noAutoLogin", "1")); // otherwise the reload would sign straight back in
     call("/auth/logout", { method: "POST" }).then(() => location.reload());
   };
 
