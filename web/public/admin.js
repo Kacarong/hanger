@@ -143,7 +143,7 @@ function attachBox(box, target) {
   let id = null; // null: not saved yet
   let shown = 0; // goes up whenever the box switches to another note/task
   let files = [];
-  let category = "기타"; // for files uploaded from here
+  let category = () => "기타"; // for files uploaded from here
   let uploads = Promise.resolve();
   const err = el("span", { className: "error" });
   const progress = el("ul", { className: "progress" });
@@ -152,7 +152,7 @@ function attachBox(box, target) {
 
   const self = {
     has: (fileId) => files.some((f) => f.id === fileId),
-    async show(newId, cat = "기타") {
+    async show(newId, cat = () => "기타") {
       const n = ++shown;
       id = newId;
       category = cat;
@@ -195,7 +195,7 @@ function attachBox(box, target) {
     const [n, forId] = [shown, id];
     uploads = uploads.then(async () => {
       for (const file of picked) {
-        const row = await uploadOne(file, progress, { category });
+        const row = await uploadOne(file, progress, { category: category() });
         if (!row) continue;
         // The box may have moved on to another note/task meanwhile: the file still goes where it was picked.
         if (n === shown) await self.attach(row).catch(fail);
@@ -399,7 +399,7 @@ function openTaskDialog(t = null, date = "") {
   $("task-date").value = t?.due_date ?? date;
   $("task-time").value = t?.due_time ?? "";
   $("task-note").value = t?.note ?? "";
-  taskFiles.show(t?.id ?? null, t?.kind === "과제" ? "과제" : "기타");
+  taskFiles.show(t?.id ?? null, () => ($("task-kind").value === "과제" ? "과제" : "기타"));
   $("task-dialog").showModal();
 }
 
