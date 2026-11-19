@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { mkdirSync, existsSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { ATTACH_TARGETS, BLOCK_TYPES, CATEGORIES, NOTE_MAX_BLOCKS, NOTE_MAX_TEXT, TASK_KINDS, type Block, type Db, type FileRow, type TaskFields } from "./db";
+import { ATTACH_TARGETS, BLOCK_TYPES, CATEGORIES, NOTE_MAX_BLOCKS, NOTE_MAX_TEXT, TASK_KINDS, type AttachedFile, type Block, type Db, type FileRow, type PortfolioFields, type PortfolioItem, type TaskFields } from "./db";
 import { GoogleError, type CalendarEvent, type Google } from "./google";
 import { importNotion, newNotionJob, NotionError, type NotionJob } from "./notion";
 import { passwordProblem } from "./password";
@@ -76,8 +76,20 @@ export function escapeHtml(s: string): string {
   return s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
 }
 
-function publicView(f: FileRow) {
-  return { id: f.id, title: f.title, category: f.category, tags: f.tags, note: f.note, mime: f.mime, link: f.web_view_link };
+// Files a browser may show in place. Anything else (HTML, SVG, scripts, ...) is only ever downloaded,
+// so a file in the cloud can never run as a page of this site.
+const INLINE_TYPES = /^(image\/(png|jpeg|gif|webp|avif|bmp)|video\/(mp4|webm|ogg|quicktime)|audio\/(mpeg|mp4|ogg|wav|webm|flac|aac|x-m4a)|application\/pdf|text\/plain)$/;
+const RASTER = /^image\/(png|jpeg|gif|webp|avif|bmp)$/;
+
+// The name a download gets: the title shown in the cloud, keeping the extension of the uploaded name.
+export function downloadName(f: Pick<FileRow, "title" | "name">): string {
+  const ext = f.name.match(/\.[\w-]{1,10}$/)?.[0] ?? "";
+  return !ext || f.title.toLowerCase().endsWith(ext.toLowerCase()) ? f.title : f.title + ext;
+}
+
+function contentDisposition(kind: "inline" | "attachment", name: string): string {
+  const ascii = name.replace(/[^\x20-\x7e]|["\\]/g, "_");
+  return `${kind}; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(name)}`;
 }
 
 // Hash of everything in public/. Static URLs carry it as ?v= so a deploy never pairs new HTML
@@ -137,6 +149,39 @@ export function createApp(cfg: AppConfig, db: Db, google: Google) {
     return CATEGORIES.includes(v as string) ? (v as string) : "기타";
   }
 
+  const folderName = (v: unknown) => str(v, 100).replace(/[\\/]/g, "_");
+
+  // A folder reference from a request: null (or absent) = the top of the cloud, undefined = no such folder.
+  function folderRef(v: unknown): number | null | undefined {
+    if (v === null || v === undefined || v === "") return null;
+    return db.getFolder(Number(v)) ? Number(v) : undefined;
+  }
+
+  // The Drive folder that holds a cloud folder's files.
+  const driveFolder = (folder: number | null) => (folder === null ? google.rootFolder() : Promise.resolve(db.getFolder(folder)!.drive_id));
+
+  // Validates portfolio item fields from a request body. Only keys present in the body are returned.
+  function itemFields(b: Record<string, unknown>): Partial<PortfolioFields> | string {
+    const out: Partial<PortfolioFields> = {};
+    if ("section_id" in b) {
+      if (!db.getSection(Number(b.section_id))) return "섹션을 찾을 수 없습니다";
+      out.section_id = Number(b.section_id);
+    }
+    if ("title" in b) {
+      out.title = str(b.title, 200);
+      if (!out.title) return "제목을 입력해 주세요";
+    }
+    if ("period" in b) out.period = str(b.period, 100);
+    if ("summary" in b) out.summary = str(b.summary, 300);
+    if ("body" in b) out.body = str(b.body, 20000);
+    if ("link" in b) {
+      out.link = str(b.link, 1000);
+      if (out.link && !/^https?:\/\//i.test(out.link)) return "링크는 http:// 나 https:// 로 시작해야 합니다";
+    }
+    if ("public" in b) out.public = b.public === true ? 1 : 0;
+    return out;
+  }
+
   // Validates task fields from a request body. Only keys present in the body are returned.
   function taskFields(b: Record<string, unknown>): Partial<TaskFields> | string {
     const out: Partial<TaskFields> = {};
@@ -194,54 +239,84 @@ export function createApp(cfg: AppConfig, db: Db, google: Google) {
     return out;
   }
 
-  // mine = the owner's own portfolio (/admin/portfolio): public and private pieces, private ones marked 개인용.
-  async function renderPublic(mine = false): Promise<Response> {
-    const items = db.listFiles(mine ? { portfolioOnly: true } : { publicOnly: true });
-    const num = (i: number) => String(i + 1).padStart(2, "0");
-    const chips = (f: FileRow) =>
-      [mine && !f.public ? "개인용" : "", f.category, ...f.tags.split(",")]
-        .map((t) => t.trim())
+  // The portfolio page. mine = the owner's own view (/admin/portfolio): private items too, marked 개인용.
+  function renderPortfolio(mine = false): Response {
+    const profile = db.profile();
+    const photo = db.listAttachments("profile", 0).find((f) => RASTER.test(f.mime));
+    const items = db.listItems({ publicOnly: !mine });
+    const sections = db
+      .listSections()
+      .map((s) => ({ ...s, items: items.filter((i) => i.section_id === s.id) }))
+      .filter((s) => s.items.length);
+    const fileUrl = (f: AttachedFile) => `/portfolio/file/${f.id}`;
+    const chips = (it: PortfolioItem) =>
+      [mine && !it.public ? "개인용" : "", it.period]
         .filter(Boolean)
         .map((t) => `<span class="chip">${escapeHtml(t)}</span>`)
         .join("");
-    const works = items
-      .map(
-        (f, i) => `<article class="work reveal">
-<a class="work-media" href="${escapeHtml(f.web_view_link)}" target="_blank" rel="noopener">
-<img src="/thumb/${f.id}" alt="" loading="lazy"><span class="work-media-label">${escapeHtml(f.title)}</span></a>
-<div class="work-info"><span class="work-num">${num(i)}</span>
-<h3><a href="${escapeHtml(f.web_view_link)}" target="_blank" rel="noopener">${escapeHtml(f.title)}</a></h3>
-<div class="chips">${chips(f)}</div>
-${f.note ? `<p class="work-note">${escapeHtml(f.note)}</p>` : ""}</div>
+    let n = 0;
+    // The first attached file is the cover: the image itself, or Drive's preview of a video or PDF.
+    const item = (it: PortfolioItem) => {
+      const files = db.listAttachments("portfolio", it.id);
+      const [cover, ...rest] = files;
+      const num = String(++n).padStart(2, "0");
+      const title = it.link ? `<a href="${escapeHtml(it.link)}" target="_blank" rel="noopener">${escapeHtml(it.title)}</a>` : escapeHtml(it.title);
+      const extras = rest.length
+        ? `<div class="extras">${rest
+            .map((f) =>
+              RASTER.test(f.mime)
+                ? `<a class="extra-img" href="${fileUrl(f)}" target="_blank" rel="noopener"><img src="${fileUrl(f)}" alt="" loading="lazy"></a>`
+                : `<a class="extra-file" href="${fileUrl(f)}">${escapeHtml(downloadName(f))} ↓</a>`,
+            )
+            .join("")}</div>`
+        : "";
+      const info = `<span class="work-num">${num}</span>
+<h3>${title}</h3>
+<div class="chips">${chips(it)}</div>
+${it.summary ? `<p class="work-summary">${escapeHtml(it.summary)}</p>` : ""}
+${it.body ? `<p class="work-note">${escapeHtml(it.body)}</p>` : ""}${extras}
+${it.link ? `<a class="work-link" href="${escapeHtml(it.link)}" target="_blank" rel="noopener">LINK ↗</a>` : ""}`;
+      if (!cover) return { cover: false, html: `<li class="reveal"><div>${info}</div></li>` };
+      const src = RASTER.test(cover.mime) ? fileUrl(cover) : `/thumb/${cover.id}`;
+      return {
+        cover: true,
+        html: `<article class="work reveal">
+<a class="work-media" href="${escapeHtml(it.link || fileUrl(cover))}" target="_blank" rel="noopener"><img src="${src}" alt="" loading="lazy"><span class="work-media-label">${escapeHtml(it.title)}</span></a>
+<div class="work-info">${info}</div>
 </article>`,
-      )
+      };
+    };
+    const body = sections
+      .map((s) => {
+        n = 0; // numbers start over in each section
+        const rendered = s.items.map(item);
+        const works = rendered.filter((r) => r.cover).map((r) => r.html).join("\n");
+        const entries = rendered.filter((r) => !r.cover).map((r) => r.html).join("\n");
+        return `<section class="works" id="s${s.id}">
+<h2 class="section-title reveal">${escapeHtml(s.title)} <sup>${s.items.length}</sup></h2>
+${works}${entries ? `<ul class="entries">${entries}</ul>` : ""}
+</section>`;
+      })
       .join("\n");
-    const index = items
-      .map(
-        (f, i) => `<li class="reveal"><span class="idx-num">${"✳".repeat(Math.min(i + 1, 4))}</span>
-<div><h3>${escapeHtml(f.title)}</h3><div class="chips">${chips(f)}</div></div></li>`,
-      )
-      .join("\n");
+    const about = profile.about || photo;
+    const nav = [about ? `<a href="#about">ABOUT</a>` : "", ...sections.map((s) => `<a href="#s${s.id}">${escapeHtml(s.title)}</a>`), `<a href="#contact">CONTACT</a>`].join("");
     const html = `<!doctype html><html lang="ko"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1"><title>kacarong — ${mine ? "내 포트폴리오" : "포트폴리오"}</title>
+<meta name="viewport" content="width=device-width, initial-scale=1"><title>${escapeHtml(profile.name || "kacarong")} — ${mine ? "내 포트폴리오" : "포트폴리오"}</title>
 ${mine ? `<meta name="robots" content="noindex">` : ""}<link rel="stylesheet" href="/static/site.css?v=${v}"></head><body>
-${mine ? `<p class="mine-bar">내 포트폴리오 — 나만 보는 화면입니다. 개인용 표시가 없는 것만 kacarong.kr에 나옵니다. <a href="/admin#files">작업공간으로</a></p>` : ""}
+${mine ? `<p class="mine-bar">내 포트폴리오 — 나만 보는 화면입니다. 개인용 표시가 없는 것만 kacarong.kr에 나옵니다. <a href="/admin#portfolio">고치러 가기</a></p>` : ""}
 <header class="top">
-<a class="brand" href="/">KACARONG <span class="spark">✳</span></a>
-<nav><a href="#work">WORK</a><a href="#index">INDEX</a><a href="#contact">CONTACT</a></nav>
+<a class="brand" href="/">${escapeHtml((profile.name || "kacarong").toUpperCase())} <span class="spark">✳</span></a>
+<nav>${nav}</nav>
 <span class="clock" id="clock"></span>
 <span class="year">© ${new Date().getFullYear()}</span>
 </header>
 <section class="hero">
-<h1 class="hero-title"><span class="line"><span>kacarong</span></span><span class="line"><span>portfolio</span></span></h1>
-<p class="hero-copy reveal">기록하고, 만들고, 남깁니다.<br>작업한 것들을 여기에 모아 둡니다.</p>
-<a class="hero-cta" href="#work">VIEW WORK <span class="spark">✳</span></a>
+<h1 class="hero-title"><span class="line"><span>${escapeHtml(profile.name || "kacarong")}</span></span><span class="line"><span>portfolio</span></span></h1>
+<p class="hero-copy reveal">${profile.headline ? escapeHtml(profile.headline) : "기록하고, 만들고, 남깁니다.<br>작업한 것들을 여기에 모아 둡니다."}</p>
+${sections.length ? `<a class="hero-cta" href="#s${sections[0]!.id}">VIEW <span class="spark">✳</span></a>` : ""}
 </section>
-<section class="works" id="work">
-<h2 class="section-title reveal">SELECTED<br>WORK <sup>${items.length}</sup></h2>
-${items.length ? works : `<p class="empty reveal">${mine ? "아직 포트폴리오에 넣은 작업이 없습니다. 클라우드에서 파일의 포트폴리오를 \"개인용\"이나 \"공개\"로 바꿔 보세요." : "아직 공개된 작업이 없습니다."}</p>`}
-</section>
-${items.length ? `<section class="index" id="index"><h2 class="section-title reveal">INDEX</h2><ul>${index}</ul></section>` : ""}
+${about ? `<section class="about" id="about"><h2 class="section-title reveal">ABOUT</h2><div class="about-row reveal">${photo ? `<img class="about-photo" src="${fileUrl(photo)}" alt="">` : ""}${profile.about ? `<p class="about-text">${escapeHtml(profile.about)}</p>` : ""}</div></section>` : ""}
+${body || `<section class="works"><p class="empty reveal">${mine ? "아직 포트폴리오에 넣은 항목이 없습니다. 작업공간의 포트폴리오에서 항목을 추가해 보세요." : "아직 공개된 항목이 없습니다."}</p></section>`}
 <footer class="foot" id="contact">
 <p class="foot-big reveal">LET'S MAKE<br>SOMETHING.</p>
 <div class="foot-row"><span>KACARONG.KR</span><a href="/privacy">PRIVACY</a><a href="/admin">WORKSPACE</a></div>
@@ -251,9 +326,30 @@ ${items.length ? `<section class="index" id="index"><h2 class="section-title rev
     return new Response(html, { headers: { "Content-Type": "text/html; charset=utf-8" } });
   }
 
+  // Streams a file from Drive. Only INLINE_TYPES are shown in place; the rest is a download.
+  // Ranges pass through so a video can seek. The file is never treated as a page of this site.
+  async function sendFile(f: FileRow, req: Request, download: boolean, cache: string): Promise<Response> {
+    const inline = !download && INLINE_TYPES.test(f.mime);
+    const drive = await google.download(f.drive_id, req.headers.get("Range"));
+    const h = new Headers({
+      "Content-Type": inline ? (f.mime === "text/plain" ? "text/plain; charset=utf-8" : f.mime) : "application/octet-stream",
+      "Content-Disposition": contentDisposition(inline ? "inline" : "attachment", downloadName(f)),
+      "Accept-Ranges": "bytes",
+      "Cache-Control": cache,
+      // Chrome's PDF viewer does not open under a sandbox policy; a PDF can't reach this site's pages anyway.
+      "Content-Security-Policy": inline && f.mime === "application/pdf" ? "default-src 'none'; object-src 'self'; style-src 'unsafe-inline'" : "default-src 'none'; img-src 'self'; media-src 'self'; style-src 'unsafe-inline'; sandbox",
+    });
+    for (const k of ["Content-Length", "Content-Range"]) {
+      const val = drive.headers.get(k);
+      if (val) h.set(k, val);
+    }
+    return new Response(drive.body, { status: drive.status, headers: h });
+  }
+
   async function thumb(id: number, req: Request): Promise<Response> {
     const f = db.getFile(id);
-    if (!f || (!f.public && !isAdmin(req))) return new Response("not found", { status: 404 });
+    const pub = !!f && db.isPublicFile(f.id);
+    if (!f || (!pub && !isAdmin(req))) return new Response("not found", { status: 404 });
     const path = join(thumbDir, f.drive_id);
     if (!existsSync(path)) {
       const t = await google.thumbnail(f.drive_id);
@@ -261,7 +357,7 @@ ${items.length ? `<section class="index" id="index"><h2 class="section-title rev
       await Bun.write(path, t.bytes);
     }
     return new Response(Bun.file(path), {
-      headers: { "Content-Type": "image/jpeg", "Cache-Control": f.public ? "public, max-age=86400" : "private, max-age=86400" },
+      headers: { "Content-Type": "image/jpeg", "Cache-Control": pub ? "public, max-age=86400" : "private, max-age=86400" },
     });
   }
 
@@ -282,10 +378,6 @@ ${items.length ? `<section class="index" id="index"><h2 class="section-title rev
         maxFileSize: MAX_FILE_SIZE,
       });
     }
-    if (path === "/api/public" && method === "GET") {
-      return json(db.listFiles({ publicOnly: true }).map(publicView));
-    }
-
     const s = session(req);
     if (!s) return json({ error: "로그인이 필요합니다" }, 401);
     // Session cookies are SameSite=Lax; also refuse state changes that don't come from this site.
@@ -441,7 +533,7 @@ ${items.length ? `<section class="index" id="index"><h2 class="section-title rev
       const job = (notionJob = newNotionJob());
       const saveFile = async (name: string, mime: string, bytes: Blob) => {
         const d = await google.upload(name, mime, bytes, origin);
-        return db.insertFile({ drive_id: d.id, name: d.name, title: d.name, mime: d.mimeType, size: Number(d.size ?? bytes.size), category: "기타", tags: "노션", note: "", web_view_link: d.webViewLink ?? "", web_content_link: d.webContentLink ?? "" });
+        return db.insertFile({ drive_id: d.id, name: d.name, title: d.name, mime: d.mimeType, size: Number(d.size ?? bytes.size), category: "기타", tags: "노션", note: "" });
       };
       importNotion({ token, apiBase: cfg.notionApi ?? "https://api.notion.com", db, saveFile, job }).then(
         () => (job.status = "done"),
@@ -454,13 +546,15 @@ ${items.length ? `<section class="index" id="index"><h2 class="section-title rev
       return json(job, 202);
     }
 
-    // Cloud files attached to a note or a task: ?note=ID or ?task=ID (POST: { note | task, fileId }).
+    // Cloud files attached to a note, a task or a portfolio item: ?note=ID, ?task=ID, ?portfolio=ID,
+    // or the portfolio profile: ?profile=0 (POST: { note | task | portfolio | profile, fileId }).
     if (path === "/api/attachments" && (method === "GET" || method === "POST")) {
       const b = method === "POST" ? await body(req) : Object.fromEntries(url.searchParams);
       const target = ATTACH_TARGETS.find((t) => t in b);
       const targetId = Number(target && b[target]);
-      if (!target || !Number.isInteger(targetId)) return json({ error: "노트나 할 일을 지정해 주세요" }, 400);
-      if (!(target === "note" ? db.getNote(targetId) : db.getTask(targetId))) return json({ error: target === "note" ? "노트를 찾을 수 없습니다" : "할 일을 찾을 수 없습니다" }, 404);
+      if (!target || !Number.isInteger(targetId)) return json({ error: "붙일 곳을 지정해 주세요" }, 400);
+      const found = { note: () => db.getNote(targetId), task: () => db.getTask(targetId), portfolio: () => db.getItem(targetId), profile: () => targetId === 0 }[target]();
+      if (!found) return json({ error: { note: "노트", task: "할 일", portfolio: "포트폴리오 항목", profile: "프로필" }[target] + "을(를) 찾을 수 없습니다" }, 404);
       if (method === "GET") return json(db.listAttachments(target, targetId));
       const file = db.getFile(Number(b.fileId));
       if (!file) return json({ error: "파일을 찾을 수 없습니다" }, 404);
@@ -474,22 +568,68 @@ ${items.length ? `<section class="index" id="index"><h2 class="section-title rev
       return json({ ok: true });
     }
 
+    // folder=ID or root lists one folder; without it, every file (the picker). A search always looks everywhere.
     if (path === "/api/files" && method === "GET") {
-      return json(db.listFiles({ q: url.searchParams.get("q") ?? undefined, category: url.searchParams.get("category") ?? undefined }));
+      const q = url.searchParams.get("q") ?? undefined;
+      const fp = url.searchParams.get("folder");
+      const folder = q || fp === null ? undefined : fp === "root" ? null : Number(fp);
+      if (typeof folder === "number" && !db.getFolder(folder)) return json({ error: "폴더를 찾을 수 없습니다" }, 404);
+      return json(db.listFiles({ q, category: url.searchParams.get("category") ?? undefined, folder }));
     }
 
+    // What the cloud uses (its own files only) and how much room the Drive behind it has.
     if (path === "/api/quota" && method === "GET") {
-      return json(await google.quota());
+      return json({ ...db.usage(), drive: await google.quota() });
+    }
+
+    if (path === "/api/folders" && method === "GET") return json(db.listFolders());
+
+    if (path === "/api/folders" && method === "POST") {
+      const b = await body(req);
+      const name = folderName(b.name);
+      const parent = folderRef(b.parentId);
+      if (!name) return json({ error: "폴더 이름을 넣어 주세요" }, 400);
+      if (parent === undefined) return json({ error: "상위 폴더를 찾을 수 없습니다" }, 404);
+      if (db.folderNameTaken(parent, name)) return json({ error: "같은 이름의 폴더가 이미 있습니다" }, 409);
+      const driveId = await google.createFolder(name, await driveFolder(parent));
+      return json(db.insertFolder(name, parent, driveId), 201);
+    }
+
+    const fm = path.match(/^\/api\/folders\/(\d+)$/);
+    if (fm) {
+      const folder = db.getFolder(Number(fm[1]));
+      if (!folder) return json({ error: "폴더를 찾을 수 없습니다" }, 404);
+      if (method === "PATCH") {
+        const b = await body(req);
+        const name = "name" in b ? folderName(b.name) : folder.name;
+        const parent = "parentId" in b ? folderRef(b.parentId) : folder.parent_id;
+        if (!name) return json({ error: "폴더 이름을 넣어 주세요" }, 400);
+        if (parent === undefined) return json({ error: "옮길 폴더를 찾을 수 없습니다" }, 404);
+        if (parent !== null && db.folderTree(folder.id).includes(parent)) return json({ error: "폴더를 자기 안으로 옮길 수 없습니다" }, 400);
+        if (db.folderNameTaken(parent, name, folder.id)) return json({ error: "같은 이름의 폴더가 이미 있습니다" }, 409);
+        if (name !== folder.name) await google.rename(folder.drive_id, name);
+        if (parent !== folder.parent_id) await google.move(folder.drive_id, await driveFolder(folder.parent_id), await driveFolder(parent));
+        db.updateFolder(folder.id, name, parent);
+        return json(db.getFolder(folder.id));
+      }
+      // Everything inside goes to the Drive trash with the folder (30 days to get it back there).
+      if (method === "DELETE") {
+        await google.trash(folder.drive_id);
+        for (const f of db.deleteFolders(db.folderTree(folder.id))) rmSync(join(thumbDir, f.drive_id), { force: true });
+        return json({ ok: true });
+      }
     }
 
     if (path === "/api/uploads" && method === "POST") {
       const b = await body(req);
       const name = str(b.name, 255);
       const size = Number(b.size);
+      const folder = folderRef(b.folderId);
       if (!name) return json({ error: "파일 이름이 없습니다" }, 400);
       if (!Number.isInteger(size) || size <= 0) return json({ error: "파일 크기가 올바르지 않습니다" }, 400);
       if (size >= MAX_FILE_SIZE) return json({ error: "1GB 미만 파일만 올릴 수 있습니다" }, 413);
-      const uploadUrl = await google.startUpload({ name, size, mimeType: str(b.mimeType, 255), origin });
+      if (folder === undefined) return json({ error: "폴더를 찾을 수 없습니다" }, 404);
+      const uploadUrl = await google.startUpload({ name, size, mimeType: str(b.mimeType, 255), origin, parent: await driveFolder(folder) });
       return json({ uploadUrl });
     }
 
@@ -503,11 +643,12 @@ ${items.length ? `<section class="index" id="index"><h2 class="section-title rev
     if (path === "/api/files" && method === "POST") {
       const b = await body(req);
       const driveId = str(b.driveId, 200);
+      const folder = folderRef(b.folderId);
       if (!driveId) return json({ error: "driveId가 없습니다" }, 400);
+      if (folder === undefined) return json({ error: "폴더를 찾을 수 없습니다" }, 404);
       if (db.getFileByDriveId(driveId)) return json({ error: "이미 등록된 파일입니다" }, 409);
       const d = await google.getFile(driveId);
-      const root = await google.rootFolder();
-      if (d.trashed || !d.parents?.includes(root)) return json({ error: "파일함 폴더의 파일이 아닙니다" }, 400);
+      if (d.trashed || !d.parents?.includes(await driveFolder(folder))) return json({ error: "파일함 폴더의 파일이 아닙니다" }, 400);
       const row = db.insertFile({
         drive_id: d.id,
         name: d.name,
@@ -517,56 +658,106 @@ ${items.length ? `<section class="index" id="index"><h2 class="section-title rev
         category: category(b.category),
         tags: str(b.tags),
         note: str(b.note, 2000),
-        web_view_link: d.webViewLink ?? "",
-        web_content_link: d.webContentLink ?? "",
+        folder_id: folder,
       });
       return json(row, 201);
     }
 
-    const m = path.match(/^\/api\/files\/(\d+)(\/share|\/portfolio)?$/);
+    const m = path.match(/^\/api\/files\/(\d+)(\/content)?$/);
     if (m) {
       const f = db.getFile(Number(m[1]));
       if (!f) return json({ error: "파일을 찾을 수 없습니다" }, 404);
-      const action = m[2];
 
-      if (!action && method === "PATCH") {
+      // Opens (images, video, audio, PDF, plain text) or downloads the file through this site.
+      if (m[2] && method === "GET") return sendFile(f, req, url.searchParams.has("download"), "private, no-store");
+
+      if (!m[2] && method === "PATCH") {
         const b = await body(req);
         const patch: Parameters<Db["updateFile"]>[1] = {};
         if ("title" in b) patch.title = str(b.title, 200) || f.name;
         if ("category" in b) patch.category = category(b.category);
         if ("tags" in b) patch.tags = str(b.tags);
         if ("note" in b) patch.note = str(b.note, 2000);
+        if ("folderId" in b) {
+          const folder = folderRef(b.folderId);
+          if (folder === undefined) return json({ error: "옮길 폴더를 찾을 수 없습니다" }, 404);
+          if (folder !== f.folder_id) await google.move(f.drive_id, await driveFolder(f.folder_id), await driveFolder(folder));
+          patch.folder_id = folder;
+        }
+        if (patch.title !== undefined && patch.title !== f.title) await google.rename(f.drive_id, downloadName({ title: patch.title, name: f.name }));
         db.updateFile(f.id, patch);
         return json(db.getFile(f.id));
       }
 
-      if (!action && method === "DELETE") {
+      if (!m[2] && method === "DELETE") {
         await google.trash(f.drive_id);
         db.deleteFile(f.id);
         rmSync(join(thumbDir, f.drive_id), { force: true });
         return json({ ok: true });
       }
+    }
 
-      if (action === "/share" && method === "POST") {
-        const on = (await body(req)).shared === true;
-        if (on) {
-          await google.share(f.drive_id);
-          db.updateFile(f.id, { shared: 1 });
-        } else {
-          await google.unshare(f.drive_id);
-          db.updateFile(f.id, { shared: 0, public: 0 });
+    // Portfolio: the profile, sections and items. Files go on items and the profile through /api/attachments.
+    if (path === "/api/portfolio" && method === "GET") {
+      const items = db.listItems();
+      return json({
+        profile: db.profile(),
+        photo: db.listAttachments("profile", 0),
+        sections: db.listSections().map((s) => ({
+          ...s,
+          items: items.filter((i) => i.section_id === s.id).map((i) => ({ ...i, files: db.listAttachments("portfolio", i.id) })),
+        })),
+      });
+    }
+
+    if (path === "/api/portfolio/profile" && method === "PUT") {
+      const b = await body(req);
+      db.setProfile({ name: str(b.name, 100), headline: str(b.headline, 200), about: str(b.about, 5000) });
+      return json(db.profile());
+    }
+
+    if (path === "/api/portfolio/sections" && method === "POST") {
+      const title = str((await body(req)).title, 100);
+      if (!title) return json({ error: "섹션 이름을 넣어 주세요" }, 400);
+      return json(db.insertSection(title), 201);
+    }
+
+    const sm = path.match(/^\/api\/portfolio\/(sections|items)\/(\d+)(\/move)?$/);
+    if (sm) {
+      const kind = sm[1] === "sections" ? "section" : "item";
+      const id = Number(sm[2]);
+      if (!(kind === "section" ? db.getSection(id) : db.getItem(id))) return json({ error: kind === "section" ? "섹션을 찾을 수 없습니다" : "항목을 찾을 수 없습니다" }, 404);
+      if (sm[3] && method === "POST") {
+        const dir = (await body(req)).dir;
+        if (dir !== -1 && dir !== 1) return json({ error: "dir은 -1이나 1" }, 400);
+        return json({ moved: db.move(kind, id, dir) });
+      }
+      if (!sm[3] && method === "PATCH") {
+        const b = await body(req);
+        if (kind === "section") {
+          const title = str(b.title, 100);
+          if (!title) return json({ error: "섹션 이름을 넣어 주세요" }, 400);
+          db.renameSection(id, title);
+          return json(db.getSection(id));
         }
-        return json(db.getFile(f.id));
+        const f = itemFields(b);
+        if (typeof f === "string") return json({ error: f }, 400);
+        db.updateItem(id, f);
+        return json(db.getItem(id));
       }
+      if (!sm[3] && method === "DELETE") {
+        if (kind === "section") db.deleteSection(id);
+        else db.deleteItem(id);
+        return json({ ok: true });
+      }
+    }
 
-      // none = out of the portfolio, private = only in /admin/portfolio, public = also on kacarong.kr
-      if (action === "/portfolio" && method === "POST") {
-        const to = (await body(req)).portfolio;
-        if (to !== "none" && to !== "private" && to !== "public") return json({ error: "portfolio는 none, private, public 중 하나" }, 400);
-        if (to === "public" && !f.shared) await google.share(f.drive_id); // public page links need anyone-with-link access
-        db.updateFile(f.id, to === "public" ? { shared: 1, public: 1, portfolio: 1 } : { public: 0, portfolio: to === "private" ? 1 : 0 });
-        return json(db.getFile(f.id));
-      }
+    if (path === "/api/portfolio/items" && method === "POST") {
+      const f = itemFields(await body(req));
+      if (typeof f === "string") return json({ error: f }, 400);
+      if (f.section_id === undefined) return json({ error: "섹션을 골라 주세요" }, 400);
+      if (!f.title) return json({ error: "제목을 입력해 주세요" }, 400);
+      return json(db.insertItem({ period: "", summary: "", body: "", link: "", public: 0, ...f, section_id: f.section_id, title: f.title }), 201);
     }
 
     return json({ error: "없는 API" }, 404);
@@ -576,8 +767,17 @@ ${items.length ? `<section class="index" id="index"><h2 class="section-title rev
     const url = new URL(req.url);
     const path = url.pathname;
 
-    if (path === "/" && req.method === "GET") return renderPublic();
-    if (path === "/admin/portfolio" && req.method === "GET") return isAdmin(req) ? renderPublic(true) : new Response(null, { status: 302, headers: { Location: "/admin" } });
+    if (path === "/" && req.method === "GET") return renderPortfolio();
+    if (path === "/admin/portfolio" && req.method === "GET") return isAdmin(req) ? renderPortfolio(true) : new Response(null, { status: 302, headers: { Location: "/admin" } });
+
+    // Files of the portfolio: open to anyone when on the profile or a public item, otherwise only to the owner.
+    const pf = path.match(/^\/portfolio\/file\/(\d+)$/);
+    if (pf && req.method === "GET") {
+      const f = db.getFile(Number(pf[1]));
+      const pub = !!f && db.isPublicFile(f.id);
+      if (!f || (!pub && !isAdmin(req))) return new Response("not found", { status: 404 });
+      return sendFile(f, req, !RASTER.test(f.mime), pub ? "public, max-age=600" : "private, no-store");
+    }
     if (path === "/admin" && req.method === "GET") return new Response(adminHtml, { headers: { "Content-Type": "text/html; charset=utf-8" } });
     if (path === "/privacy" && req.method === "GET") return new Response(Bun.file(join(PUBLIC_DIR, "privacy.html")));
 
@@ -675,7 +875,7 @@ ${items.length ? `<section class="index" id="index"><h2 class="section-title rev
 
   function withSecurityHeaders(res: Response, path: string): Response {
     const h = res.headers;
-    h.set("Content-Security-Policy", csp);
+    if (!h.has("Content-Security-Policy")) h.set("Content-Security-Policy", csp); // a served file brings a stricter one
     h.set("X-Frame-Options", "DENY");
     h.set("X-Content-Type-Options", "nosniff");
     h.set("Referrer-Policy", "strict-origin-when-cross-origin");

@@ -26,6 +26,10 @@ const ICONS = {
   menu: '<path d="M4 6h16M4 12h16M4 18h16"/>',
   clip: '<path d="m20 11-8.5 8.5a5 5 0 0 1-7-7L13 4a3.5 3.5 0 0 1 5 5l-8.5 8.5a2 2 0 0 1-3-3L14 7"/>',
   x: '<path d="M6 6l12 12M18 6 6 18"/>',
+  star: '<path d="m12 3 2.7 5.6 6.1.9-4.4 4.3 1 6.1-5.4-2.9-5.4 2.9 1-6.1-4.4-4.3 6.1-.9z"/>',
+  up: '<path d="m6 15 6-6 6 6"/>',
+  down: '<path d="m6 9 6 6 6-6"/>',
+  eye: '<path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/>',
 };
 const icon = (name) => {
   const t = document.createElement("template");
@@ -73,7 +77,8 @@ function seg(id, onChange) {
 }
 
 const gb = (n) => (Number(n || 0) / 1024 ** 3).toFixed(1) + "GB";
-const sizeText = (n) => (n >= 1024 ** 2 ? (n / 1024 ** 2).toFixed(1) + "MB" : Math.ceil(n / 1024) + "KB");
+const sizeText = (n) => (n >= 1024 ** 3 ? gb(n) : n >= 1024 ** 2 ? (n / 1024 ** 2).toFixed(1) + "MB" : Math.ceil(n / 1024) + "KB");
+const fileUrl = (f) => `/api/files/${f.id}/content`; // opens images, video, PDF, ... in place; anything else downloads
 
 // Sends one byte range straight to Google. Returns the Drive file when the upload is complete,
 // the next offset Google confirmed, or next: null when the reply doesn't say (Range hidden by CORS).
@@ -114,14 +119,15 @@ async function uploadToDrive(url, file, onProgress) {
   }
 }
 
-// Uploads one file into the 파일함 with its progress line in `list`. Returns the new file row, or null on failure.
+// Uploads one file into the 파일함 (meta.folderId, or the top) with its progress line in `list`.
+// Returns the new file row, or null on failure.
 async function uploadOne(file, list, meta) {
   const name = el("span", { textContent: `${file.name} · 준비 중` });
   const fill = el("div", { className: "bar-fill" });
   const li = el("li", {}, name, el("div", { className: "bar-track" }, fill));
   list.append(li);
   try {
-    const { uploadUrl } = await call("/api/uploads", { method: "POST", body: { name: file.name, size: file.size, mimeType: file.type } });
+    const { uploadUrl } = await call("/api/uploads", { method: "POST", body: { name: file.name, size: file.size, mimeType: file.type, folderId: meta.folderId ?? null } });
     const driveFile = await uploadToDrive(uploadUrl, file, (p) => {
       name.textContent = `${file.name} · ${Math.floor(p * 100)}%`;
       fill.style.width = `${p * 100}%`;
@@ -137,9 +143,9 @@ async function uploadOne(file, list, meta) {
   }
 }
 
-// 클라우드 첨부: 노트·할 일에 파일함의 파일을 붙인다(파일은 파일함에 그대로 있고 떼면 연결만 없어진다).
-// 아직 저장 안 한 새 할 일은 고른 파일을 들고 있다가 저장할 때 붙인다(flush).
-function attachBox(box, target) {
+// 클라우드 첨부: 노트·할 일·포트폴리오에 파일함의 파일을 붙인다(파일은 파일함에 그대로 있고 떼면 연결만 없어진다).
+// 아직 저장 안 한 새 할 일·항목은 고른 파일을 들고 있다가 저장할 때 붙인다(flush).
+function attachBox(box, target, label = "첨부 파일") {
   let id = null; // null: not saved yet
   let shown = 0; // goes up whenever the box switches to another note/task
   let files = [];
@@ -233,7 +239,7 @@ function attachBox(box, target) {
         "div",
         { className: "attach-head" },
         icon("clip"),
-        el("span", { textContent: files.length ? `첨부 파일 ${files.length}개` : "첨부 파일" }),
+        el("span", { textContent: files.length ? `${label} ${files.length}개` : label }),
         el("button", { type: "button", className: "btn ghost sm", onclick: () => openPicker(self) }, icon("folder"), "클라우드에서 고르기"),
         me.driveConnected ? el("button", { type: "button", className: "btn ghost sm", onclick: () => input.click() }, icon("upload"), "새로 올리기") : null,
       ),
@@ -244,7 +250,7 @@ function attachBox(box, target) {
           el(
             "li",
             {},
-            el("a", { href: f.web_view_link, target: "_blank", rel: "noopener", textContent: f.title, title: f.name }),
+            el("a", { href: fileUrl(f), target: "_blank", rel: "noopener", textContent: f.title, title: f.name }),
             el("span", { className: "muted", textContent: sizeText(f.size) }),
             iconBtn("떼기", "x", () => detach(f).catch(fail), "danger"),
           ),
@@ -295,9 +301,39 @@ async function loadPickList() {
   );
 }
 
-// 클라우드(파일함)
+// 클라우드(파일함): 이 사이트의 폴더와 파일. 파일은 구글 드라이브에 같은 폴더 구조로 보관된다.
 let fileCategory = () => "";
 let editingFile = null;
+let editingFolder = null;
+let folders = [];
+const dayText = (s) => new Intl.DateTimeFormat("ko-KR", { timeZone: "Asia/Seoul", year: "numeric", month: "numeric", day: "numeric" }).format(new Date(s.replace(" ", "T") + "Z"));
+
+// The open folder comes from the address (#files/<id>), so back/forward walk the folders. null = the top.
+const currentFolder = () => {
+  const id = Number(location.hash.split("/")[1]);
+  return folders.some((f) => f.id === id) ? id : null;
+};
+function folderPath(id) {
+  const out = [];
+  for (let f = folders.find((x) => x.id === id); f; f = folders.find((x) => x.id === f.parent_id)) out.unshift(f);
+  return out;
+}
+const pathText = (id) => ["클라우드", ...folderPath(id).map((f) => f.name)].join(" / ");
+
+// Fills a folder <select>: the top, then every folder by its path. skip: folders that can't be picked (a folder and what's under it).
+function folderOptions(select, value, skip = new Set()) {
+  const list = folders.filter((f) => !skip.has(f.id)).map((f) => [String(f.id), pathText(f.id)]).sort((a, b) => a[1].localeCompare(b[1], "ko"));
+  select.replaceChildren(el("option", { value: "", textContent: "클라우드 (맨 위)" }), ...list.map(([v, t]) => el("option", { value: v, textContent: t })));
+  select.value = value === null ? "" : String(value);
+}
+const subtree = (id) => {
+  const out = new Set([id]);
+  for (let grew = true; grew; ) {
+    grew = false;
+    for (const f of folders) if (f.parent_id !== null && out.has(f.parent_id) && !out.has(f.id)) out.add(f.id), (grew = true);
+  }
+  return out;
+};
 
 function openFileDialog(f) {
   editingFile = f;
@@ -305,63 +341,184 @@ function openFileDialog(f) {
   $("file-category").value = f.category;
   $("file-tags").value = f.tags;
   $("file-note").value = f.note;
+  folderOptions($("file-folder"), f.folder_id);
   $("file-dialog").showModal();
 }
 
-async function loadQuota(files) {
-  const shared = files.filter((f) => f.shared).length;
-  const pub = files.filter((f) => f.public).length;
-  const mine = files.filter((f) => f.portfolio && !f.public).length;
-  const cards = [stat("파일", String(files.length), "이 조건에 맞는 파일"), stat("포트폴리오", String(pub + mine), `공개 ${pub} · 개인용 ${mine} · 링크 공유 ${shared}`)];
-  if (me.driveConnected) {
-    try {
-      const q = await call("/api/quota");
-      const pct = q.limit ? (Number(q.usage) / Number(q.limit)) * 100 : 0;
-      cards.unshift(stat("구글 드라이브", gb(q.usage), `${q.limit ? gb(q.limit) : "무제한"} 중 ${pct.toFixed(0)}% · 휴지통 ${gb(q.usageInDriveTrash)}`, pct >= 90));
-    } catch (e) {
-      cards.unshift(stat("구글 드라이브", "—", "용량 확인 실패: " + e.message, true));
-    }
-  } else {
-    cards.unshift(stat("구글 드라이브", "—", "연결 안 됨"));
+function openFolderDialog(folder = null) {
+  editingFolder = folder;
+  $("folder-dialog-title").textContent = folder ? "폴더 이름·위치 바꾸기" : "새 폴더";
+  $("folder-name").value = folder?.name ?? "";
+  $("folder-msg").textContent = "";
+  folderOptions($("folder-parent"), folder ? folder.parent_id : currentFolder(), folder ? subtree(folder.id) : new Set());
+  $("folder-dialog").showModal();
+}
+
+async function loadQuota() {
+  if (!me.driveConnected) return $("file-stats").replaceChildren(stat("사용 중", "—", "구글 드라이브 연결 안 됨"));
+  try {
+    const q = await call("/api/quota");
+    const limit = Number(q.drive.limit || 0);
+    const free = limit ? limit - Number(q.drive.usage || 0) : null;
+    $("file-stats").replaceChildren(
+      stat("사용 중", sizeText(q.bytes), `파일 ${q.files}개 · 폴더 ${folders.length}개`),
+      stat("보관 공간", free === null ? "무제한" : gb(free) + " 남음", limit ? `구글 드라이브 ${gb(limit)} 중` : "구글 드라이브", free !== null && free < limit * 0.1),
+    );
+  } catch (e) {
+    $("file-stats").replaceChildren(stat("사용 중", "—", "용량 확인 실패: " + e.message, true));
   }
-  $("file-stats").replaceChildren(...cards);
+}
+
+function renderCrumbs(cur, searching) {
+  const parts = [el("a", { href: "#files", textContent: "클라우드" }), ...folderPath(cur).map((f) => el("a", { href: `#files/${f.id}`, textContent: f.name }))];
+  if (searching) parts.push(el("span", { textContent: "검색 결과 (모든 폴더)" }));
+  $("crumbs").replaceChildren(...parts.flatMap((p, i) => (i ? [el("span", { className: "muted", textContent: "/" }), p] : [p])));
 }
 
 async function loadList() {
-  const params = new URLSearchParams({ q: $("q").value, category: fileCategory() });
+  folders = await call("/api/folders");
+  const q = $("q").value.trim();
+  const cur = currentFolder();
+  const params = new URLSearchParams({ q, category: fileCategory() });
+  if (!q) params.set("folder", cur === null ? "root" : String(cur));
   const files = await call("/api/files?" + params);
-  loadQuota(files);
-  const rows = files.map((f) => {
-    const share = (on) => call(`/api/files/${f.id}/share`, { method: "POST", body: { shared: on } }).then(loadList, showError);
-    const portfolio = el(
-      "select",
-      { className: "input", title: "개인용: 내 포트폴리오에만 · 공개: kacarong.kr에도", onchange() { call(`/api/files/${f.id}/portfolio`, { method: "POST", body: { portfolio: this.value } }).then(loadList, (e) => (showError(e), loadList())); } },
-      ...[["none", "없음"], ["private", "개인용"], ["public", "공개"]].map(([value, textContent]) => el("option", { value, textContent })),
-    );
-    portfolio.value = f.public ? "public" : f.portfolio ? "private" : "none";
-    const sw = (checked, onchange) => el("label", { className: "switch" }, el("input", { type: "checkbox", checked, onchange }), el("span"));
-    return el(
+  loadQuota();
+  renderCrumbs(cur, !!q);
+  const del = (path, text) => confirm(text) && call(path, { method: "DELETE" }).then(loadList, showError);
+  const folderRows = (q || fileCategory() ? [] : folders.filter((f) => f.parent_id === cur)).map((f) =>
+    el(
       "tr",
-      {},
-      el("td", {}, el("img", { className: "thumb", src: `/thumb/${f.id}`, alt: "", loading: "lazy", onerror() { this.replaceWith(el("div", { className: "thumb-empty" })); } })),
-      el("td", {}, el("a", { className: "title", href: f.web_view_link, target: "_blank", rel: "noopener", textContent: f.title }), el("span", { className: "sub", textContent: f.note || f.name })),
-      el("td", { className: "hide-sm" }, pill(f.category, f.category === "포트폴리오" ? "blue" : "gray")),
-      el("td", { className: "hide-sm" }, ...f.tags.split(",").map((t) => t.trim()).filter(Boolean).map((t) => el("span", { className: "tag", textContent: t }))),
-      el("td", { className: "num muted", textContent: sizeText(f.size) }),
-      el("td", {}, sw(!!f.shared, function () { share(this.checked); })),
-      el("td", {}, portfolio),
+      { className: "folder-row" },
+      el("td", {}, el("div", { className: "thumb-empty folder-icon" }, icon("folder"))),
+      el("td", {}, el("a", { className: "title", href: `#files/${f.id}`, textContent: f.name }), el("span", { className: "sub", textContent: "폴더" })),
+      el("td", { className: "hide-sm" }),
+      el("td", { className: "hide-sm" }),
+      el("td", { className: "num muted" }),
+      el("td", { className: "hide-sm muted", textContent: dayText(f.created_at) }),
       el(
         "td",
         { className: "actions" },
-        f.web_content_link ? el("a", { className: "btn ghost sm", href: f.web_content_link, title: "받기" }, icon("download")) : "",
-        iconBtn("수정", "edit", () => openFileDialog(f)),
-        iconBtn("삭제", "trash", () => {
-          if (confirm(`"${f.title}" 을(를) 드라이브 휴지통으로 보낼까요? (30일 뒤 자동 삭제, 노트·할 일에 붙인 것도 떨어집니다)`)) call(`/api/files/${f.id}`, { method: "DELETE" }).then(loadList, showError);
-        }, "danger"),
+        iconBtn("이름·위치 바꾸기", "edit", () => openFolderDialog(f)),
+        iconBtn("삭제", "trash", () => del(`/api/folders/${f.id}`, `"${f.name}" 폴더와 그 안의 파일·폴더를 모두 지울까요? (구글 드라이브 휴지통으로 가서 30일 안에는 드라이브에서 되살릴 수 있습니다. 노트·할 일·포트폴리오에 붙인 것도 떨어집니다)`), "danger"),
       ),
-    );
-  });
-  $("list").replaceChildren(...(rows.length ? rows : [emptyRow(8, $("q").value || fileCategory() ? "검색 결과가 없습니다." : "아직 올린 파일이 없습니다.")]));
+    ),
+  );
+  const fileRows = files.map((f) =>
+    el(
+      "tr",
+      {},
+      el("td", {}, el("img", { className: "thumb", src: `/thumb/${f.id}`, alt: "", loading: "lazy", onerror() { this.replaceWith(el("div", { className: "thumb-empty" })); } })),
+      el("td", {}, el("a", { className: "title", href: fileUrl(f), target: "_blank", rel: "noopener", textContent: f.title }), el("span", { className: "sub", textContent: q ? pathText(f.folder_id) : f.note || f.name })),
+      el("td", { className: "hide-sm" }, pill(f.category, f.category === "포트폴리오" ? "blue" : "gray")),
+      el("td", { className: "hide-sm" }, ...f.tags.split(",").map((t) => t.trim()).filter(Boolean).map((t) => el("span", { className: "tag", textContent: t }))),
+      el("td", { className: "num muted", textContent: sizeText(f.size) }),
+      el("td", { className: "hide-sm muted", textContent: dayText(f.created_at) }),
+      el(
+        "td",
+        { className: "actions" },
+        el("a", { className: "btn ghost sm", href: fileUrl(f) + "?download=1", download: "", title: "받기", ariaLabel: "받기" }, icon("download")),
+        iconBtn("수정·옮기기", "edit", () => openFileDialog(f)),
+        iconBtn("삭제", "trash", () => del(`/api/files/${f.id}`, `"${f.title}" 을(를) 지울까요? (구글 드라이브 휴지통으로 가서 30일 안에는 드라이브에서 되살릴 수 있습니다. 노트·할 일·포트폴리오에 붙인 것도 떨어집니다)`), "danger"),
+      ),
+    ),
+  );
+  const rows = [...folderRows, ...fileRows];
+  $("list").replaceChildren(...(rows.length ? rows : [emptyRow(7, q || fileCategory() ? "검색 결과가 없습니다." : cur === null ? "아직 올린 파일이 없습니다." : "빈 폴더입니다.")]));
+}
+
+// 포트폴리오: 내 소개 + 섹션(업적·작품·취미 …)마다 항목. 항목은 공개(kacarong.kr) 또는 개인용(미리 보기에만).
+let pf = null; // the last GET /api/portfolio
+let pfPhoto = null; // attachBox of the profile photo
+let itemFiles = null; // attachBox of the item dialog
+let editingItem = null;
+
+async function loadPortfolio() {
+  await refreshSections();
+  $("pf-name").value = pf.profile.name;
+  $("pf-headline").value = pf.profile.headline;
+  $("pf-about").value = pf.profile.about;
+  $("pf-saved").textContent = "";
+  pfPhoto.show(0, () => "포트폴리오");
+}
+
+async function refreshSections() {
+  pf = await call("/api/portfolio");
+  const reload = () => refreshSections().catch(showError);
+  const act = (p, method, body) => call(p, { method, body }).then(reload, showError);
+  $("pf-sections").replaceChildren(
+    ...pf.sections.map((s, si) => {
+      const pub = s.items.filter((i) => i.public).length;
+      const rows = s.items.map((it, ii) => {
+        const vis = el(
+          "select",
+          { className: "input sm", title: "공개: kacarong.kr에 나옴 · 개인용: 나만 봄", onchange() { act(`/api/portfolio/items/${it.id}`, "PATCH", { public: this.value === "1" }); } },
+          el("option", { value: "1", textContent: "공개" }),
+          el("option", { value: "0", textContent: "개인용" }),
+        );
+        vis.value = it.public ? "1" : "0";
+        const cover = it.files[0];
+        return el(
+          "tr",
+          {},
+          el("td", {}, cover ? el("img", { className: "thumb", src: `/thumb/${cover.id}`, alt: "", loading: "lazy", onerror() { this.replaceWith(el("div", { className: "thumb-empty" })); } }) : el("div", { className: "thumb-empty" })),
+          el("td", {}, el("a", { className: "title", href: "#portfolio", textContent: it.title, onclick: (ev) => (ev.preventDefault(), openItemDialog(it)) }), el("span", { className: "sub", textContent: it.summary || (it.files.length ? `파일 ${it.files.length}개` : "") })),
+          el("td", { className: "hide-sm muted", textContent: it.period }),
+          el("td", {}, vis),
+          el(
+            "td",
+            { className: "actions" },
+            iconBtn("위로", "up", () => act(`/api/portfolio/items/${it.id}/move`, "POST", { dir: -1 }), ii ? "" : "invisible"),
+            iconBtn("아래로", "down", () => act(`/api/portfolio/items/${it.id}/move`, "POST", { dir: 1 }), ii < s.items.length - 1 ? "" : "invisible"),
+            iconBtn("수정", "edit", () => openItemDialog(it)),
+            iconBtn("삭제", "trash", () => confirm(`"${it.title}" 항목을 지울까요? (붙인 파일은 클라우드에 남습니다)`) && act(`/api/portfolio/items/${it.id}`, "DELETE"), "danger"),
+          ),
+        );
+      });
+      return el(
+        "section",
+        { className: "pf-section" },
+        el(
+          "div",
+          { className: "pf-head" },
+          el("h2", { textContent: s.title }),
+          el("span", { className: "muted", textContent: `${s.items.length}개 · 공개 ${pub}` }),
+          el("span", { className: "grow" }),
+          iconBtn("섹션 위로", "up", () => act(`/api/portfolio/sections/${s.id}/move`, "POST", { dir: -1 }), si ? "" : "invisible"),
+          iconBtn("섹션 아래로", "down", () => act(`/api/portfolio/sections/${s.id}/move`, "POST", { dir: 1 }), si < pf.sections.length - 1 ? "" : "invisible"),
+          iconBtn("섹션 이름 바꾸기", "edit", () => {
+            const title = prompt("섹션 이름", s.title);
+            if (title?.trim()) act(`/api/portfolio/sections/${s.id}`, "PATCH", { title });
+          }),
+          iconBtn("섹션 삭제", "trash", () => confirm(`"${s.title}" 섹션과 그 안의 항목 ${s.items.length}개를 지울까요? (붙인 파일은 클라우드에 남습니다)`) && act(`/api/portfolio/sections/${s.id}`, "DELETE"), "danger"),
+          el("button", { className: "btn sm", type: "button", onclick: () => openItemDialog(null, s.id) }, icon("plus"), "항목 추가"),
+        ),
+        el("table", { className: "table" }, el("tbody", {}, ...(rows.length ? rows : [emptyRow(5, "아직 항목이 없습니다.")]))),
+      );
+    }),
+    pf.sections.length ? "" : el("p", { className: "notice", textContent: "섹션이 없습니다. 오른쪽 위 \"섹션 추가\"로 만들어 보세요." }),
+  );
+}
+
+function newSection() {
+  const title = prompt("새 섹션 이름 (예: 업적, 작품, 취미)");
+  if (title?.trim()) call("/api/portfolio/sections", { method: "POST", body: { title } }).then(() => refreshSections(), showError).catch(showError);
+}
+
+function openItemDialog(it = null, sectionId = null) {
+  if (!pf?.sections.length) return showError("먼저 섹션을 만들어 주세요.");
+  editingItem = it;
+  $("item-dialog-title").textContent = it ? "항목 수정" : "새 항목";
+  $("item-section").replaceChildren(...pf.sections.map((s) => el("option", { value: String(s.id), textContent: s.title })));
+  $("item-section").value = String(it?.section_id ?? sectionId ?? pf.sections[0].id);
+  $("item-public").value = it && !it.public ? "0" : "1";
+  $("item-title").value = it?.title ?? "";
+  $("item-period").value = it?.period ?? "";
+  $("item-link").value = it?.link ?? "";
+  $("item-summary").value = it?.summary ?? "";
+  $("item-body").value = it?.body ?? "";
+  $("item-msg").textContent = "";
+  itemFiles.show(it?.id ?? null, () => "포트폴리오");
+  $("item-dialog").showModal();
 }
 
 // 할 일·과제
@@ -826,13 +983,29 @@ const tabs = {
       $("drive-off").hidden = me.driveConnected;
       return loadList();
     },
-    actions: () => (me.driveConnected ? [el("button", { className: "btn primary", type: "button", onclick: openUpload }, icon("upload"), "올리기", el("kbd", { textContent: "U" }))] : []),
+    actions: () =>
+      me.driveConnected
+        ? [
+            el("button", { className: "btn", type: "button", onclick: () => openFolderDialog() }, icon("plus"), "새 폴더"),
+            el("button", { className: "btn primary", type: "button", onclick: openUpload }, icon("upload"), "올리기", el("kbd", { textContent: "U" })),
+          ]
+        : [],
+  },
+  portfolio: {
+    title: "포트폴리오",
+    load: () => loadPortfolio(),
+    actions: () => [
+      el("a", { className: "btn", href: "/admin/portfolio", target: "_blank", title: "개인용 항목까지 보이는 내 포트폴리오" }, icon("eye"), "미리 보기"),
+      el("button", { className: "btn", type: "button", onclick: newSection }, icon("plus"), "섹션 추가"),
+      el("button", { className: "btn primary", type: "button", onclick: () => openItemDialog() }, icon("plus"), "새 항목", el("kbd", { textContent: "N" })),
+    ],
   },
 };
 const newTaskBtn = () => el("button", { className: "btn primary", type: "button", onclick: () => openTaskDialog() }, icon("plus"), "새 할 일", el("kbd", { textContent: "N" }));
 
 function openUpload() {
   $("progress").replaceChildren();
+  $("upload-where").textContent = `${pathText(currentFolder())}에 · 파일당 1GB 미만`;
   $("upload-dialog").showModal();
 }
 
@@ -938,6 +1111,8 @@ async function init() {
   editor = createEditor($("note-editor"), noteChanged);
   noteFiles = attachBox($("note-files"), "note");
   taskFiles = attachBox($("task-files"), "task");
+  itemFiles = attachBox($("item-files"), "portfolio", "사진·파일 (첫 파일이 대표 사진)");
+  pfPhoto = attachBox($("pf-photo"), "profile", "프로필 사진 (첫 사진)");
   $("pick-q").oninput = () => {
     clearTimeout(pickTimer);
     pickTimer = setTimeout(() => loadPickList().catch(showPickError), 200);
@@ -978,7 +1153,7 @@ async function init() {
   $("file-form").onsubmit = async (ev) => {
     ev.preventDefault();
     try {
-      await call(`/api/files/${editingFile.id}`, { method: "PATCH", body: { title: $("file-title").value, category: $("file-category").value, tags: $("file-tags").value, note: $("file-note").value } });
+      await call(`/api/files/${editingFile.id}`, { method: "PATCH", body: { title: $("file-title").value, category: $("file-category").value, tags: $("file-tags").value, note: $("file-note").value, folderId: $("file-folder").value || null } });
       $("file-dialog").close();
       await loadList();
     } catch (e) {
@@ -994,13 +1169,55 @@ async function init() {
     $("upload-btn").disabled = true;
     $("progress").replaceChildren();
     let ok = true;
-    const meta = { category: $("up-category").value, tags: $("up-tags").value, note: $("up-note").value };
+    const meta = { category: $("up-category").value, tags: $("up-tags").value, note: $("up-note").value, folderId: currentFolder() };
     for (const f of files) ok = !!(await uploadOne(f, $("progress"), meta)) && ok; // one at a time to keep bandwidth predictable
     $("upload-btn").disabled = false;
     $("files").value = "";
     showPicked();
     if (ok) $("upload-dialog").close(); // 실패가 있으면 이유를 볼 수 있게 창을 남긴다.
     loadList().catch(showError);
+  };
+  $("folder-form").onsubmit = async (ev) => {
+    ev.preventDefault();
+    const body = { name: $("folder-name").value, parentId: $("folder-parent").value || null };
+    try {
+      if (editingFolder) await call(`/api/folders/${editingFolder.id}`, { method: "PATCH", body });
+      else await call("/api/folders", { method: "POST", body });
+      $("folder-dialog").close();
+      await loadList();
+    } catch (e) {
+      $("folder-msg").textContent = e.message;
+    }
+  };
+  $("profile-form").onsubmit = async (ev) => {
+    ev.preventDefault();
+    try {
+      await call("/api/portfolio/profile", { method: "PUT", body: { name: $("pf-name").value, headline: $("pf-headline").value, about: $("pf-about").value } });
+      $("pf-saved").textContent = "저장했습니다";
+    } catch (e) {
+      $("pf-saved").textContent = e.message;
+    }
+  };
+  $("item-form").onsubmit = async (ev) => {
+    ev.preventDefault();
+    const body = {
+      section_id: Number($("item-section").value),
+      public: $("item-public").value === "1",
+      title: $("item-title").value,
+      period: $("item-period").value,
+      link: $("item-link").value,
+      summary: $("item-summary").value,
+      body: $("item-body").value,
+    };
+    try {
+      if (editingItem) await call(`/api/portfolio/items/${editingItem.id}`, { method: "PATCH", body });
+      else editingItem = await call("/api/portfolio/items", { method: "POST", body }); // a retry after a failed attach must not add it twice
+      await itemFiles.flush(editingItem.id);
+      $("item-dialog").close();
+      await refreshSections();
+    } catch (e) {
+      $("item-msg").textContent = e.message;
+    }
   };
   $("files").onchange = showPicked;
   setupDrop();
@@ -1025,6 +1242,7 @@ async function init() {
     if (ev.target.closest?.("input, textarea, select, dialog") || ev.metaKey || ev.ctrlKey || ev.altKey) return;
     if (ev.key === "/") (ev.preventDefault(), $("global-search").focus());
     else if (ev.key.toLowerCase() === "n" && currentTab() === "notes") (ev.preventDefault(), newNote().catch(showError));
+    else if (ev.key.toLowerCase() === "n" && currentTab() === "portfolio") (ev.preventDefault(), openItemDialog());
     else if (ev.key.toLowerCase() === "n" && currentTab() !== "files") (ev.preventDefault(), openTaskDialog());
     else if (ev.key.toLowerCase() === "u" && currentTab() === "files" && me.driveConnected) (ev.preventDefault(), openUpload());
   });

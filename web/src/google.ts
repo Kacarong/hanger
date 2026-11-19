@@ -15,7 +15,7 @@ export const SCOPES = `openid email https://www.googleapis.com/auth/drive.file $
 // Just who is signing in. Asking for the calendar scope again on every sign-in makes Google show
 // its "unverified app" warning every time, even when the grant already exists.
 const LOGIN_SCOPES = "openid email";
-const FILE_FIELDS = "id,name,mimeType,size,parents,trashed,webViewLink,webContentLink,thumbnailLink";
+const FILE_FIELDS = "id,name,mimeType,size,parents,trashed,thumbnailLink";
 
 export type DriveFile = {
   id: string;
@@ -24,8 +24,6 @@ export type DriveFile = {
   size?: string;
   parents?: string[];
   trashed?: boolean;
-  webViewLink?: string;
-  webContentLink?: string;
   thumbnailLink?: string;
 };
 
@@ -125,6 +123,19 @@ export function createGoogle(cfg: GoogleConfig, db: Db) {
     return check(await fetch(cfg.apiBase + path, { ...init, headers }), what);
   }
 
+  async function createFolder(name: string, parent?: string): Promise<string> {
+    const res = await api(
+      "/drive/v3/files?fields=id",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name, mimeType: "application/vnd.google-apps.folder", ...(parent ? { parents: [parent] } : {}) }),
+      },
+      "드라이브 폴더 생성",
+    );
+    return ((await res.json()) as { id: string }).id;
+  }
+
   // Shared while in flight so concurrent first uploads don't each create a folder.
   let creatingRoot: Promise<string> | null = null;
 
@@ -132,16 +143,7 @@ export function createGoogle(cfg: GoogleConfig, db: Db) {
     const existing = db.getSetting("root_folder_id");
     if (existing) return Promise.resolve(existing);
     creatingRoot ??= (async () => {
-      const res = await api(
-        "/drive/v3/files?fields=id",
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ name: "kacarong.kr 파일함", mimeType: "application/vnd.google-apps.folder" }),
-        },
-        "드라이브 폴더 생성",
-      );
-      const { id } = (await res.json()) as { id: string };
+      const id = await createFolder("kacarong.kr 파일함");
       db.setSetting("root_folder_id", id);
       return id;
     })().finally(() => (creatingRoot = null));
@@ -164,8 +166,28 @@ export function createGoogle(cfg: GoogleConfig, db: Db) {
     exchangeCode,
     saveTokens,
     rootFolder,
+    createFolder,
     getFile,
     calendarGranted,
+
+    // Keeps the Drive copy laid out like the cloud: a rename or a move here is made there too.
+    async rename(id: string, name: string) {
+      await api(`/drive/v3/files/${encodeURIComponent(id)}?fields=id`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name }) }, "드라이브 이름 바꾸기");
+    },
+    async move(id: string, from: string, to: string) {
+      if (from === to) return;
+      const q = new URLSearchParams({ addParents: to, removeParents: from, fields: "id" });
+      await api(`/drive/v3/files/${encodeURIComponent(id)}?${q}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: "{}" }, "드라이브에서 옮기기");
+    },
+
+    // The file's bytes, streamed. range is the browser's Range header, passed on so videos can seek.
+    async download(id: string, range: string | null): Promise<Response> {
+      const headers = new Headers({ Authorization: `Bearer ${await token()}` });
+      if (range) headers.set("Range", range);
+      const res = await fetch(`${cfg.apiBase}/drive/v3/files/${encodeURIComponent(id)}?alt=media`, { headers });
+      if (res.status === 416) return res; // a range past the end: the caller passes it on as is
+      return check(res, "파일 받기");
+    },
 
     // Events between two instants from every calendar the user has checked in Google Calendar.
     async events(timeMin: string, timeMax: string): Promise<CalendarEvent[]> {
@@ -187,8 +209,9 @@ export function createGoogle(cfg: GoogleConfig, db: Db) {
 
     // Starts a resumable upload session; the browser then PUTs the bytes straight to Google.
     // Passing Origin here is what makes Google answer the browser's CORS requests on the session URI.
-    async startUpload(meta: { name: string; mimeType: string; size: number; origin: string }): Promise<string> {
-      const parent = await rootFolder();
+    // parent: the Drive folder to put it in (the cloud folder's copy); the top folder when not given.
+    async startUpload(meta: { name: string; mimeType: string; size: number; origin: string; parent?: string }): Promise<string> {
+      const parent = meta.parent ?? (await rootFolder());
       const res = await api(
         `/upload/drive/v3/files?uploadType=resumable&fields=${FILE_FIELDS}`,
         {
@@ -227,22 +250,6 @@ export function createGoogle(cfg: GoogleConfig, db: Db) {
       const location = await this.startUpload({ name, mimeType, size: bytes.size, origin });
       const res = await check(await fetch(location, { method: "PUT", headers: { "Content-Type": mimeType }, body: bytes }), "업로드");
       return (await res.json()) as DriveFile;
-    },
-
-    async share(id: string) {
-      await api(
-        `/drive/v3/files/${encodeURIComponent(id)}/permissions?fields=id`,
-        { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ type: "anyone", role: "reader" }) },
-        "공유 켜기",
-      );
-    },
-
-    async unshare(id: string) {
-      try {
-        await api(`/drive/v3/files/${encodeURIComponent(id)}/permissions/anyoneWithLink`, { method: "DELETE" }, "공유 끄기");
-      } catch (e) {
-        if (!(e instanceof GoogleError && e.status === 404)) throw e; // already private
-      }
     },
 
     async trash(id: string) {

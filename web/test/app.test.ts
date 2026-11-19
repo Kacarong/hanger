@@ -8,7 +8,7 @@ import { openDb } from "../src/db";
 import { createGoogle } from "../src/google";
 
 // A small stand-in for the Google OAuth + Drive endpoints the app uses.
-type FakeFile = { id: string; name: string; mimeType: string; parents: string[]; trashed: boolean; anyone: boolean; bytes: number };
+type FakeFile = { id: string; name: string; mimeType: string; parents: string[]; trashed: boolean; bytes: number; content?: string };
 const drive = new Map<string, FakeFile>();
 const uploads = new Map<string, { name: string; mimeType: string; parents: string[]; size: number; received: number; origin: string | null; fileId?: string }>();
 let foldersCreated = 0;
@@ -35,8 +35,6 @@ function fileJson(f: FakeFile) {
     size: String(f.bytes),
     parents: f.parents,
     trashed: f.trashed,
-    webViewLink: `https://drive.example/view/${f.id}`,
-    webContentLink: `https://drive.example/dl/${f.id}`,
     thumbnailLink: `${fake.url}thumbs/${f.id}`,
   };
 }
@@ -67,7 +65,7 @@ beforeAll(() => {
           return new Response(null, { status: 308, headers: u.received ? { Range: `bytes=0-${u.received - 1}` } : {} });
         }
         if (!u.fileId) {
-          const f: FakeFile = { id: `f${nextId++}`, name: u.name, mimeType: u.mimeType, parents: u.parents, trashed: false, anyone: false, bytes: u.size };
+          const f: FakeFile = { id: `f${nextId++}`, name: u.name, mimeType: u.mimeType, parents: u.parents, trashed: false, bytes: u.size };
           drive.set(f.id, f);
           u.fileId = f.id;
         }
@@ -92,7 +90,7 @@ beforeAll(() => {
         const meta = await req.json();
         foldersCreated++;
         await Bun.sleep(20); // widen the window for concurrent first uploads
-        const f: FakeFile = { id: `folder${nextId++}`, name: meta.name, mimeType: meta.mimeType, parents: [], trashed: false, anyone: false, bytes: 0 };
+        const f: FakeFile = { id: `folder${nextId++}`, name: meta.name, mimeType: meta.mimeType, parents: meta.parents ?? [], trashed: false, bytes: 0 };
         drive.set(f.id, f);
         return Response.json({ id: f.id });
       }
@@ -125,23 +123,27 @@ beforeAll(() => {
       }
       if (p === "/drive/v3/about") return Response.json({ storageQuota: { limit: String(400 * 1024 ** 3), usage: "1024", usageInDriveTrash: "0" } });
 
-      const m = p.match(/^\/drive\/v3\/files\/([^/]+)(\/permissions(?:\/(.+))?)?$/);
+      const m = p.match(/^\/drive\/v3\/files\/([^/]+)$/);
       const f = m && drive.get(m[1]!);
       if (!f) return new Response("not found", { status: 404 });
-      if (m![2] && req.method === "POST") {
-        const body = await req.json();
-        if (body.type !== "anyone" || body.role !== "reader") return new Response("bad", { status: 400 });
-        f.anyone = true;
-        return Response.json({ id: "anyoneWithLink" });
-      }
-      if (m![3] === "anyoneWithLink" && req.method === "DELETE") {
-        if (!f.anyone) return new Response("not found", { status: 404 });
-        f.anyone = false;
-        return new Response(null, { status: 204 });
-      }
       if (req.method === "PATCH") {
         Object.assign(f, await req.json());
+        const add = url.searchParams.get("addParents");
+        const remove = url.searchParams.get("removeParents");
+        if (add || remove) {
+          if (!remove || !f.parents.includes(remove)) return new Response("not a parent", { status: 400 });
+          f.parents = [...f.parents.filter((x) => x !== remove), add!];
+        }
         return Response.json(fileJson(f));
+      }
+      if (url.searchParams.get("alt") === "media") {
+        const bytes = Buffer.from(f.content ?? "x".repeat(f.bytes));
+        const r = req.headers.get("Range")?.match(/^bytes=(\d+)-(\d*)$/);
+        if (!r) return new Response(bytes, { headers: { "Content-Type": f.mimeType, "Content-Length": String(bytes.length) } });
+        const start = Number(r[1]);
+        const end = r[2] ? Number(r[2]) : bytes.length - 1;
+        if (start >= bytes.length) return new Response("range", { status: 416, headers: { "Content-Range": `bytes */${bytes.length}` } });
+        return new Response(bytes.subarray(start, end + 1), { status: 206, headers: { "Content-Range": `bytes ${start}-${end}/${bytes.length}`, "Content-Length": String(end - start + 1) } });
       }
       return Response.json(fileJson(f));
     },
@@ -194,9 +196,9 @@ async function login(call: ReturnType<typeof makeApp>["call"], code = "good-code
   return { res, cookie: sid };
 }
 
-test("관리자 로그인 → 업로드 → 공유/공개 → 공개 페이지 → 휴지통", async () => {
+test("클라우드: 로그인 → 업로드 → 사이트에서 열기·받기 → 폴더(드라이브에도 같은 구조) → 휴지통", async () => {
   loginEmail = "owner@example.com";
-  const { call, cleanup } = makeApp();
+  const { call, db, cleanup } = makeApp();
   try {
     expect((await call("/api/files")).status).toBe(401);
 
@@ -252,51 +254,83 @@ test("관리자 로그인 → 업로드 → 공유/공개 → 공개 페이지 �
     expect(found).toHaveLength(1);
     expect(await (await call("/api/files?q=없는말", { cookie })).json()).toHaveLength(0);
 
-    // Not public yet: hidden from the public page and its thumbnail.
+    // Not in any portfolio: nobody else can see it or its thumbnail, and the public page doesn't show it.
     expect(await (await call("/")).text()).not.toContain("작품.png");
     expect((await call(`/thumb/${row.id}`)).status).toBe(404);
+    expect((await call(`/portfolio/file/${row.id}`)).status).toBe(404);
+    expect((await call(`/api/files/${row.id}/content`)).status).toBe(401);
 
-    // 개인용: only in the owner's portfolio page, not on kacarong.kr, and Drive sharing stays off.
-    const toPortfolio = (portfolio: string) =>
-      call(`/api/files/${row.id}/portfolio`, { method: "POST", cookie, headers: JSON_ORIGIN, body: JSON.stringify({ portfolio }) });
-    expect(await (await toPortfolio("private")).json()).toMatchObject({ shared: 0, public: 0, portfolio: 1 });
-    expect(drive.get(driveFile.id)!.anyone).toBe(false);
-    expect(await (await call("/")).text()).not.toContain("작품.png");
-    expect((await call(`/thumb/${row.id}`)).status).toBe(404);
-    const minePage = async () => (await call("/admin/portfolio", { cookie })).text();
-    expect(await minePage()).toMatch(/작품\.png[\s\S]*<span class="chip">개인용<\/span>/);
-    const anon = await call("/admin/portfolio");
-    expect(anon.status).toBe(302);
-    expect(anon.headers.get("Location")).toBe("/admin");
-    expect((await call("/admin/portfolio", { cookie })).headers.get("Cache-Control")).toBe("no-store");
-    expect((await toPortfolio("everyone")).status).toBe(400);
+    // Opening and downloading go through this site, not Google's pages. A PNG opens in place, sandboxed.
+    drive.get(driveFile.id)!.content = "PNG-BYTES";
+    const open = await call(`/api/files/${row.id}/content`, { cookie });
+    expect(open.status).toBe(200);
+    expect(await open.text()).toBe("PNG-BYTES");
+    expect(open.headers.get("Content-Type")).toBe("image/png");
+    expect(open.headers.get("Content-Disposition")).toStartWith("inline;");
+    expect(open.headers.get("Content-Security-Policy")).toContain("sandbox");
+    expect(open.headers.get("Cache-Control")).toBe("no-store");
+    const dl = await call(`/api/files/${row.id}/content?download=1`, { cookie });
+    expect(dl.headers.get("Content-Disposition")).toBe(`attachment; filename="__.png"; filename*=UTF-8''${encodeURIComponent("작품.png")}`);
+    expect(dl.headers.get("Content-Type")).toBe("application/octet-stream");
+    // Ranges pass through, so a video can seek.
+    const part = await call(`/api/files/${row.id}/content`, { cookie, headers: { Range: "bytes=4-8" } });
+    expect(part.status).toBe(206);
+    expect(part.headers.get("Content-Range")).toBe("bytes 4-8/9");
+    expect(await part.text()).toBe("BYTES");
+    // A file that could run as a page here (HTML, SVG, ...) is only ever downloaded.
+    const html = db.insertFile({ drive_id: "html1", name: "x.html", title: "x.html", mime: "text/html", size: 5, category: "기타", tags: "", note: "" });
+    drive.set("html1", { id: "html1", name: "x.html", mimeType: "text/html", parents: [rootId], trashed: false, bytes: 5, content: "<b>x" });
+    const page = await call(`/api/files/${html.id}/content`, { cookie });
+    expect(page.headers.get("Content-Disposition")).toStartWith("attachment;");
+    expect(page.headers.get("Content-Type")).toBe("application/octet-stream");
 
-    // Publishing also turns on anyone-with-link sharing on Drive.
-    const pub = await toPortfolio("public");
-    expect(await pub.json()).toMatchObject({ shared: 1, public: 1, portfolio: 1 });
-    expect(await minePage()).not.toContain("개인용</span>");
-    expect(drive.get(driveFile.id)!.anyone).toBe(true);
-    const page = await (await call("/")).text();
-    expect(page).toContain("작품.png");
-    expect(page).toContain(`https://drive.example/view/${driveFile.id}`);
-    const thumb = await call(`/thumb/${row.id}`);
-    expect(thumb.status).toBe(200);
-    expect(await thumb.text()).toBe("PNGDATA");
+    // Renaming keeps the extension for downloads, and the Drive copy gets the same name.
+    const req = (path: string, method: string, b?: object) => call(path, { method, cookie, headers: JSON_ORIGIN, body: b ? JSON.stringify(b) : undefined });
+    expect(await (await req(`/api/files/${row.id}`, "PATCH", { title: "로고 시안" })).json()).toMatchObject({ title: "로고 시안" });
+    expect(drive.get(driveFile.id)!.name).toBe("로고 시안.png");
 
-    // Turning sharing off makes it private on Drive and drops it from the public page; it stays in the owner's portfolio.
-    const off = await call(`/api/files/${row.id}/share`, { method: "POST", cookie, headers: JSON_ORIGIN, body: JSON.stringify({ shared: false }) });
-    expect(await off.json()).toMatchObject({ shared: 0, public: 0, portfolio: 1 });
-    expect(drive.get(driveFile.id)!.anyone).toBe(false);
-    expect(await (await call("/")).text()).not.toContain("작품.png");
-    expect(await minePage()).toContain("개인용</span>");
+    // Folders live here and are mirrored in Drive under the cloud's top folder.
+    const folder = async (name: string, parentId: number | null = null) => (await req("/api/folders", "POST", { name, parentId })).json() as Promise<{ id: number; drive_id: string }>;
+    const works = await folder("작업");
+    const y2026 = await folder("2026", works.id);
+    expect(drive.get(works.drive_id)).toMatchObject({ name: "작업", mimeType: "application/vnd.google-apps.folder", parents: [rootId] });
+    expect(drive.get(y2026.drive_id)!.parents).toEqual([works.drive_id]);
+    expect((await req("/api/folders", "POST", { name: "작업" })).status).toBe(409); // same name in the same place
+    expect((await req("/api/folders", "POST", { name: "x", parentId: 9999 })).status).toBe(404);
 
-    // 없음: out of the owner's portfolio too.
-    expect(await (await toPortfolio("none")).json()).toMatchObject({ public: 0, portfolio: 0 });
-    expect(await minePage()).not.toContain("작품.png");
+    // Moving a file moves its Drive copy; each folder lists only its own files.
+    expect(await (await req(`/api/files/${row.id}`, "PATCH", { folderId: y2026.id })).json()).toMatchObject({ folder_id: y2026.id });
+    expect(drive.get(driveFile.id)!.parents).toEqual([y2026.drive_id]);
+    const inFolder = async (f: string) => ((await (await call(`/api/files?folder=${f}`, { cookie })).json()) as { id: number }[]).map((x) => x.id);
+    expect(await inFolder(String(y2026.id))).toEqual([row.id]);
+    expect(await inFolder("root")).toEqual([html.id]);
+    expect((await call("/api/files?folder=9999", { cookie })).status).toBe(404);
+    expect(((await (await call("/api/files?q=로고", { cookie })).json()) as unknown[]).length).toBe(1); // a search looks in every folder
 
-    // Delete moves the Drive file to trash.
-    expect((await call(`/api/files/${row.id}`, { method: "DELETE", cookie, headers: JSON_ORIGIN })).status).toBe(200);
-    expect(drive.get(driveFile.id)!.trashed).toBe(true);
+    // Uploading straight into a folder.
+    const intoFolder = await req("/api/uploads", "POST", { name: "b.txt", size: 3, mimeType: "text/plain", folderId: works.id });
+    const up2 = uploads.get(new URL(((await intoFolder.json()) as { uploadUrl: string }).uploadUrl).searchParams.get("upload_id")!)!;
+    expect(up2.parents).toEqual([works.drive_id]);
+
+    // Renaming and moving a folder do the same in Drive. A folder can't go inside itself.
+    expect((await req(`/api/folders/${works.id}`, "PATCH", { parentId: y2026.id })).status).toBe(400);
+    expect(await (await req(`/api/folders/${y2026.id}`, "PATCH", { name: "2026년", parentId: null })).json()).toMatchObject({ name: "2026년", parent_id: null });
+    expect(drive.get(y2026.drive_id)).toMatchObject({ name: "2026년", parents: [rootId] });
+
+    // Deleting a folder sends it (and so everything in it) to the Drive trash, and drops its files and subfolders here.
+    const inner = await folder("안쪽", y2026.id);
+    expect((await req(`/api/folders/${y2026.id}`, "DELETE")).status).toBe(200);
+    expect(drive.get(y2026.drive_id)!.trashed).toBe(true);
+    expect(db.getFile(row.id)).toBeNull();
+    expect(db.getFolder(inner.id)).toBeNull();
+    expect(((await (await call("/api/folders", { cookie })).json()) as { name: string }[]).map((f) => f.name)).toEqual(["작업"]);
+
+    // The cloud's own use, and the room left in Drive.
+    expect(await (await call("/api/quota", { cookie })).json()).toMatchObject({ files: 1, bytes: 5, drive: { usage: "1024" } });
+
+    // Deleting a file moves the Drive file to trash.
+    expect((await req(`/api/files/${html.id}`, "DELETE")).status).toBe(200);
+    expect(drive.get("html1")!.trashed).toBe(true);
     expect(await (await call("/api/files", { cookie })).json()).toHaveLength(0);
   } finally {
     cleanup();
@@ -343,7 +377,7 @@ test("state 불일치, 1GB 이상, 파일함 밖 파일, 다른 출처 요청은
     const big = await call("/api/uploads", { method: "POST", cookie, headers: json, body: JSON.stringify({ name: "a.zip", size: 1024 ** 3, mimeType: "" }) });
     expect(big.status).toBe(413);
 
-    const outside: FakeFile = { id: "outside1", name: "x", mimeType: "text/plain", parents: ["other"], trashed: false, anyone: false, bytes: 1 };
+    const outside: FakeFile = { id: "outside1", name: "x", mimeType: "text/plain", parents: ["other"], trashed: false, bytes: 1 };
     drive.set(outside.id, outside);
     expect((await call("/api/files", { method: "POST", cookie, headers: json, body: JSON.stringify({ driveId: "outside1" }) })).status).toBe(400);
 
@@ -351,19 +385,6 @@ test("state 불일치, 1GB 이상, 파일함 밖 파일, 다른 출처 요청은
     expect(cross.status).toBe(403);
     const noOrigin = await call("/api/uploads", { method: "POST", cookie, headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: "a", size: 1 }) });
     expect(noOrigin.status).toBe(403);
-  } finally {
-    cleanup();
-  }
-});
-
-test("공개 페이지는 제목·메모를 HTML 이스케이프", async () => {
-  const { call, db, cleanup } = makeApp();
-  try {
-    const row = db.insertFile({ drive_id: "x1", name: "n", title: "<script>alert(1)</script>", mime: "", size: 1, category: "포트폴리오", tags: "", note: "", web_view_link: "https://drive.example/view/x1", web_content_link: "" });
-    db.updateFile(row.id, { shared: 1, public: 1 });
-    const html = await (await call("/")).text();
-    expect(html).not.toContain("<script>alert");
-    expect(html).toContain("&lt;script&gt;");
   } finally {
     cleanup();
   }
@@ -864,8 +885,8 @@ test("클라우드 첨부: 노트·할 일에 파일함 파일을 붙이고 떼�
     const req = (path: string, method: string, b?: object) => call(path, { method, cookie, headers: JSON_ORIGIN, body: b ? JSON.stringify(b) : undefined });
     const addFile = (name: string) => {
       const id = `att${nextId++}`;
-      drive.set(id, { id, name, mimeType: "application/pdf", parents: [], trashed: false, anyone: false, bytes: 10 });
-      return db.insertFile({ drive_id: id, name, title: name, mime: "application/pdf", size: 10, category: "과제", tags: "", note: "", web_view_link: `https://drive.example/view/${id}`, web_content_link: "" });
+      drive.set(id, { id, name, mimeType: "application/pdf", parents: [], trashed: false, bytes: 10 });
+      return db.insertFile({ drive_id: id, name, title: name, mime: "application/pdf", size: 10, category: "과제", tags: "", note: "" });
     };
     const a = addFile("강의자료.pdf");
     const b = addFile("레포트.pdf");
@@ -873,7 +894,7 @@ test("클라우드 첨부: 노트·할 일에 파일함 파일을 붙이고 떼�
     const task = (await (await req("/api/tasks", "POST", { title: "레포트 제출", kind: "과제" })).json()) as { id: number };
 
     expect((await call(`/api/attachments?note=${note.id}`)).status).toBe(401);
-    const list = async (q: string) => (await (await req(`/api/attachments?${q}`, "GET")).json()) as { attachment_id: number; title: string; web_view_link: string }[];
+    const list = async (q: string) => (await (await req(`/api/attachments?${q}`, "GET")).json()) as { attachment_id: number; title: string }[];
 
     // Attach: the reply is the new list. The same file can go on a note and a task, but only once on each.
     const added = await req("/api/attachments", "POST", { note: note.id, fileId: a.id });
@@ -883,7 +904,7 @@ test("클라우드 첨부: 노트·할 일에 파일함 파일을 붙이고 떼�
     expect((await req("/api/attachments", "POST", { note: note.id, fileId: a.id })).status).toBe(409);
     expect((await req("/api/attachments", "POST", { task: task.id, fileId: a.id })).status).toBe(201);
     expect((await list(`note=${note.id}`)).map((f) => f.title)).toEqual(["강의자료.pdf", "레포트.pdf"]);
-    expect((await list(`task=${task.id}`))[0]).toMatchObject({ title: "강의자료.pdf", web_view_link: `https://drive.example/view/${a.drive_id}` });
+    expect((await list(`task=${task.id}`))[0]).toMatchObject({ title: "강의자료.pdf", id: a.id });
     // Task lists say how many files a task has.
     expect(((await (await req("/api/tasks", "GET")).json()) as { files: number }[])[0]!.files).toBe(1);
 
@@ -1339,20 +1360,146 @@ test("노션 가져오기: 노션의 상위·하위 페이지 구조를 노트 �
   }
 });
 
-test("포트폴리오 칸이 없던 DB를 열면 공개 중이던 파일은 포트폴리오에 들어감", () => {
+test("포트폴리오: 소개·섹션·항목을 자유롭게 고치고, 공개는 kacarong.kr에, 개인용은 내 포트폴리오에만", async () => {
+  loginEmail = "owner@example.com";
+  const { call, db, cleanup } = makeApp();
+  try {
+    const { cookie } = await login(call);
+    const req = (path: string, method: string, b?: object) => call(path, { method, cookie, headers: JSON_ORIGIN, body: b ? JSON.stringify(b) : undefined });
+    const get = async () => (await (await call("/api/portfolio", { cookie })).json()) as { profile: { name: string }; sections: { id: number; title: string; items: { id: number; title: string; public: number; files: { id: number }[] }[] }[] };
+    const page = async () => (await call("/")).text();
+    const mine = async () => (await call("/admin/portfolio", { cookie })).text();
+
+    // A new portfolio starts with the usual sections. Nothing is shown until there are items.
+    expect((await get()).sections.map((s) => s.title)).toEqual(["업적", "작품", "특기", "취미", "내 정보"]);
+    expect(await page()).toContain("아직 공개된 항목이 없습니다.");
+    expect((await call("/api/portfolio")).status).toBe(401);
+
+    // Profile.
+    expect(await (await req("/api/portfolio/profile", "PUT", { name: "카카롱", headline: "만들고 기록합니다", about: "안녕하세요.\n디자인을 공부합니다." })).json()).toEqual({ name: "카카롱", headline: "만들고 기록합니다", about: "안녕하세요.\n디자인을 공부합니다." });
+    expect(await page()).toMatch(/카카롱[\s\S]*만들고 기록합니다[\s\S]*디자인을 공부합니다/);
+
+    // Sections: add, rename, reorder, delete.
+    const hobby = (await (await req("/api/portfolio/sections", "POST", { title: "봉사" })).json()) as { id: number };
+    expect((await req("/api/portfolio/sections", "POST", { title: " " })).status).toBe(400);
+    expect(await (await req(`/api/portfolio/sections/${hobby.id}`, "PATCH", { title: "봉사 활동" })).json()).toMatchObject({ title: "봉사 활동" });
+    expect(await (await req(`/api/portfolio/sections/${hobby.id}/move`, "POST", { dir: -1 })).json()).toEqual({ moved: true });
+    expect((await get()).sections.map((s) => s.title)).toEqual(["업적", "작품", "특기", "취미", "봉사 활동", "내 정보"]);
+    expect(await (await req(`/api/portfolio/sections/${(await get()).sections[0]!.id}/move`, "POST", { dir: -1 })).json()).toEqual({ moved: false });
+    const [award, work] = (await get()).sections;
+
+    // Items: public ones are on kacarong.kr; private ones only on the owner's page, marked 개인용.
+    const add = async (b: object) => (await (await req("/api/portfolio/items", "POST", b)).json()) as { id: number; sort: number };
+    const prize = await add({ section_id: award!.id, title: "공모전 대상", period: "2025.10", summary: "교내 디자인 공모전", public: true });
+    const diary = await add({ section_id: award!.id, title: "비공개 기록", body: "나만 볼 내용", public: false });
+    const logo = await add({ section_id: work!.id, title: "로고 작업", link: "https://example.com/logo", public: true });
+    expect((await req("/api/portfolio/items", "POST", { section_id: 9999, title: "x" })).status).toBe(400);
+    expect((await req("/api/portfolio/items", "POST", { section_id: award!.id, title: "" })).status).toBe(400);
+    expect((await req("/api/portfolio/items", "POST", { section_id: award!.id, title: "x", link: "javascript:alert(1)" })).status).toBe(400);
+    let html = await page();
+    expect(html).toContain("공모전 대상");
+    expect(html).toContain("교내 디자인 공모전");
+    expect(html).toContain('href="https://example.com/logo"');
+    expect(html).not.toContain("비공개 기록");
+    expect(html).not.toContain("봉사 활동"); // a section without public items is left out
+    html = await mine();
+    expect(html).toMatch(/비공개 기록[\s\S]*<span class="chip">개인용<\/span>/);
+    expect(html).toContain("나만 볼 내용");
+
+    // Reorder within a section, move to another section (goes to its end), switch visibility, edit.
+    await req(`/api/portfolio/items/${diary.id}/move`, "POST", { dir: -1 });
+    expect((await get()).sections[0]!.items.map((i) => i.title)).toEqual(["비공개 기록", "공모전 대상"]);
+    await req(`/api/portfolio/items/${prize.id}`, "PATCH", { section_id: work!.id });
+    expect((await get()).sections[1]!.items.map((i) => i.title)).toEqual(["로고 작업", "공모전 대상"]);
+    await req(`/api/portfolio/items/${diary.id}`, "PATCH", { public: true, title: "이제 공개" });
+    expect(await page()).toContain("이제 공개");
+    await req(`/api/portfolio/items/${logo.id}`, "PATCH", { public: false });
+    expect(await page()).not.toContain("로고 작업");
+
+    // Files from the cloud: the first is the cover. Anyone may fetch the files of public items, nobody else those of private ones.
+    const addFile = (name: string, mime: string) => {
+      const id = `pf${nextId++}`;
+      drive.set(id, { id, name, mimeType: mime, parents: [], trashed: false, bytes: 3, content: "IMG" });
+      return db.insertFile({ drive_id: id, name, title: name, mime, size: 3, category: "포트폴리오", tags: "", note: "" });
+    };
+    const cover = addFile("대상.jpg", "image/jpeg");
+    const pdf = addFile("상장.pdf", "application/pdf");
+    const secret = addFile("시안.png", "image/png");
+    const photo = addFile("나.jpg", "image/jpeg");
+    expect((await req("/api/attachments", "POST", { portfolio: prize.id, fileId: cover.id })).status).toBe(201);
+    expect((await req("/api/attachments", "POST", { portfolio: prize.id, fileId: pdf.id })).status).toBe(201);
+    expect((await req("/api/attachments", "POST", { portfolio: logo.id, fileId: secret.id })).status).toBe(201);
+    expect((await req("/api/attachments", "POST", { profile: 0, fileId: photo.id })).status).toBe(201);
+    expect((await req("/api/attachments", "POST", { profile: 1, fileId: photo.id })).status).toBe(404);
+    expect((await req("/api/attachments", "POST", { portfolio: 9999, fileId: photo.id })).status).toBe(404);
+    html = await page();
+    expect(html).toContain(`<img src="/portfolio/file/${cover.id}"`);
+    expect(html).toContain(`href="/portfolio/file/${pdf.id}">상장.pdf ↓</a>`);
+    expect(html).toContain(`class="about-photo" src="/portfolio/file/${photo.id}"`);
+    const img = await call(`/portfolio/file/${cover.id}`);
+    expect(img.status).toBe(200);
+    expect(await img.text()).toBe("IMG");
+    expect(img.headers.get("Content-Disposition")).toStartWith("inline;");
+    expect(img.headers.get("Cache-Control")).toBe("public, max-age=600");
+    expect((await call(`/portfolio/file/${pdf.id}`)).headers.get("Content-Disposition")).toStartWith("attachment;"); // not an image: a download
+    expect((await call(`/portfolio/file/${photo.id}`)).status).toBe(200);
+    expect((await call(`/portfolio/file/${secret.id}`)).status).toBe(404);
+    expect((await call(`/thumb/${secret.id}`)).status).toBe(404);
+    expect((await call(`/portfolio/file/${secret.id}`, { cookie })).status).toBe(200); // the owner sees it on their own page
+    expect(await mine()).toContain(`/portfolio/file/${secret.id}`);
+
+    // Deleting an item or a section takes their attachments off, the files stay in the cloud.
+    await req(`/api/portfolio/items/${logo.id}`, "DELETE");
+    await req(`/api/portfolio/sections/${work!.id}`, "DELETE");
+    expect((await get()).sections.some((s) => s.id === work!.id)).toBe(false);
+    expect(db.getItem(prize.id)).toBeNull();
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM attachments WHERE target = 'portfolio'").get()).toEqual({ n: 0 });
+    expect(db.getFile(cover.id)).not.toBeNull();
+    expect((await call(`/portfolio/file/${cover.id}`)).status).toBe(404);
+  } finally {
+    cleanup();
+  }
+});
+
+test("포트폴리오 페이지는 소개·섹션·항목을 HTML 이스케이프", async () => {
+  const { call, db, cleanup } = makeApp();
+  try {
+    db.setProfile({ name: "<b>이름</b>", headline: "<i>h</i>", about: "<script>alert(1)</script>" });
+    const s = db.insertSection("<u>s</u>");
+    db.insertItem({ section_id: s.id, title: "<script>alert(2)</script>", period: '"><x', summary: "", body: "<img src=x onerror=alert(3)>", link: 'https://e.com/"onmouseover="x', public: 1 });
+    const html = await (await call("/")).text();
+    expect(html).not.toMatch(/<script>alert|<b>이름|<i>h|<u>s|<img src=x|"onmouseover="/);
+    expect(html).toContain("&lt;script&gt;alert(2)");
+  } finally {
+    cleanup();
+  }
+});
+
+test("첨부를 노트·할 일에만 붙이던 DB를 열면 첨부는 그대로, 포트폴리오에도 붙일 수 있음", () => {
   const dir = mkdtempSync(join(tmpdir(), "folio-test-"));
   try {
     const path = join(dir, "old.db");
-    const old = openDb(path);
-    const pub = old.insertFile({ drive_id: "p1", name: "p", title: "p", mime: "", size: 1, category: "기타", tags: "", note: "", web_view_link: "", web_content_link: "" });
-    const plain = old.insertFile({ drive_id: "p2", name: "q", title: "q", mime: "", size: 1, category: "기타", tags: "", note: "", web_view_link: "", web_content_link: "" });
-    old.updateFile(pub.id, { shared: 1, public: 1 });
+    // The attachments table as it was before (narrower check, by_import added later), with one attachment in it.
     const raw = new Database(path);
-    raw.exec("ALTER TABLE files DROP COLUMN portfolio"); // back to the schema before the column existed
+    raw.exec(`
+      CREATE TABLE files (id INTEGER PRIMARY KEY AUTOINCREMENT, drive_id TEXT NOT NULL UNIQUE, name TEXT NOT NULL, title TEXT NOT NULL, mime TEXT NOT NULL DEFAULT '', size INTEGER NOT NULL DEFAULT 0, category TEXT NOT NULL DEFAULT '기타', tags TEXT NOT NULL DEFAULT '', note TEXT NOT NULL DEFAULT '', shared INTEGER NOT NULL DEFAULT 0, public INTEGER NOT NULL DEFAULT 0, web_view_link TEXT NOT NULL DEFAULT '', web_content_link TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL DEFAULT (datetime('now')));
+      CREATE TABLE attachments (id INTEGER PRIMARY KEY AUTOINCREMENT, target TEXT NOT NULL CHECK (target IN ('note', 'task')), target_id INTEGER NOT NULL, file_id INTEGER NOT NULL, created_at TEXT NOT NULL DEFAULT (datetime('now')), UNIQUE (target, target_id, file_id));
+      CREATE TRIGGER attachments_file_gone AFTER DELETE ON files BEGIN DELETE FROM attachments WHERE file_id = old.id; END;
+      INSERT INTO files (drive_id, name, title) VALUES ('d1', 'a.pdf', 'a.pdf');
+      INSERT INTO attachments (target, target_id, file_id) VALUES ('note', 7, 1);
+    `);
     raw.close();
     const db = openDb(path);
-    expect(db.getFile(pub.id)!.portfolio).toBe(1);
-    expect(db.getFile(plain.id)!.portfolio).toBe(0);
+    expect(db.listAttachments("note", 7).map((f) => f.title)).toEqual(["a.pdf"]);
+    expect(db.getFile(1)!.folder_id).toBeNull();
+    const s = db.insertSection("작품");
+    const item = db.insertItem({ section_id: s.id, title: "t", period: "", summary: "", body: "", link: "", public: 1 });
+    expect(db.addAttachment("portfolio", item.id, 1)).toBe(true);
+    expect(db.isPublicFile(1)).toBe(true);
+    db.deleteFile(1); // the triggers came back with the new table
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM attachments").get()).toEqual({ n: 0 });
+    db.raw.close();
+    expect(openDb(path).listSections().map((x) => x.title)).toEqual(["업적", "작품", "특기", "취미", "내 정보", "작품"]); // seeded once only
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

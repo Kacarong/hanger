@@ -35,8 +35,8 @@
 
     <div class="nav-group">보관</div>
     <a class="nav-item" href="#files" data-tab="files"><span data-icon="folder"></span>클라우드</a>
-    <a class="nav-item" href="/admin/portfolio" target="_blank"><span data-icon="globe"></span>내 포트폴리오</a>
-    <a class="nav-item" href="/" target="_blank"><span data-icon="globe"></span>공개 포트폴리오</a>
+    <a class="nav-item" href="#portfolio" data-tab="portfolio"><span data-icon="star"></span>포트폴리오</a>
+    <a class="nav-item" href="/" target="_blank"><span data-icon="globe"></span>공개 페이지</a>
 
     <div class="side-foot">
       <button class="nav-item btn ghost" id="change-password" style="border:0;justify-content:flex-start"><span data-icon="key"></span>비밀번호 바꾸기</button>
@@ -98,12 +98,28 @@
         <div class="stats" id="file-stats"></div>
         <p class="notice" id="drive-off" hidden>구글 드라이브가 아직 연결되지 않았습니다. 구글 OAuth 정보를 서버에 넣고 구글 계정으로 한 번 로그인하면 업로드가 켜집니다.</p>
         <div class="toolbar">
-          <form id="search" style="display:contents"><input class="input" id="q" placeholder="이름, 태그, 메모 검색" style="width:240px"></form>
+          <nav class="crumbs" id="crumbs"></nav>
           <span class="grow"></span>
+          <form id="search" style="display:contents"><input class="input" id="q" placeholder="모든 폴더에서 이름, 태그, 메모 검색" style="width:240px"></form>
           <div class="seg" id="filter-category"><button data-v="" class="on">전체</button></div>
         </div>
-        <table class="table"><thead><tr><th class="w1"></th><th>제목</th><th class="hide-sm">분류</th><th class="hide-sm">태그</th><th class="num">크기</th><th>링크 공유</th><th>포트폴리오</th><th></th></tr></thead>
+        <table class="table"><thead><tr><th class="w1"></th><th>이름</th><th class="hide-sm">분류</th><th class="hide-sm">태그</th><th class="num">크기</th><th class="hide-sm">올린 날</th><th></th></tr></thead>
           <tbody id="list"></tbody></table>
+      </div>
+
+      <div id="tab-portfolio" class="pf" hidden>
+        <p class="muted pf-help">kacarong.kr에 보이는 포트폴리오를 여기서 고칩니다. 항목마다 공개(kacarong.kr에 나옴)와 개인용(나만 보는 "미리 보기"에만 나옴)을 고를 수 있습니다. 항목에 붙인 첫 파일이 대표 사진이 됩니다.</p>
+        <form class="pf-card" id="profile-form">
+          <h2>내 소개</h2>
+          <div class="row">
+            <label>이름<input class="input" id="pf-name" maxlength="100" placeholder="kacarong"></label>
+            <label>한 줄 소개<input class="input" id="pf-headline" maxlength="200" placeholder="기록하고, 만들고, 남깁니다."></label>
+          </div>
+          <label>소개글<textarea class="input" id="pf-about" maxlength="5000" rows="4"></textarea></label>
+          <div class="attach" id="pf-photo"></div>
+          <div class="foot"><span class="muted" id="pf-saved"></span><button class="btn primary">소개 저장</button></div>
+        </form>
+        <div id="pf-sections"></div>
       </div>
 
     </div>
@@ -146,14 +162,45 @@
     <label>제목<input class="input" id="file-title" required></label>
     <label>분류<select class="input" id="file-category"></select></label>
     <label>태그 (쉼표로 구분)<input class="input" id="file-tags"></label>
-    <label>메모 (포트폴리오에 설명으로 나옵니다)<textarea class="input" id="file-note"></textarea></label>
+    <label>폴더<select class="input" id="file-folder"></select></label>
+    <label>메모<textarea class="input" id="file-note"></textarea></label>
+    <div class="foot"><button class="btn" type="button" data-close>취소</button><button class="btn primary" value="ok">저장</button></div>
+  </form>
+</dialog>
+
+<dialog id="folder-dialog">
+  <form method="dialog" id="folder-form">
+    <h2 id="folder-dialog-title">새 폴더</h2>
+    <label>이름<input class="input" id="folder-name" maxlength="100" required></label>
+    <label>위치<select class="input" id="folder-parent"></select></label>
+    <span class="error" id="folder-msg"></span>
+    <div class="foot"><button class="btn" type="button" data-close>취소</button><button class="btn primary" value="ok">저장</button></div>
+  </form>
+</dialog>
+
+<dialog id="item-dialog">
+  <form method="dialog" id="item-form">
+    <h2 id="item-dialog-title">새 항목</h2>
+    <div class="row">
+      <label>섹션<select class="input" id="item-section"></select></label>
+      <label>보이기<select class="input" id="item-public"><option value="1">공개 (kacarong.kr에 나옴)</option><option value="0">개인용 (나만 봄)</option></select></label>
+    </div>
+    <label>제목<input class="input" id="item-title" maxlength="200" required></label>
+    <div class="row">
+      <label>기간·날짜<input class="input" id="item-period" maxlength="100" placeholder="2025.03 – 2025.06"></label>
+      <label>링크<input class="input" id="item-link" maxlength="1000" placeholder="https://"></label>
+    </div>
+    <label>한 줄 설명<input class="input" id="item-summary" maxlength="300"></label>
+    <label>내용<textarea class="input" id="item-body" maxlength="20000" rows="6"></textarea></label>
+    <div class="attach" id="item-files"></div>
+    <span class="error" id="item-msg"></span>
     <div class="foot"><button class="btn" type="button" data-close>취소</button><button class="btn primary" value="ok">저장</button></div>
   </form>
 </dialog>
 
 <dialog id="upload-dialog">
   <form method="dialog" id="upload">
-    <h2>올리기 <span class="muted" style="font-weight:400;font-size:12px">파일당 1GB 미만</span></h2>
+    <h2>올리기 <span class="muted" style="font-weight:400;font-size:12px" id="upload-where">파일당 1GB 미만</span></h2>
     <label class="dropzone" id="dropzone">
       <input type="file" id="files" multiple>
       <span data-icon="upload"></span>
