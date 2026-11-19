@@ -110,7 +110,11 @@ export function openDb(path: string) {
     -- Whatever removes a note, task or file (including tasks a note save drops) also drops its attachments.
     -- What the Notion import brought in, so running it again updates instead of duplicating.
     -- version is the note version right after the import: a different one means it was edited here since.
+    -- kids: the child pages ("page:<id>") and databases ("db:<id>") found in it, so an unchanged page still leads to them.
+    -- edited is '' when some file of the page failed to copy, so the next run reads the page again.
     CREATE TABLE IF NOT EXISTS notion_pages (page_id TEXT PRIMARY KEY, note_id INTEGER NOT NULL, edited TEXT NOT NULL, version INTEGER NOT NULL);
+    -- key: a file block id, or "<page id>:<property id>:<n>" for a file in a database column.
+    -- source: the Notion file address without its signature; a new one means the file was replaced.
     CREATE TABLE IF NOT EXISTS notion_files (block_id TEXT PRIMARY KEY, file_id INTEGER NOT NULL);
     CREATE TRIGGER IF NOT EXISTS attachments_note_gone AFTER DELETE ON notes BEGIN
       DELETE FROM attachments WHERE target = 'note' AND target_id = old.id;
@@ -127,6 +131,10 @@ export function openDb(path: string) {
   db.exec("CREATE INDEX IF NOT EXISTS tasks_note ON tasks (note_id)");
   const noteCols = (db.query("PRAGMA table_info(notes)").all() as { name: string }[]).map((c) => c.name);
   if (!noteCols.includes("version")) db.exec("ALTER TABLE notes ADD COLUMN version INTEGER NOT NULL DEFAULT 0");
+  const notionCols = (db.query("PRAGMA table_info(notion_pages)").all() as { name: string }[]).map((c) => c.name);
+  if (!notionCols.includes("kids")) db.exec("ALTER TABLE notion_pages ADD COLUMN kids TEXT NOT NULL DEFAULT '[]'");
+  const notionFileCols = (db.query("PRAGMA table_info(notion_files)").all() as { name: string }[]).map((c) => c.name);
+  if (!notionFileCols.includes("source")) db.exec("ALTER TABLE notion_files ADD COLUMN source TEXT NOT NULL DEFAULT ''");
   const TASK_SELECT = `SELECT tasks.*, notes.title AS note_title,
     (SELECT COUNT(*) FROM attachments WHERE target = 'task' AND target_id = tasks.id) AS files
     FROM tasks LEFT JOIN notes ON notes.id = tasks.note_id`;
@@ -309,18 +317,25 @@ export function openDb(path: string) {
     setNoteTimes(id: number, created: string, updated: string) {
       db.query("UPDATE notes SET created_at = ?, updated_at = ? WHERE id = ?").run(created, updated, id);
     },
-    notionPage(pageId: string): { note_id: number; edited: string; version: number } | null {
-      return db.query("SELECT note_id, edited, version FROM notion_pages WHERE page_id = ?").get(pageId) as { note_id: number; edited: string; version: number } | null;
+    notionPage(pageId: string): { note_id: number; edited: string; version: number; kids: string[] } | null {
+      const r = db.query("SELECT note_id, edited, version, kids FROM notion_pages WHERE page_id = ?").get(pageId) as { note_id: number; edited: string; version: number; kids: string } | null;
+      return r ? { ...r, kids: JSON.parse(r.kids) as string[] } : null;
     },
-    setNotionPage(pageId: string, noteId: number, edited: string, version: number) {
-      db.query("INSERT OR REPLACE INTO notion_pages (page_id, note_id, edited, version) VALUES (?, ?, ?, ?)").run(pageId, noteId, edited, version);
+    setNotionPage(pageId: string, noteId: number, edited: string, version: number, kids: string[]) {
+      db.query("INSERT OR REPLACE INTO notion_pages (page_id, note_id, edited, version, kids) VALUES (?, ?, ?, ?, ?)").run(pageId, noteId, edited, version, JSON.stringify(kids));
     },
-    // The 파일함 copy of a Notion file block, if it is still there.
-    notionFile(blockId: string): FileRow | null {
-      return db.query("SELECT files.* FROM notion_files JOIN files ON files.id = notion_files.file_id WHERE block_id = ?").get(blockId) as FileRow | null;
+    // The 파일함 copy of a Notion file, if it is still there.
+    notionFile(key: string): (FileRow & { source: string }) | null {
+      return db.query("SELECT files.*, notion_files.source FROM notion_files JOIN files ON files.id = notion_files.file_id WHERE block_id = ?").get(key) as (FileRow & { source: string }) | null;
     },
-    setNotionFile(blockId: string, fileId: number) {
-      db.query("INSERT OR REPLACE INTO notion_files (block_id, file_id) VALUES (?, ?)").run(blockId, fileId);
+    setNotionFile(key: string, fileId: number, source: string) {
+      db.query("INSERT OR REPLACE INTO notion_files (block_id, file_id, source) VALUES (?, ?, ?)").run(key, fileId, source);
+    },
+    // Attachments of a note that the Notion import made (the file is a Notion copy).
+    notionAttachments(noteId: number): { id: number; file_id: number }[] {
+      return db
+        .query("SELECT attachments.id, attachments.file_id FROM attachments WHERE target = 'note' AND target_id = ? AND file_id IN (SELECT file_id FROM notion_files)")
+        .all(noteId) as { id: number; file_id: number }[];
     },
     deleteNote: db.transaction((id: number) => {
       db.query("DELETE FROM tasks WHERE note_id = ?").run(id);

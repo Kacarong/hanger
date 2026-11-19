@@ -734,7 +734,8 @@ function notionText(j) {
     !j.total && "통합에 연결된 페이지가 없습니다. 2번(페이지에 통합 연결)을 확인해 주세요.",
     j.skipped.length && `여기서 고친 노트라 노션 내용으로 덮지 않음: ${j.skipped.join(", ")}`,
     j.failed.length && `가져오지 못한 페이지: ${j.failed.join(", ")}`,
-    j.fileProblems && `가져오지 못한 파일 ${j.fileProblems}개 (노트에 "가져오지 못함"으로 표시)`,
+    j.partial?.length && `일부만 가져온 페이지(너무 길거나 깊거나, 읽을 수 없는 데이터베이스가 있음): ${j.partial.join(", ")}`,
+    j.fileProblems && `가져오지 못한 파일 ${j.fileProblems}개 (노트에 "가져오지 못함"으로 표시, 다시 가져오면 또 시도합니다)`,
   ].filter(Boolean).join("\n");
 }
 async function watchNotion(wasRunning = false) {

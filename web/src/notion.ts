@@ -5,7 +5,7 @@
 import { NOTE_MAX_BLOCKS, NOTE_MAX_TEXT, type Block, type Db, type FileRow } from "./db";
 
 const NOTION_VERSION = "2022-06-28";
-const MAX_DEPTH = 8; // nested blocks deeper than this are left out
+const MAX_DEPTH = 30; // blocks nested deeper than this are left out, and the page is reported as partial
 export const NOTION_MAX_FILE = 50 * 1024 ** 2; // held in memory while copied to the 파일함 (the service has 512MB)
 
 // Notion's block and property shapes are many and loose, so most of them stay `any`.
@@ -22,6 +22,7 @@ export type NotionJob = {
   unchanged: number; // no newer edit in Notion, or the note was deleted here
   skipped: string[]; // newer in Notion but also edited here: left alone
   failed: string[];
+  partial: string[]; // imported, but something was left out (too long, too deep, a database that can't be read)
   files: number; // files copied to the 파일함
   fileProblems: number; // files that could not be copied
   error?: string;
@@ -33,7 +34,7 @@ export class NotionError extends Error {
   }
 }
 
-export const newNotionJob = (): NotionJob => ({ status: "running", total: 0, done: 0, added: 0, updated: 0, unchanged: 0, skipped: [], failed: [], files: 0, fileProblems: 0 });
+export const newNotionJob = (): NotionJob => ({ status: "running", total: 0, done: 0, added: 0, updated: 0, unchanged: 0, skipped: [], failed: [], partial: [], files: 0, fileProblems: 0 });
 
 const seoul = (d: Date, opts: Intl.DateTimeFormatOptions, locale: string) => new Intl.DateTimeFormat(locale, { timeZone: "Asia/Seoul", ...opts }).format(d);
 const sqlTime = (iso: string) => new Date(iso).toISOString().slice(0, 19).replace("T", " "); // same form as datetime('now')
@@ -124,10 +125,12 @@ export async function importNotion(o: {
     return out;
   }
 
-  // Copies a Notion-hosted file (its link expires within the hour) into the 파일함, once per block.
-  async function copyFile(blockId: string, url: string, name: string): Promise<FileRow> {
-    const had = db.notionFile(blockId);
-    if (had) return had;
+  // Copies a Notion-hosted file (its link expires within the hour) into the 파일함, once per file:
+  // the address without its signature stays the same until the file is replaced in Notion.
+  async function copyFile(key: string, url: string, name: string): Promise<FileRow> {
+    const source = url.split("?")[0]!;
+    const had = db.notionFile(key);
+    if (had && had.source === source) return had;
     const res = await fetch(url);
     if (!res.ok) throw new Error(`다운로드 실패 (${res.status})`);
     if (Number(res.headers.get("Content-Length")) > NOTION_MAX_FILE) throw new Error("50MB가 넘음");
@@ -135,22 +138,43 @@ export async function importNotion(o: {
     if (bytes.size > NOTION_MAX_FILE) throw new Error("50MB가 넘음");
     if (!bytes.size) throw new Error("빈 파일");
     const row = await o.saveFile(name, res.headers.get("Content-Type") || "application/octet-stream", bytes);
-    db.setNotionFile(blockId, row.id);
+    db.setNotionFile(key, row.id, source);
     job.files++;
     return row;
   }
 
-  // A page's content as note blocks, plus the 파일함 files to attach to the note.
-  async function convert(page: Page): Promise<{ blocks: Block[]; files: FileRow[] }> {
+  // A page's content as note blocks, plus the 파일함 files to attach to the note,
+  // the child pages and databases in it, and whether a file failed or something was left out.
+  async function convert(page: Page) {
     const blocks: Block[] = [];
     const files: FileRow[] = [];
+    const replaced: number[] = []; // older copies of files replaced in Notion
+    const kids: string[] = [];
     const ids = new Set<string>();
     let size = 0;
     let full = false;
+    let fileFailed = false;
+    let incomplete = false;
+    // The file's label in the note: its name, or why it is missing.
+    const copy = async (key: string, url: string, name: string) => {
+      try {
+        if (!url) throw new Error("노션 밖으로 받을 수 없는 파일");
+        const old = db.notionFile(key);
+        const row = await copyFile(key, url, name);
+        if (old && old.id !== row.id) replaced.push(old.id);
+        files.push(row);
+        return name;
+      } catch (e) {
+        job.fileProblems++;
+        fileFailed = true;
+        return `${name} (가져오지 못함: ${e instanceof Error ? e.message : e})`;
+      }
+    };
     const push = (type: string, text: string, extra: Partial<Block>, id: string) => {
       if (full) return;
       if (blocks.length >= NOTE_MAX_BLOCKS - 1 || size + text.length > NOTE_MAX_TEXT - 100) {
         full = true;
+        incomplete = true;
         blocks.push({ id: "cut", type: "p", text: "(노션 페이지가 너무 길어 여기까지만 가져왔습니다)" });
         return;
       }
@@ -160,12 +184,20 @@ export async function importNotion(o: {
       blocks.push({ id, type, text, ...extra });
     };
 
-    // Database rows keep their columns as "이름: 값" lines at the top.
-    const props = Object.entries(page.properties ?? {})
-      .filter(([, p]) => p.type !== "title")
-      .map(([k, p]) => [k, propText(p)])
-      .filter(([, v]) => v)
-      .map(([k, v]) => `${k}: ${v}`);
+    // Database rows keep their columns as "이름: 값" lines at the top; files in a column are copied too.
+    const props: string[] = [];
+    for (const [k, p] of Object.entries(page.properties ?? {})) {
+      if (p.type === "title") continue;
+      let v = propText(p);
+      if (p.type === "files") {
+        const names: string[] = [];
+        for (const [i, f] of (p.files as any[]).entries()) {
+          names.push(f.type === "external" ? `${f.name} ${f.external?.url ?? ""}`.trim() : await copy(`${page.id}:${p.id ?? k}:${i}`, f.file?.url ?? "", f.name));
+        }
+        v = names.join(", ");
+      }
+      if (v) props.push(`${k}: ${v}`);
+    }
     if (props.length) push("p", props.join("\n"), {}, "props");
 
     async function walk(list: NBlock[], depth: number) {
@@ -221,9 +253,11 @@ export async function importNotion(o: {
             break;
           case "child_page":
             add("p", `📄 ${d.title ?? ""}`);
+            kids.push("page:" + b.id);
             break;
           case "child_database":
             add("p", `🗂 ${d.title ?? ""}`);
+            kids.push("db:" + b.id);
             break;
           case "link_to_page":
             add("p", "↗ 다른 노션 페이지 링크");
@@ -249,24 +283,23 @@ export async function importNotion(o: {
               add("p", `${emoji} ${caption ? caption + " " : ""}${d.external?.url ?? ""}`);
               break;
             }
-            const url: string = d.file?.url ?? "";
+            const url: string = (d.type === "file" && d.file?.url) || "";
             const name = d.name || (url && decodeURIComponent(new URL(url).pathname.split("/").pop() ?? "")) || b.type;
-            try {
-              if (d.type !== "file" || !url) throw new Error("노션 밖으로 받을 수 없는 파일");
-              files.push(await copyFile(b.id, url, name));
-              add("p", `${emoji} ${caption || name}`);
-            } catch (e) {
-              job.fileProblems++;
-              add("p", `${emoji} ${caption || name} (가져오지 못함: ${e instanceof Error ? e.message : e})`);
-            }
+            const label = await copy(b.id, url, name);
+            add("p", `${emoji} ${caption ? caption + (label === name ? "" : label.slice(name.length)) : label}`);
             break;
           }
           // column_list, column, table, synced_block: only their children are content.
           // table_of_contents, breadcrumb, unsupported and the like have none worth keeping.
         }
-        if (b.type === "child_page" || b.type === "child_database" || depth >= MAX_DEPTH) continue;
+        if (b.type === "child_page" || b.type === "child_database") continue;
         const source = b.type === "synced_block" ? (d.synced_from?.block_id ?? b.id) : b.id;
         if (!b.has_children && source === b.id) continue;
+        if (depth >= MAX_DEPTH) {
+          incomplete = true;
+          push("p", "(이 아래 더 깊이 들어간 내용은 가져오지 못했습니다)", {}, b.id + "-deep");
+          continue;
+        }
         try {
           await walk(await all(`/v1/blocks/${source}/children`), depth + 1);
         } catch (e) {
@@ -276,42 +309,75 @@ export async function importNotion(o: {
       }
     }
     await walk(await all(`/v1/blocks/${page.id}/children`), 0);
-    return { blocks, files };
+    return { blocks, files, replaced, kids, fileFailed, incomplete };
   }
 
-  const pages = (await all("/v1/search", { filter: { property: "object", value: "page" } })).filter((p: Page) => p.object === "page" && !p.archived && !p.in_trash) as Page[];
-  job.total = pages.length;
-  for (const page of pages) {
-    const title = pageTitle(page);
+  // Search may miss pages (Notion says it is not exhaustive), so child pages and database rows
+  // are also followed from the pages that contain them.
+  const queue: Page[] = [];
+  const seen = new Set<string>();
+  const enqueue = (p: Page) => {
+    if (p.object !== "page" || p.archived || p.in_trash || seen.has(p.id)) return;
+    seen.add(p.id);
+    queue.push(p);
+    job.total = queue.length;
+  };
+  // Returns false when a database can't be read (e.g. a linked view of a database not shared with the integration).
+  async function follow(kid: string): Promise<boolean> {
+    const [kind, id] = kid.split(":") as [string, string];
+    if (seen.has(kid) || seen.has(id)) return true;
+    seen.add(kid);
+    try {
+      if (kind === "page") enqueue(await api(`/v1/pages/${id}`));
+      else for (const row of await all(`/v1/databases/${id}/query`, {})) enqueue(row);
+      return true;
+    } catch (e) {
+      if (e instanceof NotionError && (e.status === 400 || e.status === 403 || e.status === 404)) return false;
+      throw e;
+    }
+  }
+
+  for (const p of await all("/v1/search", { filter: { property: "object", value: "page" } })) enqueue(p);
+  for (let i = 0; i < queue.length; i++) {
+    const page = queue[i]!;
+    const title = pageTitle(page) || "제목 없음";
     try {
       const had = db.notionPage(page.id);
       const note = had && db.getNote(had.note_id);
+      let kids = had?.kids ?? [];
+      let incomplete = false;
       if (had && (!note || had.edited === page.last_edited_time)) job.unchanged++;
-      else if (note && note.version !== had!.version) job.skipped.push(title || "제목 없음");
+      else if (note && note.version !== had!.version) job.skipped.push(title);
       else {
-        const { blocks, files } = await convert(page);
+        const c = await convert(page);
         // A checked box counts as done on the day the page was last edited, not on import day.
         const doneDay = seoul(new Date(page.last_edited_time), {}, "en-CA");
-        let id: number;
-        if (note) {
-          if (!db.saveNote(note.id, note.version, title, blocks, doneDay)) {
-            job.skipped.push(title || "제목 없음"); // edited here while this page was being read
-            continue;
-          }
+        let id: number | null = null;
+        if (!note) {
+          id = db.insertNote(pageTitle(page), c.blocks, doneDay).id;
+          job.added++;
+        } else if (db.saveNote(note.id, note.version, pageTitle(page), c.blocks, doneDay)) {
           id = note.id;
           job.updated++;
-        } else {
-          id = db.insertNote(title, blocks, doneDay).id;
-          job.added++;
+        } else job.skipped.push(title); // edited here while this page was being read
+        if (id !== null) {
+          db.setNoteTimes(id, sqlTime(page.created_time), sqlTime(page.last_edited_time));
+          // Import attachments follow the page: a file removed or replaced in Notion comes off the note.
+          const keep = new Set(c.files.map((f) => f.id));
+          const old = [...db.notionAttachments(id), ...db.listAttachments("note", id).filter((f) => c.replaced.includes(f.id)).map((f) => ({ id: f.attachment_id, file_id: f.id }))];
+          for (const a of old) if (!keep.has(a.file_id)) db.deleteAttachment(a.id);
+          for (const f of c.files) db.addAttachment("note", id, f.id);
+          db.setNotionPage(page.id, id, c.fileFailed ? "" : page.last_edited_time, db.getNote(id)!.version, c.kids);
         }
-        db.setNoteTimes(id, sqlTime(page.created_time), sqlTime(page.last_edited_time));
-        for (const f of files) db.addAttachment("note", id, f.id);
-        db.setNotionPage(page.id, id, page.last_edited_time, db.getNote(id)!.version);
+        kids = c.kids;
+        incomplete = c.incomplete;
       }
+      for (const k of kids) if (!(await follow(k))) incomplete = true;
+      if (incomplete) job.partial.push(title);
     } catch (e) {
       if (e instanceof NotionError && e.status === 401) throw e;
       console.error("notion import:", page.id, e);
-      job.failed.push(title || "제목 없음");
+      job.failed.push(title);
     } finally {
       job.done++;
     }

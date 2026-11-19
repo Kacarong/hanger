@@ -908,38 +908,49 @@ test("노션 가져오기: 페이지·데이터베이스 행은 노트로, 파�
   const rt = (text: string, extra: object = {}) => ({ type: "text", plain_text: text, href: null, ...extra });
   const children = new Map<string, object[]>();
   let n = 100;
-  const blk = (type: string, data: object, kids?: object[]) => {
-    const id = uid(n++);
+  const blk = (type: string, data: object, kids?: object[], id = uid(n++)) => {
     if (kids) children.set(id, kids);
     return { object: "block", id, type, has_children: !!kids, [type]: data };
   };
-  const [A, SUB, ROW, OLD] = [1, 2, 3, 4].map(uid) as [string, string, string, string];
+  // A (in search) → child page SUB (in search) and HIDDEN (not in search), and database DB whose row ROW2 is not in search.
+  const [A, SUB, ROW, OLD, HIDDEN, DB, ROW2] = [1, 2, 3, 4, 5, 6, 7].map(uid) as [string, string, string, string, string, string, string];
   const title = (t: string) => ({ 이름: { type: "title", title: [rt(t)] } });
+  const page = (id: string, t: string, edited: string, extra: object = {}): Record<string, unknown> => ({
+    object: "page", id, created_time: "2026-09-01T00:00:00.000Z", last_edited_time: edited, properties: title(t), ...extra,
+  });
+  let notion: ReturnType<typeof Bun.serve>;
+  const fileUrl = (name: string) => `${notion!.url}files/${name}?X-Amz-Signature=${n++}`; // the signature changes on every read, like Notion's
   const pages: Record<string, unknown>[] = [
-    { object: "page", id: A, created_time: "2026-09-01T00:00:00.000Z", last_edited_time: "2026-11-10T01:00:00.000Z", icon: { type: "emoji", emoji: "📚" }, properties: title("강의 노트") },
-    { object: "page", id: SUB, created_time: "2026-09-02T00:00:00.000Z", last_edited_time: "2026-11-05T00:00:00.000Z", properties: title("하위 페이지") },
-    {
-      object: "page", id: ROW, created_time: "2026-11-01T00:00:00.000Z", last_edited_time: "2026-11-12T00:00:00.000Z",
+    page(A, "강의 노트", "2026-11-10T01:00:00.000Z", { icon: { type: "emoji", emoji: "📚" } }),
+    page(SUB, "하위 페이지", "2026-11-05T00:00:00.000Z"),
+    page(ROW, "회의", "2026-11-12T00:00:00.000Z", {
       properties: {
         ...title("회의"),
-        날짜: { type: "date", date: { start: "2026-11-21", end: null } },
-        태그: { type: "multi_select", multi_select: [{ name: "학교" }, { name: "팀" }] },
-        상태: { type: "status", status: { name: "진행 중" } },
-        메모: { type: "rich_text", rich_text: [] },
+        날짜: { id: "d1", type: "date", date: { start: "2026-11-21", end: null } },
+        태그: { id: "t1", type: "multi_select", multi_select: [{ name: "학교" }, { name: "팀" }] },
+        상태: { id: "s1", type: "status", status: { name: "진행 중" } },
+        메모: { id: "m1", type: "rich_text", rich_text: [] },
       },
-    },
-    { object: "page", id: OLD, archived: true, created_time: "2026-01-01T00:00:00.000Z", last_edited_time: "2026-01-01T00:00:00.000Z", properties: title("지운 페이지") },
+    }),
+    page(OLD, "지운 페이지", "2026-01-01T00:00:00.000Z", { archived: true }),
   ];
-  let notion: ReturnType<typeof Bun.serve>;
-  const fileUrl = (name: string) => `${notion!.url}files/${name}?X-Amz-Signature=abc`;
+  const hidden = [
+    page(HIDDEN, "검색에 안 나오는 페이지", "2026-11-03T00:00:00.000Z"),
+    page(ROW2, "자료 행", "2026-11-04T00:00:00.000Z", {
+      parent: { type: "database_id", database_id: DB },
+      properties: { ...title("자료 행"), 파일: { id: "f%3A", type: "files", files: [{ name: "slides.pdf", type: "file", file: { url: "" } }, { name: "외부", type: "external", external: { url: "https://x.example/a" } }] } },
+    }),
+  ];
+  const byId = () => new Map([...pages, ...hidden].map((p) => [p.id as string, p]));
   let throttled = false;
+  let missingFails = true; // a file that fails on the first run only
   let childCalls = 0;
   notion = Bun.serve({
     port: 0,
     async fetch(req) {
       const url = new URL(req.url);
-      if (url.pathname === "/files/board.png") return new Response("PNGBYTES", { headers: { "Content-Type": "image/png" } });
-      if (url.pathname.startsWith("/files/")) return new Response("gone", { status: 404 });
+      if (url.pathname === "/files/missing.png" && missingFails) return new Response("gone", { status: 503 });
+      if (url.pathname.startsWith("/files/")) return new Response(`BYTES-${url.pathname}`, { headers: { "Content-Type": "application/octet-stream" } });
       if (req.headers.get("Authorization") !== "Bearer ntn_good") return Response.json({ code: "unauthorized" }, { status: 401 });
       if (req.headers.get("Notion-Version") !== "2022-06-28") return new Response("version", { status: 400 });
       const slice = (list: unknown[], cursor: string | null | undefined, size: number) => {
@@ -953,26 +964,41 @@ test("노션 가져오기: 페이지·데이터베이스 행은 노트로, 파�
         if (b.filter?.value !== "page") return new Response("filter", { status: 400 });
         return slice(pages, b.start_cursor, 2);
       }
+      const pg = url.pathname.match(/^\/v1\/pages\/([^/]+)$/);
+      if (pg) return byId().has(pg[1]!) ? Response.json(byId().get(pg[1]!)) : new Response("not found", { status: 404 });
+      const dq = url.pathname.match(/^\/v1\/databases\/([^/]+)\/query$/);
+      if (dq && req.method === "POST") {
+        if (dq[1] !== DB) return new Response("not found", { status: 404 });
+        // Row file links are signed fresh on every read.
+        (hidden[1]!.properties as any).파일.files[0].file.url = fileUrl("slides.pdf");
+        return slice([pages[2], hidden[1]], (await req.json()).start_cursor, 1);
+      }
       const m = url.pathname.match(/^\/v1\/blocks\/([^/]+)\/children$/);
       const list = m && children.get(m[1]!);
       if (!list) return new Response("not found", { status: 404 });
       childCalls++;
+      // File links are signed fresh on every read.
+      for (const b of list as any[]) if (b.image?.type === "file") b.image.file.url = fileUrl(b.image.file.name);
       return slice(list, url.searchParams.get("start_cursor"), 4);
     },
   });
-  const file = (name: string) => ({ type: "file", file: { url: fileUrl(name), expiry_time: "2026-11-19T04:00:00.000Z" }, caption: [] });
+  const file = (name: string) => ({ type: "file", file: { name, url: "" }, caption: [] });
+  // 35 toggles inside each other: the import goes 30 levels below the top and says the rest is missing.
+  let deep: object = blk("paragraph", { rich_text: [rt("바닥")] });
+  for (let i = 35; i >= 1; i--) deep = blk("toggle", { rich_text: [rt(`단계 ${i}`)] }, [deep]);
   children.set(A, [
     blk("heading_1", { rich_text: [rt("1주차")] }),
     blk("paragraph", { rich_text: [rt("굵게 "), rt("링크", { href: "https://example.com" })] }),
     blk("to_do", { checked: false, rich_text: [rt("과제 제출 "), { type: "mention", plain_text: "2026년 11월 20일", mention: { type: "date", date: { start: "2026-11-20T09:00:00.000+09:00" } } }] }),
     blk("to_do", { checked: true, rich_text: [rt("끝난 일")] }),
     blk("bulleted_list_item", { rich_text: [rt("항목")] }, [blk("bulleted_list_item", { rich_text: [rt("하위 항목")] })]),
-    blk("toggle", { rich_text: [rt("접기")] }, [blk("paragraph", { rich_text: [rt("숨은 글")] })]),
     blk("table", { table_width: 2 }, [blk("table_row", { cells: [[rt("a")], [rt("b")]] }), blk("table_row", { cells: [[rt("1")], [rt("2")]] })]),
     blk("image", file("board.png")),
     blk("image", file("missing.png")),
     blk("image", { type: "external", external: { url: "https://img.example/x.png" }, caption: [rt("외부 그림")] }),
-    blk("child_page", { title: "하위 페이지" }),
+    blk("child_page", { title: "하위 페이지" }, undefined, SUB),
+    blk("child_page", { title: "검색에 안 나오는 페이지" }, undefined, HIDDEN),
+    blk("child_database", { title: "자료" }, undefined, DB),
     blk("code", { rich_text: [rt("print(1)")], language: "python" }),
     blk("divider", {}),
     blk("callout", { rich_text: [rt("주의")], icon: { type: "emoji", emoji: "💡" } }),
@@ -980,7 +1006,9 @@ test("노션 가져오기: 페이지·데이터베이스 행은 노트로, 파�
     blk("unsupported", {}),
   ]);
   children.set(SUB, [blk("paragraph", { rich_text: [rt("하위 내용")] })]);
+  children.set(HIDDEN, [deep]);
   children.set(ROW, []);
+  children.set(ROW2, []);
 
   const { call, db, cleanup } = makeApp({ notionApi: notion.url.toString().replace(/\/$/, "") });
   try {
@@ -995,6 +1023,12 @@ test("노션 가져오기: 페이지·데이터베이스 행은 노트로, 파�
       }
       throw new Error("가져오기가 끝나지 않음");
     };
+    const run = async () => {
+      expect((await req("/api/notion/import", "POST", { token: "ntn_good" })).status).toBe(202);
+      return finish();
+    };
+    const attached = async (noteId: number) =>
+      ((await (await req(`/api/attachments?note=${noteId}`, "GET")).json()) as { title: string; drive_id: string; tags: string }[]).map((f) => f.title);
 
     expect((await call("/api/notion/import", { method: "POST", headers: JSON_ORIGIN, body: JSON.stringify({ token: "ntn_good" }) })).status).toBe(401);
     expect(await status()).toEqual({ status: "idle" });
@@ -1007,7 +1041,10 @@ test("노션 가져오기: 페이지·데이터베이스 행은 노트로, 파�
     // One run at a time; Notion's "slow down" (429) is waited out.
     expect((await req("/api/notion/import", "POST", { token: "ntn_good" })).status).toBe(202);
     expect((await req("/api/notion/import", "POST", { token: "ntn_good" })).status).toBe(409);
-    expect(await finish()).toMatchObject({ status: "done", total: 3, done: 3, added: 3, updated: 0, unchanged: 0, skipped: [], failed: [], files: 1, fileProblems: 1 });
+    // Pages search missed are found through the page and the database that hold them.
+    expect(await finish()).toMatchObject({
+      status: "done", total: 5, done: 5, added: 5, updated: 0, unchanged: 0, skipped: [], failed: [], partial: ["검색에 안 나오는 페이지"], files: 2, fileProblems: 1,
+    });
 
     // Notes keep Notion's titles (with the page icon) and edit times, so the list is in Notion's order.
     const list = (await (await req("/api/notes", "GET")).json()) as { id: number; title: string; updated_at: string }[];
@@ -1015,8 +1052,10 @@ test("노션 가져오기: 페이지·데이터베이스 행은 노트로, 파�
       ["회의", "2026-11-12 00:00:00"],
       ["📚 강의 노트", "2026-11-10 01:00:00"],
       ["하위 페이지", "2026-11-05 00:00:00"],
+      ["자료 행", "2026-11-04 00:00:00"],
+      ["검색에 안 나오는 페이지", "2026-11-03 00:00:00"],
     ]);
-    const [rowId, aId, subId] = list.map((x) => x.id) as [number, number, number];
+    const [rowId, aId, subId, row2Id, hiddenId] = list.map((x) => x.id) as [number, number, number, number, number];
     const a = db.getNote(aId)!;
     expect(a.blocks.map((b) => [b.type, b.text])).toEqual([
       ["h1", "1주차"],
@@ -1025,14 +1064,14 @@ test("노션 가져오기: 페이지·데이터베이스 행은 노트로, 파�
       ["todo", "끝난 일"],
       ["bullet", "항목"],
       ["bullet", "하위 항목"],
-      ["p", "▸ 접기"],
-      ["p", "숨은 글"],
       ["p", "a | b"],
       ["p", "1 | 2"],
       ["p", "🖼 board.png"],
-      ["p", "🖼 missing.png (가져오지 못함: 다운로드 실패 (404))"],
+      ["p", "🖼 missing.png (가져오지 못함: 다운로드 실패 (503))"],
       ["p", "🖼 외부 그림 https://img.example/x.png"],
       ["p", "📄 하위 페이지"],
+      ["p", "📄 검색에 안 나오는 페이지"],
+      ["p", "🗂 자료"],
       ["code", "print(1)"],
       ["divider", ""],
       ["quote", "💡 주의"],
@@ -1043,14 +1082,27 @@ test("노션 가져오기: 페이지·데이터베이스 행은 노트로, 파�
     expect(a.blocks[3]).toMatchObject({ checked: true });
     const task = db.listTasks({}).find((t) => t.note_id === aId)!;
     expect(task).toMatchObject({ title: "과제 제출", due_date: "2026-11-20", due_time: "09:00", done: 0 });
-    // Database columns become lines at the top of the row's note.
+    // Database columns become lines at the top of the row's note, and files in a column are copied and attached.
     expect(db.getNote(rowId)!.blocks.map((b) => b.text)).toEqual(["날짜: 2026-11-21\n태그: 학교, 팀\n상태: 진행 중"]);
+    expect(db.getNote(row2Id)!.blocks.map((b) => b.text)).toEqual(["파일: slides.pdf, 외부 https://x.example/a"]);
+    expect(await attached(row2Id)).toEqual(["slides.pdf"]);
     expect(db.getNote(subId)!.blocks.map((b) => b.text)).toEqual(["하위 내용"]);
+    // The top level plus 30 nested levels come in, then a line says the rest is missing (the page is listed as partial above).
+    const deepNote = db.getNote(hiddenId)!.blocks.map((b) => b.text);
+    expect(deepNote.length).toBe(32);
+    expect(deepNote[30]).toBe("▸ 단계 31");
+    expect(deepNote[31]).toBe("(이 아래 더 깊이 들어간 내용은 가져오지 못했습니다)");
 
     // The Notion-hosted image is copied into the 파일함 and attached to its note.
-    const files = (await (await req(`/api/attachments?note=${aId}`, "GET")).json()) as { title: string; tags: string; drive_id: string; mime: string }[];
-    expect(files.map((f) => [f.title, f.tags, f.mime])).toEqual([["board.png", "노션", "image/png"]]);
-    expect(drive.get(files[0]!.drive_id)).toMatchObject({ name: "board.png", bytes: 8 });
+    const files = (await (await req(`/api/attachments?note=${aId}`, "GET")).json()) as { title: string; tags: string; drive_id: string }[];
+    expect(files.map((f) => [f.title, f.tags])).toEqual([["board.png", "노션"]]);
+    expect(drive.get(files[0]!.drive_id)).toMatchObject({ name: "board.png", bytes: "BYTES-/files/board.png".length });
+
+    // A file that failed is tried again on the next run even though Notion has no newer edit.
+    missingFails = false;
+    expect(await run()).toMatchObject({ status: "done", added: 0, updated: 1, unchanged: 4, files: 1, fileProblems: 0 });
+    expect(await attached(aId)).toEqual(["board.png", "missing.png"]);
+    expect(db.getNote(aId)!.blocks[9]!.text).toBe("🖼 missing.png");
 
     // Imported notes save normally from the editor. Editing one here...
     const row = db.getNote(rowId)!;
@@ -1058,23 +1110,24 @@ test("노션 가져오기: 페이지·데이터베이스 행은 노트로, 파�
     // ...and deleting one.
     await req(`/api/notes/${subId}`, "DELETE");
 
-    // Nothing new in Notion: nothing is read again or copied again.
+    // Nothing new in Notion: no page content is read again and nothing is copied again (fresh signatures don't count as new files).
     const calls = childCalls;
-    expect(await (await req("/api/notion/import", "POST", { token: "ntn_good" })).json()).toMatchObject({ status: "running" });
-    expect(await finish()).toMatchObject({ status: "done", added: 0, updated: 0, unchanged: 3, skipped: [], files: 0 });
+    expect(await run()).toMatchObject({ status: "done", total: 5, added: 0, updated: 0, unchanged: 5, skipped: [], files: 0 });
     expect(childCalls).toBe(calls);
 
-    // Edited in Notion: the page updates (same image, same task); the note edited here and the deleted one stay as they are.
-    for (const p of pages) p.last_edited_time = "2026-11-15T00:00:00.000Z";
-    children.get(A)!.push(blk("paragraph", { rich_text: [rt("추가한 글")] }));
-    const driveCount = drive.size;
-    await req("/api/notion/import", "POST", { token: "ntn_good" });
-    expect(await finish()).toMatchObject({ status: "done", added: 0, updated: 1, unchanged: 1, skipped: ["회의"], failed: [], files: 0 });
+    // Edited in Notion: the image is replaced and the other file block removed, so the note's import attachments follow;
+    // the note edited here and the deleted one stay as they are.
+    for (const p of [...pages, ...hidden]) p.last_edited_time = "2026-11-15T00:00:00.000Z";
+    const aKids = children.get(A)! as any[];
+    aKids.find((b) => b.image?.file?.name === "board.png").image.file.name = "board-v2.png";
+    aKids.splice(aKids.findIndex((b) => b.image?.file?.name === "missing.png"), 1);
+    aKids.push(blk("paragraph", { rich_text: [rt("추가한 글")] }));
+    expect(await run()).toMatchObject({ status: "done", added: 0, updated: 3, unchanged: 1, skipped: ["회의"], failed: [], files: 1, fileProblems: 0 });
     expect(db.getNote(aId)!.blocks.at(-1)).toMatchObject({ type: "p", text: "추가한 글" });
+    expect(await attached(aId)).toEqual(["board-v2.png"]);
+    expect(await attached(row2Id)).toEqual(["slides.pdf"]);
     expect(db.getNote(rowId)!.blocks.at(-1)).toMatchObject({ text: "사이트에서 쓴 글" });
     expect(db.getNote(subId)).toBeNull();
-    expect(drive.size).toBe(driveCount);
-    expect((await (await req(`/api/attachments?note=${aId}`, "GET")).json()) as unknown[]).toHaveLength(1);
     expect(db.listTasks({}).find((t) => t.note_id === aId)!.id).toBe(task.id);
   } finally {
     notion.stop(true);
