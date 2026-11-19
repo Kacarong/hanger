@@ -6,7 +6,7 @@ import { NOTE_MAX_BLOCKS, NOTE_MAX_TEXT, type Block, type Db, type FileRow } fro
 
 const NOTION_VERSION = "2022-06-28";
 const MAX_DEPTH = 8; // nested blocks deeper than this are left out
-export const NOTION_MAX_FILE = 100 * 1024 ** 2; // files are held in memory while copied to the 파일함
+export const NOTION_MAX_FILE = 50 * 1024 ** 2; // held in memory while copied to the 파일함 (the service has 512MB)
 
 // Notion's block and property shapes are many and loose, so most of them stay `any`.
 type RichText = { type: string; plain_text: string; href?: string | null; mention?: { type: string; date?: { start: string } } };
@@ -130,9 +130,9 @@ export async function importNotion(o: {
     if (had) return had;
     const res = await fetch(url);
     if (!res.ok) throw new Error(`다운로드 실패 (${res.status})`);
-    if (Number(res.headers.get("Content-Length")) > NOTION_MAX_FILE) throw new Error("100MB가 넘음");
+    if (Number(res.headers.get("Content-Length")) > NOTION_MAX_FILE) throw new Error("50MB가 넘음");
     const bytes = await res.blob();
-    if (bytes.size > NOTION_MAX_FILE) throw new Error("100MB가 넘음");
+    if (bytes.size > NOTION_MAX_FILE) throw new Error("50MB가 넘음");
     if (!bytes.size) throw new Error("빈 파일");
     const row = await o.saveFile(name, res.headers.get("Content-Type") || "application/octet-stream", bytes);
     db.setNotionFile(blockId, row.id);
