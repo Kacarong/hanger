@@ -135,6 +135,9 @@ export function openDb(path: string) {
   if (!notionCols.includes("kids")) db.exec("ALTER TABLE notion_pages ADD COLUMN kids TEXT NOT NULL DEFAULT '[]'");
   const notionFileCols = (db.query("PRAGMA table_info(notion_files)").all() as { name: string }[]).map((c) => c.name);
   if (!notionFileCols.includes("source")) db.exec("ALTER TABLE notion_files ADD COLUMN source TEXT NOT NULL DEFAULT ''");
+  // by_import = 1: the Notion import made this attachment, so a later import may take it off again. Ones the owner made stay.
+  const attachCols = (db.query("PRAGMA table_info(attachments)").all() as { name: string }[]).map((c) => c.name);
+  if (!attachCols.includes("by_import")) db.exec("ALTER TABLE attachments ADD COLUMN by_import INTEGER NOT NULL DEFAULT 0");
   const TASK_SELECT = `SELECT tasks.*, notes.title AS note_title,
     (SELECT COUNT(*) FROM attachments WHERE target = 'task' AND target_id = tasks.id) AS files
     FROM tasks LEFT JOIN notes ON notes.id = tasks.note_id`;
@@ -307,8 +310,8 @@ export function openDb(path: string) {
         .all(target, targetId) as AttachedFile[];
     },
     // Returns false when the file is already attached there.
-    addAttachment(target: AttachTarget, targetId: number, fileId: number): boolean {
-      return db.query("INSERT OR IGNORE INTO attachments (target, target_id, file_id) VALUES (?, ?, ?)").run(target, targetId, fileId).changes > 0;
+    addAttachment(target: AttachTarget, targetId: number, fileId: number, byImport = false): boolean {
+      return db.query("INSERT OR IGNORE INTO attachments (target, target_id, file_id, by_import) VALUES (?, ?, ?, ?)").run(target, targetId, fileId, byImport ? 1 : 0).changes > 0;
     },
     deleteAttachment(id: number): boolean {
       return db.query("DELETE FROM attachments WHERE id = ?").run(id).changes > 0;
@@ -331,11 +334,9 @@ export function openDb(path: string) {
     setNotionFile(key: string, fileId: number, source: string) {
       db.query("INSERT OR REPLACE INTO notion_files (block_id, file_id, source) VALUES (?, ?, ?)").run(key, fileId, source);
     },
-    // Attachments of a note that the Notion import made (the file is a Notion copy).
+    // Attachments of a note that the Notion import made (not the ones the owner attached, even of a Notion copy).
     notionAttachments(noteId: number): { id: number; file_id: number }[] {
-      return db
-        .query("SELECT attachments.id, attachments.file_id FROM attachments WHERE target = 'note' AND target_id = ? AND file_id IN (SELECT file_id FROM notion_files)")
-        .all(noteId) as { id: number; file_id: number }[];
+      return db.query("SELECT id, file_id FROM attachments WHERE target = 'note' AND target_id = ? AND by_import = 1").all(noteId) as { id: number; file_id: number }[];
     },
     deleteNote: db.transaction((id: number) => {
       db.query("DELETE FROM tasks WHERE note_id = ?").run(id);

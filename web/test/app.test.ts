@@ -961,6 +961,7 @@ test("노션 가져오기: 페이지·데이터베이스 행은 노트로, 파�
       if (url.pathname === "/v1/search" && req.method === "POST") {
         if (!throttled) return ((throttled = true), new Response("slow down", { status: 429, headers: { "Retry-After": "0" } }));
         const b = await req.json();
+        if (b.filter?.value === "database") return slice([], undefined, 1);
         if (b.filter?.value !== "page") return new Response("filter", { status: 400 });
         return slice(pages, b.start_cursor, 2);
       }
@@ -1132,5 +1133,140 @@ test("노션 가져오기: 페이지·데이터베이스 행은 노트로, 파�
   } finally {
     notion.stop(true);
     cleanup();
+  }
+});
+
+// A small fake Notion for the tests below: pages by id, what search returns, block children and database rows.
+async function notionSetup() {
+  const pages = new Map<string, Record<string, unknown>>();
+  const search = { page: [] as string[], database: [] as { id: string; title: string }[] };
+  const children = new Map<string, object[]>();
+  const rows = new Map<string, string[]>();
+  const server = Bun.serve({
+    port: 0,
+    async fetch(req) {
+      const url = new URL(req.url);
+      if (url.pathname.startsWith("/files/")) return new Response(`BYTES-${url.pathname}`);
+      if (req.headers.get("Authorization") !== "Bearer ntn_good") return Response.json({}, { status: 401 });
+      const all = (results: unknown[]) => Response.json({ results, has_more: false, next_cursor: null });
+      if (url.pathname === "/v1/search") {
+        const v = (await req.json()).filter.value as "page" | "database";
+        return all(v === "page" ? search.page.map((id) => pages.get(id)) : search.database.map((d) => ({ object: "database", id: d.id, title: [{ type: "text", plain_text: d.title }] })));
+      }
+      const pg = url.pathname.match(/^\/v1\/pages\/([^/]+)$/);
+      if (pg) return pages.has(pg[1]!) ? Response.json(pages.get(pg[1]!)) : new Response("no", { status: 404 });
+      const dq = url.pathname.match(/^\/v1\/databases\/([^/]+)\/query$/);
+      if (dq) return rows.has(dq[1]!) ? all(rows.get(dq[1]!)!.map((id) => pages.get(id))) : new Response("no", { status: 404 });
+      const ch = url.pathname.match(/^\/v1\/blocks\/([^/]+)\/children$/);
+      if (ch) return children.has(ch[1]!) ? all(children.get(ch[1]!)!) : new Response("no", { status: 404 });
+      return new Response("no", { status: 404 });
+    },
+  });
+  let n = 0;
+  const id = () => `11111111-0000-0000-0000-${String(++n).padStart(12, "0")}`;
+  const page = (title: string, edited = "2026-11-10T00:00:00.000Z") => {
+    const pid = id();
+    pages.set(pid, { object: "page", id: pid, created_time: "2026-11-01T00:00:00.000Z", last_edited_time: edited, properties: { 이름: { type: "title", title: [{ type: "text", plain_text: title }] } } });
+    children.set(pid, []);
+    return pid;
+  };
+  const block = (type: string, data: object, blockId = id(), kids?: object[]) => {
+    if (kids) children.set(blockId, kids);
+    return { object: "block", id: blockId, type, has_children: !!kids, [type]: data };
+  };
+  const { call, db, cleanup } = makeApp({ notionApi: server.url.toString().replace(/\/$/, "") });
+  const { cookie } = await login(call);
+  const req = (path: string, method: string, b?: object) => call(path, { method, cookie, headers: JSON_ORIGIN, body: b ? JSON.stringify(b) : undefined });
+  const run = async () => {
+    expect((await req("/api/notion/import", "POST", { token: "ntn_good" })).status).toBe(202);
+    for (let i = 0; i < 1000; i++) {
+      const j = (await (await req("/api/notion/import", "GET")).json()) as Record<string, unknown>;
+      if (j.status !== "running") return j;
+      await Bun.sleep(5);
+    }
+    throw new Error("가져오기가 끝나지 않음");
+  };
+  const noteOf = (title: string) => db.listNotes().find((x) => x.title === title);
+  const fileUrl = (name: string) => `${server.url}files/${name}?X-Amz-Signature=${++n}`;
+  return { pages, search, children, rows, page, block, id, fileUrl, db, req, run, noteOf, done: () => (server.stop(true), cleanup()) };
+}
+
+test("노션 가져오기: 통합에 바로 연결한 최상위 데이터베이스의 행도, 검색에 안 나와도 가져옴", async () => {
+  loginEmail = "owner@example.com";
+  const t = await notionSetup();
+  try {
+    const db = t.id();
+    const row = t.page("DB에만 있는 행");
+    t.rows.set(db, [row]);
+    t.search.database.push({ id: db, title: "메모 DB" }, { id: t.id(), title: "링크된 보기" }); // the second can't be queried
+    expect(await t.run()).toMatchObject({ status: "done", total: 1, added: 1, partial: ["🗂 링크된 보기"] });
+    expect(t.noteOf("DB에만 있는 행")).toBeDefined();
+  } finally {
+    t.done();
+  }
+});
+
+test("노션 가져오기: 사이트에서 고친 부모 아래에 노션에서 새로 만든 하위 페이지도 가져옴", async () => {
+  loginEmail = "owner@example.com";
+  const t = await notionSetup();
+  try {
+    const parent = t.page("부모");
+    t.search.page.push(parent);
+    expect(await t.run()).toMatchObject({ status: "done", added: 1 });
+    const note = t.db.getNote(t.noteOf("부모")!.id)!;
+    expect((await t.req(`/api/notes/${note.id}`, "PUT", { title: "부모", version: note.version, blocks: [{ id: "mine", type: "p", text: "여기서 고침" }] })).status).toBe(200);
+    // In Notion: a new child page, inside a toggle, that search does not return.
+    const child = t.page("새 하위 페이지");
+    t.children.set(parent, [t.block("toggle", { rich_text: [] }, t.id(), [t.block("child_page", { title: "새 하위 페이지" }, child)])]);
+    t.pages.get(parent)!.last_edited_time = "2026-11-15T00:00:00.000Z";
+    expect(await t.run()).toMatchObject({ status: "done", added: 1, skipped: ["부모"] });
+    expect(t.noteOf("새 하위 페이지")).toBeDefined();
+    expect(t.db.getNote(note.id)!.blocks.map((b) => b.text)).toEqual(["여기서 고침"]);
+  } finally {
+    t.done();
+  }
+});
+
+test("노션 가져오기: 노션 사본 파일이라도 직접 붙인 첨부는 다시 가져와도 떼지 않음", async () => {
+  loginEmail = "owner@example.com";
+  const t = await notionSetup();
+  try {
+    const a = t.page("그림 있는 페이지");
+    const b = t.page("다른 페이지");
+    t.search.page.push(a, b);
+    t.children.set(a, [t.block("image", { type: "file", file: { url: t.fileUrl("pic.png") }, caption: [], name: "pic.png" })]);
+    t.children.set(b, [t.block("paragraph", { rich_text: [] })]);
+    expect(await t.run()).toMatchObject({ status: "done", added: 2, files: 1 });
+    const aId = t.noteOf("그림 있는 페이지")!.id;
+    const bId = t.noteOf("다른 페이지")!.id;
+    const pic = t.db.listAttachments("note", aId)[0]!;
+    // The owner attaches that Notion copy to the other note from the 파일함.
+    expect((await t.req("/api/attachments", "POST", { note: bId, fileId: pic.id })).status).toBe(201);
+    // Both pages change in Notion; the image leaves page A.
+    for (const id of [a, b]) t.pages.get(id)!.last_edited_time = "2026-11-15T00:00:00.000Z";
+    t.children.set(a, []);
+    expect(await t.run()).toMatchObject({ status: "done", updated: 2 });
+    expect(t.db.listAttachments("note", aId)).toEqual([]); // the import's own attachment comes off
+    expect(t.db.listAttachments("note", bId).map((f) => f.title)).toEqual(["pic.png"]); // the owner's stays
+  } finally {
+    t.done();
+  }
+});
+
+test("노션 가져오기: 깊이 제한에 걸린 노트도 편집기에서 그대로 저장됨", async () => {
+  loginEmail = "owner@example.com";
+  const t = await notionSetup();
+  try {
+    const p = t.page("깊은 페이지");
+    t.search.page.push(p);
+    let deep: object = t.block("paragraph", { rich_text: [{ type: "text", plain_text: "바닥" }] });
+    for (let i = 0; i < 35; i++) deep = t.block("toggle", { rich_text: [] }, t.id(), [deep]);
+    t.children.set(p, [deep]);
+    expect(await t.run()).toMatchObject({ status: "done", added: 1, partial: ["깊은 페이지"] });
+    const note = t.db.getNote(t.noteOf("깊은 페이지")!.id)!;
+    expect(note.blocks.at(-1)!.text).toBe("(이 아래 더 깊이 들어간 내용은 가져오지 못했습니다)");
+    expect((await t.req(`/api/notes/${note.id}`, "PUT", { title: note.title, version: note.version, blocks: note.blocks })).status).toBe(200);
+  } finally {
+    t.done();
   }
 });

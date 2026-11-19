@@ -148,7 +148,6 @@ export async function importNotion(o: {
   async function convert(page: Page) {
     const blocks: Block[] = [];
     const files: FileRow[] = [];
-    const replaced: number[] = []; // older copies of files replaced in Notion
     const kids: string[] = [];
     const ids = new Set<string>();
     let size = 0;
@@ -159,10 +158,7 @@ export async function importNotion(o: {
     const copy = async (key: string, url: string, name: string) => {
       try {
         if (!url) throw new Error("노션 밖으로 받을 수 없는 파일");
-        const old = db.notionFile(key);
-        const row = await copyFile(key, url, name);
-        if (old && old.id !== row.id) replaced.push(old.id);
-        files.push(row);
+        files.push(await copyFile(key, url, name));
         return name;
       } catch (e) {
         job.fileProblems++;
@@ -297,7 +293,7 @@ export async function importNotion(o: {
         if (!b.has_children && source === b.id) continue;
         if (depth >= MAX_DEPTH) {
           incomplete = true;
-          push("p", "(이 아래 더 깊이 들어간 내용은 가져오지 못했습니다)", {}, b.id + "-deep");
+          push("p", "(이 아래 더 깊이 들어간 내용은 가져오지 못했습니다)", {}, b.id.replace(/-/g, "") + "-deep"); // block ids are at most 40 characters
           continue;
         }
         try {
@@ -309,7 +305,7 @@ export async function importNotion(o: {
       }
     }
     await walk(await all(`/v1/blocks/${page.id}/children`), 0);
-    return { blocks, files, replaced, kids, fileFailed, incomplete };
+    return { blocks, files, kids, fileFailed, incomplete };
   }
 
   // Search may miss pages (Notion says it is not exhaustive), so child pages and database rows
@@ -337,7 +333,22 @@ export async function importNotion(o: {
     }
   }
 
+  // The child pages and databases of a page, without reading anything else.
+  async function kidsOf(id: string, depth = 0): Promise<string[]> {
+    const out: string[] = [];
+    for (const b of (await all(`/v1/blocks/${id}/children`)) as NBlock[]) {
+      if (b.type === "child_page") out.push("page:" + b.id);
+      else if (b.type === "child_database") out.push("db:" + b.id);
+      else if (b.has_children && depth < MAX_DEPTH) out.push(...(await kidsOf(b.id, depth + 1)));
+    }
+    return out;
+  }
+
   for (const p of await all("/v1/search", { filter: { property: "object", value: "page" } })) enqueue(p);
+  // Databases shared with the integration directly (no shared parent page): their rows too.
+  for (const d of await all("/v1/search", { filter: { property: "object", value: "database" } })) {
+    if (!d.archived && !d.in_trash && !(await follow("db:" + d.id))) job.partial.push(`🗂 ${plain(d.title) || "제목 없는 데이터베이스"}`);
+  }
   for (let i = 0; i < queue.length; i++) {
     const page = queue[i]!;
     const title = pageTitle(page) || "제목 없음";
@@ -347,7 +358,10 @@ export async function importNotion(o: {
       let kids = had?.kids ?? [];
       let incomplete = false;
       if (had && (!note || had.edited === page.last_edited_time)) job.unchanged++;
-      else if (note && note.version !== had!.version) job.skipped.push(title);
+      else if (note && note.version !== had!.version) {
+        job.skipped.push(title);
+        kids = await kidsOf(page.id); // the note stays as edited here, but pages added under it in Notion still come in
+      }
       else {
         const c = await convert(page);
         // A checked box counts as done on the day the page was last edited, not on import day.
@@ -364,9 +378,8 @@ export async function importNotion(o: {
           db.setNoteTimes(id, sqlTime(page.created_time), sqlTime(page.last_edited_time));
           // Import attachments follow the page: a file removed or replaced in Notion comes off the note.
           const keep = new Set(c.files.map((f) => f.id));
-          const old = [...db.notionAttachments(id), ...db.listAttachments("note", id).filter((f) => c.replaced.includes(f.id)).map((f) => ({ id: f.attachment_id, file_id: f.id }))];
-          for (const a of old) if (!keep.has(a.file_id)) db.deleteAttachment(a.id);
-          for (const f of c.files) db.addAttachment("note", id, f.id);
+          for (const a of db.notionAttachments(id)) if (!keep.has(a.file_id)) db.deleteAttachment(a.id);
+          for (const f of c.files) db.addAttachment("note", id, f.id, true);
           db.setNotionPage(page.id, id, c.fileFailed ? "" : page.last_edited_time, db.getNote(id)!.version, c.kids);
         }
         kids = c.kids;
