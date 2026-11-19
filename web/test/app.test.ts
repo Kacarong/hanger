@@ -584,6 +584,44 @@ test("비밀번호 바꾸기: 비밀번호 로그인은 지금 비밀번호 확�
   }
 });
 
+test("비밀번호 경합: 검증·해싱 도중 비밀번호가 바뀌면 옛 요청은 로그인도 변경도 못 함", async () => {
+  const { call, db, cleanup } = makeApp();
+  try {
+    db.setSetting("password_hash", await Bun.password.hash("correct horse battery"));
+    const sid = (c: string) => decodeURIComponent(c.slice("sid=".length));
+    // Hash everything up front: the "other device" writes below must not await, or the pending request could finish first.
+    const [elsewhere, winner, winner2] = await Promise.all(["changed elsewhere 1", "winner from device b", "second winner value"].map((p) => Bun.password.hash(p)));
+
+    // Login with the old password is still verifying when the password changes.
+    const pending = passwordLogin(call, "correct horse battery"); // runs until its first await
+    db.setSetting("password_hash", elsewhere);
+    const late = await pending;
+    expect(late.res.status).toBe(401);
+    expect(late.cookie).toBeUndefined();
+
+    // A change is hashing when another device changes the password and logs this session out.
+    db.setSetting("password_hash", await Bun.password.hash("correct horse battery"));
+    const a = (await passwordLogin(call, "correct horse battery")).cookie!;
+    const b = (await passwordLogin(call, "correct horse battery")).cookie!;
+    const change = (cookie: string, body: object) => call("/api/password", { method: "POST", cookie, headers: JSON_ORIGIN, body: JSON.stringify(body) });
+    const stale = change(a, { current: "correct horse battery", password: "stale request value" });
+    db.setSetting("password_hash", winner); // what device b's finished change does
+    db.deleteOtherSessions(sid(b));
+    expect((await stale).status).toBe(401);
+    expect(db.getSetting("password_hash")).toBe(winner);
+    expect((await call("/api/tasks", { cookie: b })).status).toBe(200); // b was not logged out by the stale request
+
+    // Same race while this session stays valid: refused because the password moved on.
+    const c = (await passwordLogin(call, "winner from device b")).cookie!;
+    const stale2 = change(c, { current: "winner from device b", password: "stale request value" });
+    db.setSetting("password_hash", winner2);
+    expect((await stale2).status).toBe(409);
+    expect(db.getSetting("password_hash")).toBe(winner2);
+  } finally {
+    cleanup();
+  }
+});
+
 test("보안 헤더: CSP·프레임 금지·nosniff·HSTS, 개인 데이터는 캐시 금지", async () => {
   const { call, cleanup } = makeApp({ googleEnabled: false });
   try {

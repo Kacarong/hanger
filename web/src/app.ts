@@ -259,16 +259,21 @@ ${items.length ? `<section class="index" id="index"><h2 class="section-title rev
     // Changing the password logs out every other session. A password session must prove the
     // current password; a Google session already proved who it is.
     if (path === "/api/password" && method === "POST") {
+      const hashBefore = db.getSetting("password_hash"); // read before any await, see the re-check below
       const b = await body(req);
       const next = typeof b.password === "string" ? b.password : "";
       const problem = passwordProblem(next);
       if (problem) return json({ error: problem }, 400);
       if (s.subject === "password") {
-        const hash = db.getSetting("password_hash");
         const current = typeof b.current === "string" ? b.current : "";
-        if (!hash || !current || !(await Bun.password.verify(current, hash))) return json({ error: "지금 비밀번호가 틀렸습니다" }, 403);
+        if (!hashBefore || !current || !(await Bun.password.verify(current, hashBefore))) return json({ error: "지금 비밀번호가 틀렸습니다" }, 403);
       }
-      db.setSetting("password_hash", await Bun.password.hash(next));
+      const newHash = await Bun.password.hash(next);
+      // While we were hashing, another device may have changed the password and logged this one out.
+      // Check again and write with no await in between, so a stale request can't undo that change.
+      if (!db.getSession(s.id)) return json({ error: "로그인이 풀렸습니다. 다시 로그인해 주세요." }, 401);
+      if (db.getSetting("password_hash") !== hashBefore) return json({ error: "다른 곳에서 비밀번호가 방금 바뀌었습니다. 다시 시도해 주세요." }, 409);
+      db.setSetting("password_hash", newHash);
       db.deleteOtherSessions(s.id);
       return json({ ok: true });
     }
@@ -473,6 +478,8 @@ ${items.length ? `<section class="index" id="index"><h2 class="section-title rev
         const how = cfg.googleEnabled ? "구글 계정으로 로그인한 뒤 왼쪽 아래 \"비밀번호 바꾸기\"에서" : "서버에서 bun run set-password로";
         return json({ error: `이 비밀번호는 안전하지 않아 더는 쓸 수 없습니다. ${how} 새 비밀번호를 정해 주세요.` }, 403);
       }
+      // The password may have been changed while we were verifying; the old one must not open a session.
+      if (db.getSetting("password_hash") !== hash) return json({ error: "비밀번호가 방금 바뀌었습니다. 새 비밀번호로 로그인해 주세요." }, 401);
       const i = loginFailures.indexOf(t);
       if (i >= 0) loginFailures.splice(i, 1); // it succeeded after all
       const headers = new Headers();
