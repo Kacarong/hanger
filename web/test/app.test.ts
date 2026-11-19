@@ -16,6 +16,7 @@ const FULL_SCOPE = "openid email https://www.googleapis.com/auth/drive.file http
 let grantedScope = FULL_SCOPE; // what the fake consent screen lets through
 let lastPrompt: string | null = null; // like Google, a refresh token comes only from a consent screen
 let calendarFails = false;
+let grantRevoked = false; // the refresh token was revoked or expired at Google
 const eventQueries: URLSearchParams[] = [];
 let nextId = 1;
 let fake: ReturnType<typeof Bun.serve>;
@@ -48,6 +49,7 @@ beforeAll(() => {
       if (p === "/token") {
         const form = new URLSearchParams(await req.text());
         if (form.get("grant_type") === "authorization_code" && form.get("code") !== "good-code") return new Response("bad code", { status: 400 });
+        if (form.get("grant_type") === "refresh_token" && grantRevoked) return Response.json({ error: "invalid_grant" }, { status: 400 });
         const refresh = form.get("grant_type") === "authorization_code" && lastPrompt === "consent" ? { refresh_token: "rt" } : {};
         return Response.json({ access_token: "at", expires_in: 3600, ...refresh, id_token: idToken(loginEmail), scope: grantedScope });
       }
@@ -180,8 +182,10 @@ async function login(call: ReturnType<typeof makeApp>["call"], code = "good-code
   const redirect = new URL(start.headers.get("Location")!);
   lastPrompt = redirect.searchParams.get("prompt");
   // The full grant only when none is saved yet; after that just "who is this", so Google skips its unverified-app warning.
-  expect(redirect.searchParams.get("scope")).toBe(lastPrompt === "consent" ? FULL_SCOPE : "openid email");
-  expect(redirect.searchParams.get("access_type")).toBe("offline");
+  const full = lastPrompt === "consent";
+  expect(redirect.searchParams.get("scope")).toBe(full ? FULL_SCOPE : "openid email");
+  expect(redirect.searchParams.get("access_type")).toBe(full ? "offline" : "online");
+  expect(redirect.searchParams.get("include_granted_scopes")).toBe(full ? "true" : null); // else the saved calendar grant comes back in
   expect(redirect.searchParams.get("login_hint")).toBe("owner@example.com"); // Google picks the owner account by itself
   const state = redirect.searchParams.get("state")!;
   const res = await call(`/auth/callback?state=${state}&code=${code}`, { cookie: `oauth_state_${state}=1` });
@@ -544,6 +548,24 @@ test("캘린더: 권한 없으면 다시 동의 요청, 구글 일정 + 할 일�
   } finally {
     grantedScope = FULL_SCOPE;
     calendarFails = false;
+    cleanup();
+  }
+});
+
+test("구글에서 권한이 끊기면 다음 로그인에서 전체 권한을 다시 요청", async () => {
+  const { call, db, cleanup } = makeApp();
+  try {
+    db.setSetting("password_hash", await Bun.password.hash("correct horse battery"));
+    db.setSetting("refresh_token", "old-rt");
+    db.setSetting("granted_scopes", FULL_SCOPE);
+    expect(new URL((await call("/auth/login")).headers.get("Location")!).searchParams.get("prompt")).toBeNull();
+    const { cookie } = await passwordLogin(call, "correct horse battery");
+    grantRevoked = true;
+    const r = (await (await call("/api/calendar?from=2026-11-15&to=2026-11-30", { cookie })).json()) as Record<string, unknown>;
+    expect(r.google).toBe("error");
+    expect(new URL((await call("/auth/login")).headers.get("Location")!).searchParams.get("prompt")).toBe("consent");
+  } finally {
+    grantRevoked = false;
     cleanup();
   }
 });

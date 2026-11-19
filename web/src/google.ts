@@ -62,12 +62,13 @@ export function createGoogle(cfg: GoogleConfig, db: Db) {
       client_id: cfg.clientId,
       redirect_uri: cfg.redirectUri,
       response_type: "code",
-      scope: needGrant ? SCOPES : LOGIN_SCOPES,
-      access_type: "offline",
-      include_granted_scopes: "true",
       state,
       ...(loginHint ? { login_hint: loginHint } : {}),
-      ...(needGrant ? { prompt: "consent" } : {}),
+      // A plain sign-in must not pull the saved calendar grant back in (include_granted_scopes),
+      // or Google treats it as a sensitive request again. Its token is thrown away anyway.
+      ...(needGrant
+        ? { scope: SCOPES, access_type: "offline", include_granted_scopes: "true", prompt: "consent" }
+        : { scope: LOGIN_SCOPES, access_type: "online" }),
     }).toString();
     return u.toString();
   }
@@ -106,7 +107,14 @@ export function createGoogle(cfg: GoogleConfig, db: Db) {
     if (accessToken && accessToken.expiresAt > Date.now()) return accessToken.token;
     const refresh = db.getSetting("refresh_token");
     if (!refresh) throw new GoogleError("구글 드라이브가 연결되지 않았습니다. 다시 로그인해 주세요.", 401);
-    const t = await tokenRequest({ refresh_token: refresh, grant_type: "refresh_token" });
+    let t;
+    try {
+      t = await tokenRequest({ refresh_token: refresh, grant_type: "refresh_token" });
+    } catch (e) {
+      // Revoked or expired grant: plain sign-ins don't renew it, so make the next sign-in ask for the full grant.
+      if (e instanceof GoogleError && e.message.includes("invalid_grant")) db.setSetting("granted_scopes", "");
+      throw e;
+    }
     saveTokens(t);
     return t.access_token;
   }
