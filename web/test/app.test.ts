@@ -1,3 +1,4 @@
+import { Database } from "bun:sqlite";
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -255,9 +256,25 @@ test("관리자 로그인 → 업로드 → 공유/공개 → 공개 페이지 �
     expect(await (await call("/")).text()).not.toContain("작품.png");
     expect((await call(`/thumb/${row.id}`)).status).toBe(404);
 
+    // 개인용: only in the owner's portfolio page, not on kacarong.kr, and Drive sharing stays off.
+    const toPortfolio = (portfolio: string) =>
+      call(`/api/files/${row.id}/portfolio`, { method: "POST", cookie, headers: JSON_ORIGIN, body: JSON.stringify({ portfolio }) });
+    expect(await (await toPortfolio("private")).json()).toMatchObject({ shared: 0, public: 0, portfolio: 1 });
+    expect(drive.get(driveFile.id)!.anyone).toBe(false);
+    expect(await (await call("/")).text()).not.toContain("작품.png");
+    expect((await call(`/thumb/${row.id}`)).status).toBe(404);
+    const minePage = async () => (await call("/admin/portfolio", { cookie })).text();
+    expect(await minePage()).toMatch(/작품\.png[\s\S]*<span class="chip">개인용<\/span>/);
+    const anon = await call("/admin/portfolio");
+    expect(anon.status).toBe(302);
+    expect(anon.headers.get("Location")).toBe("/admin");
+    expect((await call("/admin/portfolio", { cookie })).headers.get("Cache-Control")).toBe("no-store");
+    expect((await toPortfolio("everyone")).status).toBe(400);
+
     // Publishing also turns on anyone-with-link sharing on Drive.
-    const pub = await call(`/api/files/${row.id}/public`, { method: "POST", cookie, headers: JSON_ORIGIN, body: JSON.stringify({ public: true }) });
-    expect(await pub.json()).toMatchObject({ shared: 1, public: 1 });
+    const pub = await toPortfolio("public");
+    expect(await pub.json()).toMatchObject({ shared: 1, public: 1, portfolio: 1 });
+    expect(await minePage()).not.toContain("개인용</span>");
     expect(drive.get(driveFile.id)!.anyone).toBe(true);
     const page = await (await call("/")).text();
     expect(page).toContain("작품.png");
@@ -266,11 +283,16 @@ test("관리자 로그인 → 업로드 → 공유/공개 → 공개 페이지 �
     expect(thumb.status).toBe(200);
     expect(await thumb.text()).toBe("PNGDATA");
 
-    // Turning sharing off makes it private on Drive and drops it from the public page.
+    // Turning sharing off makes it private on Drive and drops it from the public page; it stays in the owner's portfolio.
     const off = await call(`/api/files/${row.id}/share`, { method: "POST", cookie, headers: JSON_ORIGIN, body: JSON.stringify({ shared: false }) });
-    expect(await off.json()).toMatchObject({ shared: 0, public: 0 });
+    expect(await off.json()).toMatchObject({ shared: 0, public: 0, portfolio: 1 });
     expect(drive.get(driveFile.id)!.anyone).toBe(false);
     expect(await (await call("/")).text()).not.toContain("작품.png");
+    expect(await minePage()).toContain("개인용</span>");
+
+    // 없음: out of the owner's portfolio too.
+    expect(await (await toPortfolio("none")).json()).toMatchObject({ public: 0, portfolio: 0 });
+    expect(await minePage()).not.toContain("작품.png");
 
     // Delete moves the Drive file to trash.
     expect((await call(`/api/files/${row.id}`, { method: "DELETE", cookie, headers: JSON_ORIGIN })).status).toBe(200);
@@ -1314,5 +1336,24 @@ test("노션 가져오기: 노션의 상위·하위 페이지 구조를 노트 �
     expect(parentOf("토글 안 하위")).toBe("TODO LIST");
   } finally {
     t.done();
+  }
+});
+
+test("포트폴리오 칸이 없던 DB를 열면 공개 중이던 파일은 포트폴리오에 들어감", () => {
+  const dir = mkdtempSync(join(tmpdir(), "folio-test-"));
+  try {
+    const path = join(dir, "old.db");
+    const old = openDb(path);
+    const pub = old.insertFile({ drive_id: "p1", name: "p", title: "p", mime: "", size: 1, category: "기타", tags: "", note: "", web_view_link: "", web_content_link: "" });
+    const plain = old.insertFile({ drive_id: "p2", name: "q", title: "q", mime: "", size: 1, category: "기타", tags: "", note: "", web_view_link: "", web_content_link: "" });
+    old.updateFile(pub.id, { shared: 1, public: 1 });
+    const raw = new Database(path);
+    raw.exec("ALTER TABLE files DROP COLUMN portfolio"); // back to the schema before the column existed
+    raw.close();
+    const db = openDb(path);
+    expect(db.getFile(pub.id)!.portfolio).toBe(1);
+    expect(db.getFile(plain.id)!.portfolio).toBe(0);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });

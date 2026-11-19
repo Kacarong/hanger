@@ -35,7 +35,8 @@
 
     <div class="nav-group">보관</div>
     <a class="nav-item" href="#files" data-tab="files"><span data-icon="folder"></span>클라우드</a>
-    <a class="nav-item" href="/" target="_blank"><span data-icon="globe"></span>포트폴리오 보기</a>
+    <a class="nav-item" href="/admin/portfolio" target="_blank"><span data-icon="globe"></span>내 포트폴리오</a>
+    <a class="nav-item" href="/" target="_blank"><span data-icon="globe"></span>공개 포트폴리오</a>
 
     <div class="side-foot">
       <button class="nav-item btn ghost" id="change-password" style="border:0;justify-content:flex-start"><span data-icon="key"></span>비밀번호 바꾸기</button>
@@ -101,7 +102,7 @@
           <span class="grow"></span>
           <div class="seg" id="filter-category"><button data-v="" class="on">전체</button></div>
         </div>
-        <table class="table"><thead><tr><th class="w1"></th><th>제목</th><th class="hide-sm">분류</th><th class="hide-sm">태그</th><th class="num">크기</th><th>링크 공유</th><th>공개</th><th></th></tr></thead>
+        <table class="table"><thead><tr><th class="w1"></th><th>제목</th><th class="hide-sm">분류</th><th class="hide-sm">태그</th><th class="num">크기</th><th>링크 공유</th><th>포트폴리오</th><th></th></tr></thead>
           <tbody id="list"></tbody></table>
       </div>
 
@@ -145,7 +146,7 @@
     <label>제목<input class="input" id="file-title" required></label>
     <label>분류<select class="input" id="file-category"></select></label>
     <label>태그 (쉼표로 구분)<input class="input" id="file-tags"></label>
-    <label>메모 (공개 페이지에 설명으로 나옵니다)<textarea class="input" id="file-note"></textarea></label>
+    <label>메모 (포트폴리오에 설명으로 나옵니다)<textarea class="input" id="file-note"></textarea></label>
     <div class="foot"><button class="btn" type="button" data-close>취소</button><button class="btn primary" value="ok">저장</button></div>
   </form>
 </dialog>

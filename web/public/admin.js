@@ -311,7 +311,8 @@ function openFileDialog(f) {
 async function loadQuota(files) {
   const shared = files.filter((f) => f.shared).length;
   const pub = files.filter((f) => f.public).length;
-  const cards = [stat("파일", String(files.length), "이 조건에 맞는 파일"), stat("공개 중", String(pub), `링크 공유 ${shared}개`)];
+  const mine = files.filter((f) => f.portfolio && !f.public).length;
+  const cards = [stat("파일", String(files.length), "이 조건에 맞는 파일"), stat("포트폴리오", String(pub + mine), `공개 ${pub} · 개인용 ${mine} · 링크 공유 ${shared}`)];
   if (me.driveConnected) {
     try {
       const q = await call("/api/quota");
@@ -331,7 +332,13 @@ async function loadList() {
   const files = await call("/api/files?" + params);
   loadQuota(files);
   const rows = files.map((f) => {
-    const toggle = (kind, on) => call(`/api/files/${f.id}/${kind}`, { method: "POST", body: { [kind === "share" ? "shared" : "public"]: on } }).then(loadList, showError);
+    const share = (on) => call(`/api/files/${f.id}/share`, { method: "POST", body: { shared: on } }).then(loadList, showError);
+    const portfolio = el(
+      "select",
+      { className: "input", title: "개인용: 내 포트폴리오에만 · 공개: kacarong.kr에도", onchange() { call(`/api/files/${f.id}/portfolio`, { method: "POST", body: { portfolio: this.value } }).then(loadList, (e) => (showError(e), loadList())); } },
+      ...[["none", "없음"], ["private", "개인용"], ["public", "공개"]].map(([value, textContent]) => el("option", { value, textContent })),
+    );
+    portfolio.value = f.public ? "public" : f.portfolio ? "private" : "none";
     const sw = (checked, onchange) => el("label", { className: "switch" }, el("input", { type: "checkbox", checked, onchange }), el("span"));
     return el(
       "tr",
@@ -341,8 +348,8 @@ async function loadList() {
       el("td", { className: "hide-sm" }, pill(f.category, f.category === "포트폴리오" ? "blue" : "gray")),
       el("td", { className: "hide-sm" }, ...f.tags.split(",").map((t) => t.trim()).filter(Boolean).map((t) => el("span", { className: "tag", textContent: t }))),
       el("td", { className: "num muted", textContent: sizeText(f.size) }),
-      el("td", {}, sw(!!f.shared, function () { toggle("share", this.checked); })),
-      el("td", {}, sw(!!f.public, function () { toggle("public", this.checked); })),
+      el("td", {}, sw(!!f.shared, function () { share(this.checked); })),
+      el("td", {}, portfolio),
       el(
         "td",
         { className: "actions" },

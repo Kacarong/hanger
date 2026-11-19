@@ -11,7 +11,8 @@ export type FileRow = {
   tags: string;
   note: string;
   shared: number;
-  public: number;
+  public: number; // on the public page (kacarong.kr); always also portfolio = 1
+  portfolio: number; // in the owner's own portfolio (/admin/portfolio)
   web_view_link: string;
   web_content_link: string;
   created_at: string;
@@ -140,6 +141,9 @@ export function openDb(path: string) {
   // by_import = 1: the Notion import made this attachment, so a later import may take it off again. Ones the owner made stay.
   const attachCols = (db.query("PRAGMA table_info(attachments)").all() as { name: string }[]).map((c) => c.name);
   if (!attachCols.includes("by_import")) db.exec("ALTER TABLE attachments ADD COLUMN by_import INTEGER NOT NULL DEFAULT 0");
+  // portfolio = 1: in the private portfolio. Files already on the public page were portfolio pieces before this column.
+  const fileCols = (db.query("PRAGMA table_info(files)").all() as { name: string }[]).map((c) => c.name);
+  if (!fileCols.includes("portfolio")) db.exec("ALTER TABLE files ADD COLUMN portfolio INTEGER NOT NULL DEFAULT 0; UPDATE files SET portfolio = 1 WHERE public = 1;");
   const TASK_SELECT = `SELECT tasks.*, notes.title AS note_title,
     (SELECT COUNT(*) FROM attachments WHERE target = 'task' AND target_id = tasks.id) AS files
     FROM tasks LEFT JOIN notes ON notes.id = tasks.note_id`;
@@ -198,10 +202,11 @@ export function openDb(path: string) {
     deleteSession(id: string) {
       db.query("DELETE FROM sessions WHERE id = ?").run(id);
     },
-    listFiles(opts: { q?: string; category?: string; publicOnly?: boolean }): FileRow[] {
+    listFiles(opts: { q?: string; category?: string; publicOnly?: boolean; portfolioOnly?: boolean }): FileRow[] {
       const where: string[] = [];
       const args: string[] = [];
       if (opts.publicOnly) where.push("public = 1");
+      if (opts.portfolioOnly) where.push("portfolio = 1");
       if (opts.category) {
         where.push("category = ?");
         args.push(opts.category);
@@ -220,7 +225,7 @@ export function openDb(path: string) {
     getFileByDriveId(driveId: string): FileRow | null {
       return db.query("SELECT * FROM files WHERE drive_id = ?").get(driveId) as FileRow | null;
     },
-    insertFile(f: Omit<FileRow, "id" | "created_at" | "shared" | "public">): FileRow {
+    insertFile(f: Omit<FileRow, "id" | "created_at" | "shared" | "public" | "portfolio">): FileRow {
       return db
         .query(
           `INSERT INTO files (drive_id, name, title, mime, size, category, tags, note, web_view_link, web_content_link)
@@ -228,7 +233,7 @@ export function openDb(path: string) {
         )
         .get(f.drive_id, f.name, f.title, f.mime, f.size, f.category, f.tags, f.note, f.web_view_link, f.web_content_link) as FileRow;
     },
-    updateFile(id: number, patch: Partial<Pick<FileRow, "title" | "category" | "tags" | "note" | "shared" | "public">>) {
+    updateFile(id: number, patch: Partial<Pick<FileRow, "title" | "category" | "tags" | "note" | "shared" | "public" | "portfolio">>) {
       const keys = Object.keys(patch) as (keyof typeof patch)[];
       if (!keys.length) return;
       const sets = keys.map((k) => `${k} = ?`).join(", ");

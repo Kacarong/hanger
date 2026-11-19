@@ -194,11 +194,12 @@ export function createApp(cfg: AppConfig, db: Db, google: Google) {
     return out;
   }
 
-  async function renderPublic(): Promise<Response> {
-    const items = db.listFiles({ publicOnly: true });
+  // mine = the owner's own portfolio (/admin/portfolio): public and private pieces, private ones marked 개인용.
+  async function renderPublic(mine = false): Promise<Response> {
+    const items = db.listFiles(mine ? { portfolioOnly: true } : { publicOnly: true });
     const num = (i: number) => String(i + 1).padStart(2, "0");
     const chips = (f: FileRow) =>
-      [f.category, ...f.tags.split(",")]
+      [mine && !f.public ? "개인용" : "", f.category, ...f.tags.split(",")]
         .map((t) => t.trim())
         .filter(Boolean)
         .map((t) => `<span class="chip">${escapeHtml(t)}</span>`)
@@ -222,8 +223,9 @@ ${f.note ? `<p class="work-note">${escapeHtml(f.note)}</p>` : ""}</div>
       )
       .join("\n");
     const html = `<!doctype html><html lang="ko"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1"><title>kacarong — 포트폴리오</title>
-<link rel="stylesheet" href="/static/site.css?v=${v}"></head><body>
+<meta name="viewport" content="width=device-width, initial-scale=1"><title>kacarong — ${mine ? "내 포트폴리오" : "포트폴리오"}</title>
+${mine ? `<meta name="robots" content="noindex">` : ""}<link rel="stylesheet" href="/static/site.css?v=${v}"></head><body>
+${mine ? `<p class="mine-bar">내 포트폴리오 — 나만 보는 화면입니다. 개인용 표시가 없는 것만 kacarong.kr에 나옵니다. <a href="/admin#files">작업공간으로</a></p>` : ""}
 <header class="top">
 <a class="brand" href="/">KACARONG <span class="spark">✳</span></a>
 <nav><a href="#work">WORK</a><a href="#index">INDEX</a><a href="#contact">CONTACT</a></nav>
@@ -237,7 +239,7 @@ ${f.note ? `<p class="work-note">${escapeHtml(f.note)}</p>` : ""}</div>
 </section>
 <section class="works" id="work">
 <h2 class="section-title reveal">SELECTED<br>WORK <sup>${items.length}</sup></h2>
-${items.length ? works : `<p class="empty reveal">아직 공개된 작업이 없습니다.</p>`}
+${items.length ? works : `<p class="empty reveal">${mine ? "아직 포트폴리오에 넣은 작업이 없습니다. 클라우드에서 파일의 포트폴리오를 \"개인용\"이나 \"공개\"로 바꿔 보세요." : "아직 공개된 작업이 없습니다."}</p>`}
 </section>
 ${items.length ? `<section class="index" id="index"><h2 class="section-title reveal">INDEX</h2><ul>${index}</ul></section>` : ""}
 <footer class="foot" id="contact">
@@ -521,7 +523,7 @@ ${items.length ? `<section class="index" id="index"><h2 class="section-title rev
       return json(row, 201);
     }
 
-    const m = path.match(/^\/api\/files\/(\d+)(\/share|\/public)?$/);
+    const m = path.match(/^\/api\/files\/(\d+)(\/share|\/portfolio)?$/);
     if (m) {
       const f = db.getFile(Number(m[1]));
       if (!f) return json({ error: "파일을 찾을 수 없습니다" }, 404);
@@ -557,10 +559,12 @@ ${items.length ? `<section class="index" id="index"><h2 class="section-title rev
         return json(db.getFile(f.id));
       }
 
-      if (action === "/public" && method === "POST") {
-        const on = (await body(req)).public === true;
-        if (on && !f.shared) await google.share(f.drive_id); // public page links need anyone-with-link access
-        db.updateFile(f.id, on ? { shared: 1, public: 1 } : { public: 0 });
+      // none = out of the portfolio, private = only in /admin/portfolio, public = also on kacarong.kr
+      if (action === "/portfolio" && method === "POST") {
+        const to = (await body(req)).portfolio;
+        if (to !== "none" && to !== "private" && to !== "public") return json({ error: "portfolio는 none, private, public 중 하나" }, 400);
+        if (to === "public" && !f.shared) await google.share(f.drive_id); // public page links need anyone-with-link access
+        db.updateFile(f.id, to === "public" ? { shared: 1, public: 1, portfolio: 1 } : { public: 0, portfolio: to === "private" ? 1 : 0 });
         return json(db.getFile(f.id));
       }
     }
@@ -573,6 +577,7 @@ ${items.length ? `<section class="index" id="index"><h2 class="section-title rev
     const path = url.pathname;
 
     if (path === "/" && req.method === "GET") return renderPublic();
+    if (path === "/admin/portfolio" && req.method === "GET") return isAdmin(req) ? renderPublic(true) : new Response(null, { status: 302, headers: { Location: "/admin" } });
     if (path === "/admin" && req.method === "GET") return new Response(adminHtml, { headers: { "Content-Type": "text/html; charset=utf-8" } });
     if (path === "/privacy" && req.method === "GET") return new Response(Bun.file(join(PUBLIC_DIR, "privacy.html")));
 
@@ -677,7 +682,7 @@ ${items.length ? `<section class="index" id="index"><h2 class="section-title rev
     h.set("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
     if (secure) h.set("Strict-Transport-Security", "max-age=31536000");
     // Private pages and data must never sit in Cloudflare's or the browser's cache.
-    if (path === "/admin" || path.startsWith("/api/") || path.startsWith("/auth/")) h.set("Cache-Control", "no-store");
+    if (path === "/admin" || path.startsWith("/admin/") || path.startsWith("/api/") || path.startsWith("/auth/")) h.set("Cache-Control", "no-store");
     return res;
   }
 
