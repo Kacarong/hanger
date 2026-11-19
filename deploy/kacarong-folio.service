@@ -8,8 +8,25 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory=/home/claude/kacarong-folio/web
 EnvironmentFile=/home/claude/.config/kacarong-folio/env
-Environment=TMPDIR=/home/claude/.tmp
-ExecStart=/home/claude/.bun/bin/bun src/main.ts
+# 이 서버의 다른 파일(봇 로그인, SSH 키, secrets.json 등)은 사이트가 뚫려도 못 읽게 가둔다.
+# 사용자 유닛이라 ProtectHome 같은 마운트 격리는 안 되므로(AppArmor가 막음) 커널 Landlock을 setpriv로 건다.
+# 읽기: 시스템 파일, bun, 코드. 쓰기: 데이터 폴더(DATA_DIR)뿐. /run(도커 소켓 등)은 DNS 설정 파일 말고 안 보인다.
+# 유닉스 소켓도 못 만들게 인터넷 주소 계열만 허용한다. 경로를 바꾸면 아래 규칙도 같이 바꿀 것.
+Environment=BUN_RUNTIME_TRANSPILER_CACHE_PATH=0
+NoNewPrivileges=yes
+RestrictAddressFamilies=AF_INET AF_INET6
+UMask=0077
+ExecStart=/usr/bin/setpriv --landlock-access fs \
+  --landlock-rule path-beneath:read-file,read-dir,execute:/usr \
+  --landlock-rule path-beneath:read-file,read-dir:/etc \
+  --landlock-rule path-beneath:read-file,read-dir:/proc \
+  --landlock-rule path-beneath:read-file,read-dir:/sys \
+  --landlock-rule path-beneath:read-file:/run/systemd/resolve \
+  --landlock-rule path-beneath:read-file,write-file:/dev \
+  --landlock-rule path-beneath:read-file,execute:/home/claude/.bun/bin \
+  --landlock-rule path-beneath:read-file,read-dir:/home/claude/kacarong-folio \
+  --landlock-rule path-beneath:read-file,read-dir,write-file,truncate,make-reg,make-dir,remove-file:/home/claude/.local/share/kacarong-folio \
+  /home/claude/.bun/bin/bun src/main.ts
 Restart=always
 RestartSec=5
 MemoryMax=512M
