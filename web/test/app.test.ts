@@ -622,6 +622,14 @@ test("정적 파일 주소에 버전이 붙고, 그 주소로 파일이 열림",
     expect(admin).toMatch(/href="\/static\/admin\.css\?v=[0-9a-f]{10}"/);
     expect(await (await call(js!)).text()).toContain("loadCalendar");
     expect(await (await call("/")).text()).toMatch(/\/static\/site\.css\?v=[0-9a-f]{10}"[\s\S]*\/static\/site\.js\?v=[0-9a-f]{10}"/);
+    // CSS가 가리키는 웹폰트가 실제로 열리고, nosniff 아래에서도 쓰이도록 폰트 형식으로 나간다.
+    const fonts = [...(await (await call("/static/admin.css")).text()).matchAll(/url\("(\/static\/[\w.-]+\.woff2)"\)/g)].map((m) => m[1]);
+    expect(fonts.length).toBe(2);
+    for (const f of fonts) {
+      const res = await call(f);
+      expect(res.status).toBe(200);
+      expect(res.headers.get("Content-Type")).toBe("font/woff2");
+    }
   } finally {
     cleanup();
   }
