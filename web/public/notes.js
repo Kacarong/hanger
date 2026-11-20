@@ -217,6 +217,8 @@ export function merge3(base, local, remote) {
 }
 
 // opts: { pickFile(onFile), openNote(id) }
+const FOLD_ICON = '<svg viewBox="0 0 24 24"><path d="m9 5 7 7-7 7"/></svg>';
+
 export function createEditor(root, onChange, opts = {}) {
   let blocks = [emptyBlock()];
   let links = {}; // 노션 페이지 id → { id: 노트 id, title }
@@ -387,7 +389,7 @@ export function createEditor(root, onChange, opts = {}) {
       btn("S", "취소선 (Ctrl+Shift+S)", f("s"), "r-s"),
       btn("</>", "코드 (Ctrl+E)", f("c")),
       btn("링크", "링크 (Ctrl+K)", f("href")),
-      btn("색 ▾", "글자색·배경색", () => (palette.hidden = !palette.hidden)),
+      btn("색", "글자색·배경색", () => (palette.hidden = !palette.hidden), "fmt-menu"),
       palette,
     );
     box.onmousedown = (ev) => ev.preventDefault(); // 고른 범위를 지킨다
@@ -443,7 +445,7 @@ export function createEditor(root, onChange, opts = {}) {
     } else if (b.type === "number") {
       row.append(el("span", { className: "blk-marker", textContent: `${num}.` }));
     } else if (foldable(b)) {
-      const t = el("button", { type: "button", className: "blk-fold", ariaLabel: "펼치기·접기", textContent: "▸" });
+      const t = el("button", { type: "button", className: "blk-fold", ariaLabel: "펼치기·접기", innerHTML: FOLD_ICON });
       t.ariaExpanded = String(open.has(b.id));
       t.onclick = () => {
         open.has(b.id) ? open.delete(b.id) : open.add(b.id);

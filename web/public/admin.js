@@ -27,8 +27,10 @@ const ICONS = {
   clip: '<path d="m20 11-8.5 8.5a5 5 0 0 1-7-7L13 4a3.5 3.5 0 0 1 5 5l-8.5 8.5a2 2 0 0 1-3-3L14 7"/>',
   x: '<path d="M6 6l12 12M18 6 6 18"/>',
   star: '<path d="m12 3 2.7 5.6 6.1.9-4.4 4.3 1 6.1-5.4-2.9-5.4 2.9 1-6.1-4.4-4.3 6.1-.9z"/>',
-  up: '<path d="m6 15 6-6 6 6"/>',
-  down: '<path d="m6 9 6 6 6-6"/>',
+  up: '<path stroke-width="2.4" d="m6 15 6-6 6 6"/>',
+  left: '<path d="m15 5-7 7 7 7"/>',
+  right: '<path d="m9 5 7 7-7 7"/>',
+  down: '<path stroke-width="2.4" d="m6 9 6 6 6-6"/>',
   exam: '<rect x="5" y="4" width="14" height="17" rx="2"/><path d="M9 4V2.5h6V4M9 10h6M9 14h6M9 18h3"/>',
   eye: '<path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/>',
 };
@@ -792,7 +794,7 @@ async function loadExams() {
   const past = shown.filter((e) => e.date && e.date < today).reverse(); // the latest first
   const out = upcoming.map((e) => examCard(e, today, reload));
   if (past.length) {
-    const fold = el("details", { className: "exam-past", open: pastOpen || !!q, ontoggle() { if (!q) pastOpen = this.open; } }, el("summary", { textContent: `지난 시험 · ${past.length}` }), ...past.map((e) => examCard(e, today, reload)));
+    const fold = el("details", { className: "exam-past", open: pastOpen || !!q, ontoggle() { if (!q) pastOpen = this.open; } }, el("summary", {}, icon("right"), `지난 시험 · ${past.length}`), ...past.map((e) => examCard(e, today, reload)));
     out.push(fold);
   }
   if (!shown.length) out.push(el("p", { className: "notice", textContent: q ? "검색 결과가 없습니다." : "아직 시험이 없습니다." }));
@@ -1001,7 +1003,7 @@ function noteTree(list) {
     const under = (kids.get(n.id) ?? []).filter((k) => !placed.has(k.id));
     if (!under.length) return [el("div", { className: "note-row" }, el("span", { className: "note-fold" }), noteLink(n))];
     const group = el("div", { className: "note-kids", hidden: !openNotes.has(n.id) }, ...under.flatMap(branch));
-    const fold = el("button", { type: "button", className: "note-fold", ariaLabel: "하위 노트 펼치기·접기", textContent: "▸" });
+    const fold = el("button", { type: "button", className: "note-fold", ariaLabel: "하위 노트 펼치기·접기" }, icon("right"));
     fold.ariaExpanded = String(!group.hidden);
     fold.onclick = () => {
       group.hidden = !group.hidden;

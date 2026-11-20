@@ -25,6 +25,8 @@ svg { width: 15px; height: 15px; flex: none; stroke: currentColor; fill: none; s
 .btn.ghost:hover { color: var(--fg); background: var(--hover); }
 .btn.danger:hover { color: var(--orange); }
 .btn.sm { height: 26px; padding: 0 8px; font-size: 12px; }
+.btn.arrow { justify-content: center; width: 30px; padding: 0; color: var(--fg); }
+.btn.arrow svg { width: 18px; height: 18px; stroke-width: 2.4; }
 kbd { display: inline-grid; place-items: center; min-width: 18px; height: 18px; padding: 0 4px; border: 1px solid var(--line-2); border-radius: 4px; font: 11px/1 ui-monospace, monospace; color: var(--muted); background: rgba(255,255,255,.03); }
 .btn.primary kbd { border-color: rgba(0,0,0,.2); color: #555; background: transparent; }
 .input, select.input, textarea.input { height: 32px; padding: 0 10px; border: 1px solid var(--line-2); border-radius: 6px; background: var(--panel-2); outline: none; }
@@ -179,7 +181,8 @@ dialog .foot { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4
 .note-list .muted { padding: 7px 9px; }
 .note-row { display: flex; align-items: flex-start; min-width: 0; }
 .note-row a { flex: 1; min-width: 0; }
-.note-fold { flex: none; width: 18px; padding: 8px 0 0; border: 0; background: none; color: var(--dim); font-size: 11px; line-height: 1; cursor: pointer; }
+.note-fold { flex: none; display: grid; place-items: center; width: 20px; height: 33px; padding: 0; border: 0; background: none; color: var(--muted); cursor: pointer; transition: transform .12s; }
+.note-fold svg, .blk-fold svg { width: 15px; height: 15px; stroke-width: 2.4; }
 span.note-fold { cursor: default; }
 .note-fold[aria-expanded="true"] { transform: rotate(90deg); }
 .note-fold:hover { color: var(--fg); }
@@ -232,7 +235,7 @@ span.note-fold { cursor: default; }
 .blk-h2 { margin-top: 14px; } .blk-h2 .blk-field { font-size: 21px; font-weight: 650; line-height: 1.35; }
 .blk-h3 { margin-top: 10px; } .blk-h3 .blk-field { font-size: 17px; font-weight: 600; }
 .blk-marker { flex: none; min-width: 18px; padding-top: 3px; font-size: 15px; line-height: 1.6; color: var(--fg-2); text-align: right; font-variant-numeric: tabular-nums; }
-.blk-fold { flex: none; width: 20px; height: 28px; padding: 0; border: 0; background: none; color: var(--fg-2); font-size: 12px; cursor: pointer; transition: transform .12s; }
+.blk-fold { flex: none; display: grid; place-items: center; width: 20px; height: 28px; padding: 0; border: 0; background: none; color: var(--fg-2); cursor: pointer; transition: transform .12s; }
 .blk-h1 .blk-fold { height: 40px; } .blk-h2 .blk-fold { height: 34px; }
 .blk-fold[aria-expanded="true"] { transform: rotate(90deg); }
 .blk-fold:hover { color: var(--fg); }
@@ -279,6 +282,7 @@ span.note-fold { cursor: default; }
 .fmt-bar { position: fixed; z-index: 31; display: flex; flex-wrap: wrap; gap: 2px; max-width: 320px; padding: 3px; border: 1px solid var(--line-2); border-radius: 8px; background: var(--panel-2); box-shadow: 0 10px 30px rgba(0,0,0,.5); }
 .fmt-btn { min-width: 28px; height: 28px; padding: 0 7px; border: 0; border-radius: 5px; background: none; color: var(--fg); cursor: pointer; }
 .fmt-btn:hover { background: var(--active); }
+.fmt-menu::after { content: ""; display: inline-block; width: 5px; height: 5px; margin: 0 1px 3px 6px; border: solid currentColor; border-width: 0 2px 2px 0; transform: rotate(45deg); }
 .fmt-colors { display: grid; grid-template-columns: repeat(10, 1fr); gap: 2px; width: 100%; }
 .fmt-colors[hidden] { display: none; }
 .note-notion { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: -8px 0 14px; font-size: 12px; }
@@ -381,7 +385,10 @@ span.note-fold { cursor: default; }
 .plan-add input[type="date"] { width: 150px; flex: none; }
 .plan-add input:not([type]) { flex: 1; min-width: 0; }
 .exam-past { margin: 8px 0 24px; }
-.exam-past summary { padding: 8px 16px; color: var(--muted); cursor: pointer; }
+.exam-past summary { display: flex; align-items: center; gap: 6px; padding: 8px 16px; color: var(--muted); cursor: pointer; list-style: none; }
+.exam-past summary::-webkit-details-marker { display: none; }
+.exam-past summary svg { stroke-width: 2.4; transition: transform .12s; }
+.exam-past[open] summary svg { transform: rotate(90deg); }
 .exam-mark { display: inline-grid; place-items: center; width: 15px; color: var(--orange); }
 .cal-item.exam { color: var(--orange); font-weight: 500; }
 .cal-item.exam .dot { background: var(--orange); }
