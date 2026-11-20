@@ -6,7 +6,7 @@
 // the note's. The merged result goes to Notion as block-by-block changes against R, and to the note if it differs.
 // Notion has no "move" for blocks, so a moved block is deleted and made again where it now sits; blocks that can't
 // be made again (child pages, databases, column layouts, blocks the API can't create) stay where Notion has them.
-import { fixDepths, MEDIA_TYPES, NOTE_MAX_BLOCKS, NOTE_MAX_TEXT, plainOf, richOrNone, sameBlock, sameBlocks, type Block, type Row, type Run } from "./blocks";
+import { fixDepths, MEDIA_TYPES, NOTE_MAX_BLOCKS, NOTE_MAX_TEXT, plainOf, richOrNone, sameBlock, sameBlocks, stableJson, type Block, type Row, type Run } from "./blocks";
 import type { Db, FileRow, NotionPageRow } from "./db";
 
 const NOTION_VERSION = "2022-06-28";
@@ -301,6 +301,10 @@ export function createNotionSync(o: {
 
   // A page's blocks as note blocks. ids: Notion id → note block id, for blocks made on this site.
   async function convert(page: Page, ids: Map<string, string>) {
+    // A block whose own id is the note id of a block made again elsewhere is an old copy left by a failed delete:
+    // it gets its own id so the note never has the same id twice (it then shows up as a block of its own).
+    const taken = new Set(ids.values());
+    const idOf = (nid: string) => ids.get(nid) ?? (taken.has(nid) ? nid.replace(/-/g, "") + "-old" : nid);
     const blocks: Block[] = [];
     const kids: string[] = [];
     const cut = { deep: false };
@@ -341,7 +345,7 @@ export function createNotionSync(o: {
     async function walk(list: NBlock[], depth: number) {
       for (const b of list) {
         const d = b[b.type] ?? {};
-        const out: Block = { id: ids.get(b.id) ?? b.id, type: "opaque", text: "" };
+        const out: Block = { id: idOf(b.id), type: "opaque", text: "" };
         if (depth) out.d = depth;
         if (typeof d.color === "string" && d.color !== "default") out.color = d.color;
         const setText = (rt: NRich[] | undefined) => {
@@ -416,7 +420,7 @@ export function createNotionSync(o: {
               if (d.has_column_header) out.colHeader = 1;
               if (d.has_row_header) out.rowHeader = 1;
               out.rows = (b.kids ?? []).filter((r) => r.type === "table_row").map((r): Row => ({
-                id: ids.get(r.id) ?? r.id,
+                id: idOf(r.id),
                 cells: Array.from({ length: out.width! }, (_, i) => richOrNone(runsFrom(r.table_row?.cells?.[i])) ?? (plain(r.table_row?.cells?.[i]) ? [{ t: plain(r.table_row.cells[i]) }] : [])),
               }));
               out.text = out.rows.map((r) => r.cells.map(plainOf).join(" | ")).join("\n");
@@ -510,8 +514,34 @@ export function createNotionSync(o: {
 
   // Makes Notion's children of `parent` match `want`, given what Notion has now (`have`).
   // nid: note block id → Notion id (filled in for blocks it creates).
-  // everywhere: every block id of the whole merged note, so a block moved to another parent is told from a deleted one.
-  async function reconcile(noteId: number, parent: string, have: Node[], want: Node[], nid: Map<string, string>, everywhere: Set<string>) {
+  // One push of a note to Notion. Old copies are deleted only at the end (see push), so a move whose new copy could
+  // not be made leaves the block where it was instead of losing it.
+  type Push = {
+    noteId: number;
+    orig: ReadonlyMap<string, string>; // note block id → Notion id as Notion has them now (before this push)
+    nid: Map<string, string>; // the same, plus the blocks made by this push
+    everywhere: Set<string>; // every block id of the whole merged note, so a block moved to another parent is told from a deleted one
+    dels: { id: string; needs?: string }[]; // blocks to delete afterwards; needs = only once this block's new copy exists
+    made: Set<string>; // note block ids made in this push
+  };
+  async function push(noteId: number, parent: string, have: Block[], want: Block[], ids: Map<string, string>) {
+    const p: Push = { noteId, orig: new Map(ids), nid: new Map(ids), everywhere: new Set(want.flatMap((b) => [b.id, ...(b.rows ?? []).map((r) => r.id)])), dels: [], made: new Set() };
+    try {
+      await reconcile(p, parent, treeOf(have), treeOf(want));
+    } finally {
+      for (const d of p.dels) {
+        if (d.needs && !p.made.has(d.needs)) continue; // its new copy failed: keep the old one
+        const oid = p.orig.get(d.id) ?? d.id;
+        await api("DELETE", `/v1/blocks/${oid}`).catch((e) => {
+          if (!(e instanceof NotionError && (e.status === 404 || e.status === 400))) throw e; // already gone (e.g. with its parent)
+        });
+        if ((p.nid.get(d.id) ?? d.id) === oid) db.deleteNotionBlockId(noteId, d.id); // not if a new copy now has the id
+      }
+    }
+  }
+
+  async function reconcile(p: Push, parent: string, have: Node[], want: Node[]) {
+    const { noteId, nid, everywhere } = p;
     const haveById = new Map(have.map((n) => [n.b.id, n]));
     const wantIds = new Set(want.map((n) => n.b.id));
     // Blocks that stay where they are: the heaviest common subsequence, where blocks that can't be made again weigh most.
@@ -546,10 +576,8 @@ export function createNotionSync(o: {
       const w = want.find((n) => n.b.id === h.b.id);
       if (w && stays(w)) continue;
       if (!w && holdsKept(h)) continue;
-      await api("DELETE", `/v1/blocks/${nid.get(h.b.id) ?? h.b.id}`).catch((e) => {
-        if (!(e instanceof NotionError && (e.status === 404 || e.status === 400))) throw e; // already gone (e.g. with its parent)
-      });
-      db.deleteNotionBlockId(noteId, h.b.id);
+      // Moved here or elsewhere in the note (or retyped): delete once the new copy is made. Gone from the note: just delete.
+      p.dels.push(w || everywhere.has(h.b.id) ? { id: h.b.id, needs: h.b.id } : { id: h.b.id });
     }
     let prev: string | null = null; // the Notion id of the block the next one goes after
     let batch: Node[] = [];
@@ -567,11 +595,12 @@ export function createNotionSync(o: {
           const id = made[k]!.id;
           nid.set(n.b.id, id);
           db.setNotionBlockId(noteId, n.b.id, id);
+          p.made.add(n.b.id);
           prev = id;
         }
         for (const n of chunk) {
-          if (n.b.type === "table") await mapRows(noteId, n.b, nid);
-          if (n.kids.length) await reconcile(noteId, nid.get(n.b.id)!, [], n.kids, nid, everywhere);
+          if (n.b.type === "table") await mapRows(p, n.b);
+          if (n.kids.length) await reconcile(p, nid.get(n.b.id)!, [], n.kids);
         }
       }
     };
@@ -587,9 +616,9 @@ export function createNotionSync(o: {
       if (!sameContent(w.b, h.b) && notionType(w.b) === notionType(h.b)) {
         const upd = body(w.b, true);
         if (upd) await api("PATCH", `/v1/blocks/${id}`, upd);
-        if (w.b.type === "table") await syncRows(noteId, id, h.b, w.b, nid);
+        if (w.b.type === "table") await syncRows(p, id, h.b, w.b);
       }
-      if (canHoldKids(w.b)) await reconcile(noteId, id, h.kids, w.kids, nid, everywhere);
+      if (canHoldKids(w.b)) await reconcile(p, id, h.kids, w.kids);
       prev = id;
     }
     await flush();
@@ -598,11 +627,12 @@ export function createNotionSync(o: {
   const canHoldKids = (b: Block) => b.type !== "table" && !(b.type === "synced" && b.page) && b.type !== "opaque";
 
   // Table rows are Notion blocks too: ids for rows of a table just made.
-  async function mapRows(noteId: number, b: Block, nid: Map<string, string>) {
-    const rows = (await all(`/v1/blocks/${nid.get(b.id)}/children`)) as NBlock[];
-    (b.rows ?? []).forEach((r, i) => rows[i] && (nid.set(r.id, rows[i]!.id), db.setNotionBlockId(noteId, r.id, rows[i]!.id)));
+  async function mapRows(p: Push, b: Block) {
+    const rows = (await all(`/v1/blocks/${p.nid.get(b.id)}/children`)) as NBlock[];
+    (b.rows ?? []).forEach((r, i) => rows[i] && (p.nid.set(r.id, rows[i]!.id), db.setNotionBlockId(p.noteId, r.id, rows[i]!.id), p.made.add(r.id)));
   }
-  async function syncRows(noteId: number, tableId: string, have: Block, want: Block, nid: Map<string, string>) {
+  async function syncRows(p: Push, tableId: string, have: Block, want: Block) {
+    const { noteId, nid } = p;
     const old = new Map((have.rows ?? []).map((r) => [r.id, r]));
     const wantIds = new Set((want.rows ?? []).map((r) => r.id));
     const cells = (r: Row) => ({ cells: r.cells.map((c) => runsTo(c, "")) });
@@ -612,17 +642,15 @@ export function createNotionSync(o: {
     const firstMoved = oldOrder.findIndex((id, i) => id !== newOrder[i]);
     const remade = new Set(firstMoved < 0 ? [] : newOrder.slice(firstMoved));
     for (const r of have.rows ?? []) {
-      if (!wantIds.has(r.id) || remade.has(r.id)) {
-        await api("DELETE", `/v1/blocks/${nid.get(r.id) ?? r.id}`).catch(() => {});
-        db.deleteNotionBlockId(noteId, r.id);
-      }
+      if (!wantIds.has(r.id)) p.dels.push({ id: r.id });
+      else if (remade.has(r.id)) p.dels.push({ id: r.id, needs: r.id });
     }
     let prev: string | null = null;
     for (const r of want.rows ?? []) {
       const h = old.get(r.id);
       if (h && !remade.has(r.id)) {
         const id = nid.get(r.id) ?? r.id;
-        if (JSON.stringify(h.cells) !== JSON.stringify(r.cells)) await api("PATCH", `/v1/blocks/${id}`, { table_row: cells(r) });
+        if (stableJson(h.cells) !== stableJson(r.cells)) await api("PATCH", `/v1/blocks/${id}`, { table_row: cells(r) });
         prev = id;
         continue;
       }
@@ -631,6 +659,7 @@ export function createNotionSync(o: {
       prev = res.results[0].id as string;
       nid.set(r.id, prev);
       db.setNotionBlockId(noteId, r.id, prev);
+      p.made.add(r.id);
     }
   }
 
@@ -706,8 +735,7 @@ export function createNotionSync(o: {
     // Send what changed here to Notion.
     let pushed = false;
     if (!remote.partial && !sameBlocks(merged, remote.blocks)) {
-      const nid = new Map(ids);
-      await reconcile(link.note_id, pageId, treeOf(remote.blocks), treeOf(merged), nid, new Set(merged.map((b) => b.id)));
+      await push(link.note_id, pageId, remote.blocks, merged, ids);
       pushed = true;
     }
     if (title !== rTitle) {

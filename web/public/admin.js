@@ -801,7 +801,7 @@ async function mergeNote(id) {
   noteBase = { title: n.title, blocks: n.blocks };
   noteVersion = n.version;
   noteLinks = n.links ?? {};
-  if (document.activeElement !== $("note-title")) $("note-title").value = title;
+  if ($("note-title").value !== title) $("note-title").value = title; // 이 화면에서 고친 제목이 아니면 서버 제목으로
   editor.replace(blocks, noteLinks);
   showNoteNotion(n);
 }
@@ -813,10 +813,12 @@ async function refreshNote() {
   const n = await call(`/api/notes/${id}`);
   if (id !== noteId || n.version <= noteVersion) return;
   if (noteDirty || noteSaving) return; // the next save meets a 409 and merges
+  // 제목은 포커스가 아니라 실제로 고쳤는지로: 고치지 않았으면 서버(노션) 제목으로 바꾼다.
+  const titleEdited = $("note-title").value !== noteBase.title;
   noteBase = { title: n.title, blocks: n.blocks };
   noteVersion = n.version;
   noteLinks = n.links ?? {};
-  if (document.activeElement !== $("note-title")) $("note-title").value = n.title;
+  if (!titleEdited) $("note-title").value = n.title;
   editor.replace(n.blocks, noteLinks);
   showNoteNotion(n);
   const a = document.querySelector(`#note-list a[data-id="${id}"]`);

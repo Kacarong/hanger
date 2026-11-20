@@ -211,10 +211,51 @@ export function cleanBlocks(v: unknown): Block[] | string {
 // The task title of a todo block: its first line.
 export const blockTitle = (b: Block) => b.text.split("\n")[0]!.trim().slice(0, 200);
 
+// JSON with object keys sorted, so the same content compares equal whatever order its fields were set in.
+export function stableJson(v: unknown): string {
+  if (Array.isArray(v)) return `[${v.map(stableJson).join(",")}]`;
+  if (v && typeof v === "object") {
+    return `{${Object.keys(v).filter((k) => (v as Record<string, unknown>)[k] !== undefined).sort().map((k) => `${JSON.stringify(k)}:${stableJson((v as Record<string, unknown>)[k])}`).join(",")}}`;
+  }
+  return JSON.stringify(v) ?? "null";
+}
+
 // The block's content without its id and depth, to tell whether it changed.
 export function contentKey(b: Block): string {
   const { id: _id, d: _d, rows, ...rest } = b;
-  return JSON.stringify({ ...rest, rows: rows?.map((r) => r.cells) });
+  return stableJson({ ...rest, rows: rows?.map((r) => r.cells) });
 }
-export const sameBlock = (a: Block, b: Block) => (a.d ?? 0) === (b.d ?? 0) && contentKey(a) === contentKey(b) && JSON.stringify(a.rows?.map((r) => r.id)) === JSON.stringify(b.rows?.map((r) => r.id));
+
+// The runs of characters a..z.
+export function sliceRuns(runs: Run[], a: number, z: number): Run[] {
+  const out: Run[] = [];
+  let pos = 0;
+  for (const r of runs) {
+    const s = Math.max(a, pos);
+    const e = Math.min(z, pos + r.t.length);
+    if (s < e) {
+      const piece: Run = { ...r, t: r.t.slice(s - pos, e - pos) };
+      if ((r.m || r.eq) && piece.t !== r.t) delete piece.m, delete piece.eq; // a cut mention or equation becomes plain text
+      out.push(piece);
+    }
+    pos += r.t.length;
+  }
+  return out;
+}
+
+// The runs after the text changed from oldText to text: the unchanged start and end keep their formatting,
+// new text takes the formatting of the character before it (the same rule as the editor).
+export function editRuns(runs: Run[], oldText: string, text: string): Run[] {
+  let p = 0;
+  while (p < oldText.length && p < text.length && oldText[p] === text[p]) p++;
+  let s = 0;
+  while (s < oldText.length - p && s < text.length - p && oldText[oldText.length - 1 - s] === text[text.length - 1 - s]) s++;
+  const at = (i: number) => sliceRuns(runs, i, i + 1)[0];
+  const like = (p > 0 ? at(p - 1) : undefined) ?? at(oldText.length - s);
+  const ins: Run = { t: text.slice(p, text.length - s) };
+  for (const k of ["b", "i", "s", "u", "c"] as const) if (like?.[k]) ins[k] = 1;
+  if (like?.color) ins.color = like.color;
+  return normalizeRuns([...sliceRuns(runs, 0, p), ins, ...sliceRuns(runs, oldText.length - s, oldText.length)]);
+}
+export const sameBlock = (a: Block, b: Block) => (a.d ?? 0) === (b.d ?? 0) && contentKey(a) === contentKey(b) && stableJson(a.rows?.map((r) => r.id)) === stableJson(b.rows?.map((r) => r.id));
 export const sameBlocks = (a: Block[], b: Block[]) => a.length === b.length && a.every((x, i) => x.id === b[i]!.id && sameBlock(x, b[i]!));

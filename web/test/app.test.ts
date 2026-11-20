@@ -1102,6 +1102,7 @@ function fakeNotion() {
   const kids = new Map<string, string[]>();
   const dbs = new Map<string, { parent: string; title: string; rows: string[] }>();
   const calls: string[] = [];
+  const ctl = { failNext: null as RegExp | null }; // the next request matching this fails once
   const plainOf = (rt: any[]) => rt.map((t) => (t.type === "text" ? t.text.content : t.type === "equation" ? t.equation.expression : t.mention.type === "date" ? `@${t.mention.date.start}` : "@멘션")).join("");
   // Fills rich text in the way Notion answers it.
   const rich = (rt: any[] = []) =>
@@ -1165,6 +1166,10 @@ function fakeNotion() {
       if (req.headers.get("Authorization") !== "Bearer ntn_good") return Response.json({ message: "unauthorized" }, { status: 401 });
       const version = req.headers.get("Notion-Version");
       calls.push(`${req.method} ${p}`);
+      if (ctl.failNext?.test(`${req.method} ${p}`)) {
+        ctl.failNext = null;
+        return new Response("injected failure", { status: 400 });
+      }
       const body = req.method === "GET" || req.method === "DELETE" ? {} : await req.json();
       const list = (results: unknown[]) => Response.json({ object: "list", results, has_more: false, next_cursor: null });
       if (p === "/v1/users/me") return Response.json({ object: "user", id: "me" });
@@ -1243,7 +1248,7 @@ function fakeNotion() {
     touch(b.parent);
   };
   const txt = (content: string, annotations?: object, link?: string) => ({ type: "text", text: { content, link: link ? { url: link } : null }, ...(annotations ? { annotations } : {}) });
-  return { server, url: server.url.toString().replace(/\/$/, ""), pages, blocks, kids, dbs, calls, page, insert, tree, edit, txt, touch, id };
+  return { server, url: server.url.toString().replace(/\/$/, ""), pages, blocks, kids, dbs, calls, ctl, page, insert, tree, edit, txt, touch, id };
 }
 
 async function notionApp() {
@@ -1496,6 +1501,87 @@ test("노션 연동: 예전 가져오기로 만든 노트는 첫 동기화 때 �
     expect(n.blocks.map((b) => [b.type, b.text, b.d ?? 0])).toEqual([["toggle", "토글", 0], ["p", "안", 1]]);
     expect(t.db.listAttachments("note", old.id).map((x) => x.id)).toEqual([mine.id]);
     expect(t.db.listNotes()).toHaveLength(1);
+  } finally {
+    t.done();
+  }
+});
+
+test("노션 연동: 다른 부모 아래로 옮긴 블록은 새 사본을 지우지 않고, 옮기다 실패해도 내용이 남았다가 다음에 마저 옮겨짐", async () => {
+  loginEmail = "owner@example.com";
+  const t = await notionApp();
+  try {
+    const { nt } = t;
+    const P = nt.page("옮기기");
+    const [a, b] = nt.insert(P, [
+      { type: "bulleted_list_item", bulleted_list_item: { rich_text: [nt.txt("에이")] } },
+      { type: "bulleted_list_item", bulleted_list_item: { rich_text: [nt.txt("비")], children: [{ type: "paragraph", paragraph: { rich_text: [nt.txt("씨")] } }] } },
+    ]);
+    const c = nt.kids.get(b!.id)![0]!;
+    await t.req("/api/notion", "PUT", { token: "ntn_good" });
+    await t.notion.idle();
+    const note = t.noteOf("옮기기");
+    const n0 = await t.getNote(note.id);
+    expect(n0.blocks.map((x) => [x.id, x.d ?? 0])).toEqual([[a!.id, 0], [b!.id, 0], [c, 1]]);
+
+    // A, B(C) → A(C), B: C is made again under A and the old C goes; the new one stays.
+    await t.save(note.id, [n0.blocks[0], { ...n0.blocks[2], d: 1 }, n0.blocks[1]]);
+    expect(nt.tree(P)).toEqual([["bulleted_list_item", "에이", [["paragraph", "씨"]]], ["bulleted_list_item", "비"]]);
+    const newC = nt.kids.get(a!.id)![0]!;
+    expect(nt.blocks.get(newC)!.archived).toBe(false);
+    expect(t.db.notionBlockIds(note.id).get(c)).toBe(newC);
+    const n1 = await t.getNote(note.id);
+    expect(n1.blocks.map((x) => [x.id, x.d ?? 0])).toEqual([[a!.id, 0], [c, 1], [b!.id, 0]]);
+    // Read again with nothing changed: still the same.
+    await t.notion.syncNote(note.id);
+    expect((await t.getNote(note.id)).version).toBe(n1.version);
+
+    // Swap A and B, but making the new copy fails: nothing is deleted in Notion, the note keeps both.
+    nt.ctl.failNext = /^PATCH \/v1\/blocks\/[^/]+\/children$/;
+    const r = await t.req(`/api/notes/${note.id}`, "PUT", { title: n1.title, version: n1.version, blocks: [n1.blocks[2], n1.blocks[0], n1.blocks[1]] });
+    expect(r.status).toBe(200);
+    await t.notion.idle();
+    expect((await (await t.req("/api/notion", "GET")).json()).error).toContain("injected failure");
+    expect(nt.tree(P).map((x) => x[1])).toEqual(["에이", "비"]);
+    expect((await t.getNote(note.id)).blocks.map((x) => x.text)).toEqual(["비", "에이", "씨"]);
+    // The next sync finishes the move.
+    await t.notion.syncNote(note.id);
+    expect(nt.tree(P)).toEqual([["bulleted_list_item", "비"], ["bulleted_list_item", "에이", [["paragraph", "씨"]]]]);
+    expect((await t.getNote(note.id)).blocks.map((x) => x.text)).toEqual(["비", "에이", "씨"]);
+  } finally {
+    t.done();
+  }
+});
+
+test("노션 연동: 꾸민 체크박스는 다른 블록만 고치면 건드리지 않고, 할 일 화면에서 제목을 바꾸면 꾸밈까지 맞춰 노션에 보냄", async () => {
+  loginEmail = "owner@example.com";
+  const t = await notionApp();
+  try {
+    const { nt } = t;
+    const P = nt.page("할 일 노트");
+    const [todo, para] = nt.insert(P, [
+      { type: "to_do", to_do: { checked: false, rich_text: [nt.txt("보고서", { bold: true }), nt.txt(" 쓰기 "), { type: "mention", mention: { type: "date", date: { start: "2026-11-21" } } }] } },
+      { type: "paragraph", paragraph: { rich_text: [nt.txt("메모")] } },
+    ]);
+    await t.req("/api/notion", "PUT", { token: "ntn_good" });
+    await t.notion.idle();
+    const note = t.noteOf("할 일 노트");
+    const n0 = await t.getNote(note.id);
+    expect(n0.blocks[0]).toMatchObject({ text: "보고서 쓰기", rich: [{ t: "보고서", b: 1 }, { t: " 쓰기" }], date: "2026-11-21" });
+
+    // Only the paragraph changes: the checkbox (read from Notion with its fields in another order) is not sent.
+    nt.calls.length = 0;
+    await t.save(note.id, [n0.blocks[0], { ...n0.blocks[1], text: "메모 고침" }]);
+    expect(nt.calls.filter((c) => c.startsWith("PATCH /v1/blocks/") && !c.endsWith("/children"))).toEqual([`PATCH /v1/blocks/${para!.id}`]);
+
+    // Renamed on the task side: the block's text and runs agree, and Notion gets the new title.
+    const task = t.db.listTasks({}).find((x) => x.note_id === note.id)!;
+    expect((await t.req(`/api/tasks/${task.id}`, "PATCH", { title: "보고서 제출하기" })).status).toBe(200);
+    await t.notion.idle();
+    const b = (await t.getNote(note.id)).blocks[0];
+    expect(b.text).toBe("보고서 제출하기");
+    expect(b.rich.map((x: { t: string }) => x.t).join("")).toBe("보고서 제출하기");
+    expect(b.rich[0]).toEqual({ t: "보고서", b: 1 });
+    expect(nt.tree(P)[0]).toEqual(["to_do", "보고서 제출하기@2026-11-21"]);
   } finally {
     t.done();
   }

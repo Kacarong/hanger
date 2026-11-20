@@ -179,7 +179,12 @@ function linesToBlocks(lines, d) {
 }
 
 // ---- 노트 병합: 다른 곳(노션, 다른 탭)에서 바뀐 노트와 이 화면에서 고친 것을 블록마다 합친다.
-const blockKey = (b) => JSON.stringify({ ...b, id: undefined });
+// 키 순서와 상관없이 같은 내용이면 같은 문자열.
+const stableJson = (v) =>
+  Array.isArray(v) ? `[${v.map(stableJson).join(",")}]`
+  : v && typeof v === "object" ? `{${Object.keys(v).filter((k) => v[k] !== undefined).sort().map((k) => `${JSON.stringify(k)}:${stableJson(v[k])}`).join(",")}}`
+  : JSON.stringify(v) ?? "null";
+const blockKey = (b) => stableJson({ ...b, id: undefined });
 export function merge3(base, local, remote) {
   const B = new Map(base.map((b) => [b.id, b]));
   const L = new Map(local.map((b) => [b.id, b]));

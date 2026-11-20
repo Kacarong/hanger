@@ -1,7 +1,7 @@
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { mkdirSync, existsSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { cleanBlocks } from "./blocks";
+import { cleanBlocks, editRuns, richOrNone } from "./blocks";
 import { ATTACH_TARGETS, CATEGORIES, TASK_KINDS, type AttachedFile, type Block, type Db, type FileRow, type PortfolioFields, type PortfolioItem, type TaskFields } from "./db";
 import { GoogleError, type CalendarEvent, type Google } from "./google";
 import { createNotionSync, NotionError } from "./notion";
@@ -469,6 +469,10 @@ ${body || `<section class="works"><p class="empty reveal">${mine ? "아직 포�
           db.editNoteBlock(after.note_id, after.block_id, (bl) => {
             const rest = bl.text.split("\n").slice(1);
             const next: Block = { ...bl, text: [after.title, ...rest].join("\n"), checked: !!after.done };
+            // A formatted block keeps its runs in step with the new title (formatting of the unchanged part stays).
+            delete next.rich;
+            const rich = bl.rich && richOrNone(editRuns(bl.rich, bl.text, next.text));
+            if (rich) next.rich = rich;
             delete next.date;
             delete next.time;
             if (after.due_date) next.date = after.due_date;
