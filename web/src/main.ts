@@ -33,6 +33,8 @@ const google = createGoogle(
 );
 const fetch = createApp({ baseUrl, adminEmail, dataDir, googleEnabled }, db, google);
 
+fetch.notion.start(60_000); // look for edits in Notion every minute (and a full pass every half hour)
+
 const server = Bun.serve({
   hostname: process.env.HOST ?? "127.0.0.1",
   port: Number(process.env.PORT ?? 2992),

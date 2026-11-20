@@ -87,7 +87,8 @@
         <nav class="note-list" id="note-list"></nav>
         <article class="note-page" id="note-page" hidden>
           <input class="note-title" id="note-title" placeholder="제목 없음" maxlength="200">
-          <div class="note-meta"><span id="note-status" class="muted"></span><span class="muted">· <kbd>/</kbd> 블록 고르기 · 체크박스에 날짜를 넣으면 오늘·캘린더에 나옵니다</span></div>
+          <div class="note-meta"><span id="note-status" class="muted"></span><span class="muted">· <kbd>/</kbd> 블록 고르기 · 글을 고르면 꾸미기 · <kbd>Tab</kbd> 들여쓰기 · 체크박스에 날짜를 넣으면 오늘·캘린더에 나옵니다</span></div>
+          <div class="note-notion" id="note-notion" hidden></div>
           <section class="attach" id="note-files"></section>
           <div class="editor" id="note-editor"></div>
         </article>
@@ -219,16 +220,26 @@
 
 <dialog id="notion-dialog">
   <form method="dialog" id="notion-form">
-    <h2>노션에서 가져오기</h2>
-    <ol class="muted steps">
-      <li>컴퓨터 브라우저로 <a href="https://www.notion.so/developers/tokens" target="_blank" rel="noopener">노션 개발자 포털의 토큰 페이지</a>에 들어가 "New token"을 누릅니다. 이름을 넣고 기능은 꼭 "Notion API"를 고른 뒤(Workers만 고르면 가져오기가 안 됩니다) 기간을 정하고 "Create token"을 누릅니다. 워크스페이스를 물으면 가져올 곳을 고릅니다. 나온 토큰은 다시 볼 수 없으니 바로 복사합니다. 이 토큰은 내 노션 권한 그대로라서 내가 볼 수 있는 페이지를 모두 가져옵니다. 무료·Business 요금제는 기본으로 워크스페이스 소유자만 토큰을 만들 수 있습니다(무료는 바꿀 수 없음).</li>
-      <li>일부 페이지만 가져오려면 토큰 대신 같은 포털의 Internal connections에서 연결을 만들고(워크스페이스 소유자만 가능) Configuration 탭의 API token을 복사한 뒤, Content access 탭에서 가져올 페이지를 고릅니다.</li>
-      <li>토큰을 아래에 붙여 넣고 가져오기를 누릅니다. 토큰은 이번에만 쓰고 저장하지 않습니다.</li>
-    </ol>
-    <p class="muted" style="margin:0">페이지마다 노트 하나가 됩니다. 노션의 이미지·파일은 파일함에 복사해 노트에 붙입니다. 다시 가져오면 노션에서 바뀐 페이지만 갱신하고, 여기서 고친 노트는 건드리지 않습니다.</p>
-    <label>노션 토큰<input class="input" type="password" id="notion-token" autocomplete="off" placeholder="ntn_…"></label>
-    <p class="muted" id="notion-status" style="margin:0;white-space:pre-line"></p>
-    <div class="foot"><button class="btn" type="button" data-close>닫기</button><button class="btn primary" value="ok" id="notion-go">가져오기</button></div>
+    <h2>노션 연동</h2>
+    <p class="muted" id="notion-state" style="margin:0;white-space:pre-line"></p>
+    <div id="notion-connect">
+      <ol class="muted steps">
+        <li>컴퓨터 브라우저로 <a href="https://www.notion.so/developers/tokens" target="_blank" rel="noopener">노션 개발자 포털의 토큰 페이지</a>에 들어가 "New token"을 누릅니다. 이름을 넣고 기능은 꼭 "Notion API"를 고른 뒤(Workers만 고르면 연동이 안 됩니다) 기간을 정하고 "Create token"을 누릅니다. 워크스페이스를 물으면 연동할 곳을 고릅니다. 나온 토큰은 다시 볼 수 없으니 바로 복사합니다. 이 토큰은 내 노션 권한 그대로라서 내가 볼 수 있는 페이지가 모두 노트가 됩니다. 무료·Business 요금제는 기본으로 워크스페이스 소유자만 토큰을 만들 수 있습니다(무료는 바꿀 수 없음).</li>
+        <li>일부 페이지만 연동하려면 토큰 대신 같은 포털의 Internal connections에서 연결을 만들고(워크스페이스 소유자만 가능) Configuration 탭의 API token을 복사한 뒤, Content access 탭에서 페이지를 고릅니다. 이때는 Capabilities에서 내용 읽기·수정·추가를 모두 켜 두세요.</li>
+        <li>토큰을 아래에 붙여 넣고 연결을 누릅니다. 토큰은 서버에 저장해 두고 계속 씁니다(토큰 기간이 끝나면 새 토큰을 다시 넣어 주세요).</li>
+      </ol>
+      <label>노션 토큰<input class="input" type="password" id="notion-token" autocomplete="off" placeholder="ntn_…"></label>
+    </div>
+    <p class="muted" style="margin:0">연결하면 노션 페이지마다 노트가 되고, 서식·들여쓰기·토글·표·사진이 그대로 보입니다. 여기서 고치면 몇 초 안에 노션에도 저장되고, 노션에서 고친 것은 1분 안에(열어 둔 노트는 더 빨리) 여기에 들어옵니다. 양쪽에서 같은 블록을 동시에 고치면 이 사이트 쪽이 남습니다. 버튼처럼 노션 API가 내주지 않는 블록은 "노션에서 열기"로 보세요.</p>
+    <label id="notion-root-row" hidden>새 최상위 노트를 만들 노션 페이지
+      <select class="input" id="notion-root"><option value="">만들지 않음 (이 사이트에만)</option></select>
+    </label>
+    <div class="foot">
+      <button class="btn ghost danger" type="button" id="notion-off" hidden>연결 끊기</button>
+      <button class="btn" type="button" id="notion-sync" hidden>지금 맞추기</button>
+      <button class="btn" type="button" data-close>닫기</button>
+      <button class="btn primary" value="ok" id="notion-go">연결</button>
+    </div>
   </form>
 </dialog>
 

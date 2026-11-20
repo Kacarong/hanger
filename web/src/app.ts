@@ -1,9 +1,10 @@
-import { createHash } from "node:crypto";
+import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { mkdirSync, existsSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { ATTACH_TARGETS, BLOCK_TYPES, CATEGORIES, NOTE_MAX_BLOCKS, NOTE_MAX_TEXT, TASK_KINDS, type AttachedFile, type Block, type Db, type FileRow, type PortfolioFields, type PortfolioItem, type TaskFields } from "./db";
+import { cleanBlocks } from "./blocks";
+import { ATTACH_TARGETS, CATEGORIES, TASK_KINDS, type AttachedFile, type Block, type Db, type FileRow, type PortfolioFields, type PortfolioItem, type TaskFields } from "./db";
 import { GoogleError, type CalendarEvent, type Google } from "./google";
-import { importNotion, newNotionJob, NotionError, type NotionJob } from "./notion";
+import { createNotionSync, NotionError } from "./notion";
 import { passwordProblem } from "./password";
 
 export const MAX_FILE_SIZE = 1024 ** 3; // files must be under 1GB
@@ -20,6 +21,7 @@ export type AppConfig = {
   dataDir: string;
   googleEnabled: boolean; // false until the OAuth client is configured
   notionApi?: string; // https://api.notion.com unless a test points elsewhere
+  notionDebounceMs?: number; // how long after a save the note goes to Notion (tests: 0)
   now?: () => Date; // for tests
 };
 
@@ -131,7 +133,27 @@ export function createApp(cfg: AppConfig, db: Db, google: Google) {
   const now = cfg.now ?? (() => new Date());
   const today = () => seoulDate(now());
   let loginFailures: number[] = [];
-  let notionJob: NotionJob | null = null; // the latest Notion import, while the server runs
+
+  // Links Notion can show a 파일함 file from (a block made here points at one): /f/<id>/<signature>/<name>.
+  // Only someone with the link can open that file; other files stay private.
+  if (!db.getSetting("file_link_secret")) db.setSetting("file_link_secret", randomBytes(32).toString("hex"));
+  const linkSig = (id: number) => createHmac("sha256", db.getSetting("file_link_secret")!).update(String(id)).digest("base64url").slice(0, 22);
+  const linkOk = (id: number, sig: string) => sig.length === 22 && timingSafeEqual(Buffer.from(sig), Buffer.from(linkSig(id)));
+  const notion = createNotionSync({
+    db,
+    apiBase: cfg.notionApi ?? "https://api.notion.com",
+    saveFile: async (name, mime, bytes) => {
+      const d = await google.upload(name, mime, bytes, origin);
+      return db.insertFile({ drive_id: d.id, name: d.name, title: d.name, mime: d.mimeType, size: Number(d.size ?? bytes.size), category: "기타", tags: "노션", note: "" });
+    },
+    fileLink: (id, name) => `${origin}/f/${id}/${linkSig(id)}/${encodeURIComponent(name.replace(/[\/]/g, "_"))}`,
+    fileOfLink: (u) => {
+      const m = u.startsWith(origin + "/f/") ? u.slice(origin.length).match(/^\/f\/(\d+)\/([\w-]{22})(\/|$)/) : null;
+      return m && linkOk(Number(m[1]), m[2]!) ? Number(m[1]) : null;
+    },
+    today,
+    debounceMs: cfg.notionDebounceMs,
+  });
 
   async function body(req: Request): Promise<Record<string, unknown>> {
     try {
@@ -208,36 +230,7 @@ export function createApp(cfg: AppConfig, db: Db, google: Google) {
     return out;
   }
 
-  // Validates a note's block list and keeps only the fields each block type uses.
-  function noteBlocks(v: unknown): Block[] | string {
-    if (!Array.isArray(v) || v.length > NOTE_MAX_BLOCKS) return "블록 목록이 올바르지 않습니다";
-    const ids = new Set<string>();
-    let total = 0;
-    const out: Block[] = [];
-    for (const raw of v) {
-      const b = (raw ?? {}) as Record<string, unknown>;
-      if (typeof b.id !== "string" || !/^[\w-]{1,40}$/.test(b.id) || ids.has(b.id)) return "블록 id가 올바르지 않습니다";
-      if (!BLOCK_TYPES.includes(b.type as string)) return "블록 종류가 올바르지 않습니다";
-      const text = b.type === "divider" || typeof b.text !== "string" ? "" : b.text;
-      total += text.length;
-      if (total > NOTE_MAX_TEXT) return "노트가 너무 깁니다";
-      ids.add(b.id);
-      const block: Block = { id: b.id, type: b.type as string, text };
-      if (b.type === "todo") {
-        block.checked = b.checked === true;
-        if (typeof b.date === "string" && b.date) {
-          if (!isDate(b.date)) return "날짜가 올바르지 않습니다";
-          block.date = b.date;
-          if (typeof b.time === "string" && b.time) {
-            if (!isTime(b.time)) return "시간이 올바르지 않습니다";
-            block.time = b.time;
-          }
-        }
-      }
-      out.push(block);
-    }
-    return out;
-  }
+
 
   // The portfolio page. mine = the owner's own view (/admin/portfolio): private items too, marked 개인용.
   function renderPortfolio(mine = false): Response {
@@ -482,11 +475,15 @@ ${body || `<section class="works"><p class="empty reveal">${mine ? "아직 포�
             if (after.due_date && after.due_time) next.time = after.due_time;
             return next;
           }, today());
+          notion.noteSaved(after.note_id);
         }
         return json(db.getTask(t.id) ?? { ...after, due_date: null, due_time: null });
       }
       if (method === "DELETE") {
-        if (t.note_id && t.block_id) db.editNoteBlock(t.note_id, t.block_id, () => null, today()); // also removes the task
+        if (t.note_id && t.block_id) {
+          db.editNoteBlock(t.note_id, t.block_id, () => null, today()); // also removes the task
+          notion.noteSaved(t.note_id);
+        }
         db.deleteTask(t.id);
         return json({ ok: true });
       }
@@ -498,52 +495,111 @@ ${body || `<section class="works"><p class="empty reveal">${mine ? "아직 포�
 
     if (path === "/api/notes" && method === "POST") {
       const b = await body(req);
-      return json(db.insertNote(str(b.title, 200), [{ id: crypto.randomUUID().slice(0, 8), type: "p", text: "" }], today()), 201);
+      const parent = b.parent_id === undefined || b.parent_id === null ? null : db.getNote(Number(b.parent_id));
+      if (b.parent_id !== undefined && b.parent_id !== null && !parent) return json({ error: "상위 노트를 찾을 수 없습니다" }, 404);
+      // Under a Notion page (the parent note's page, or the page chosen for new notes) it becomes a Notion page too.
+      const notionParent = parent ? notion.pageOf(parent.id)?.page_id : db.getSetting("notion_root");
+      const n = db.insertNote(str(b.title, 200), [{ id: crypto.randomUUID().slice(0, 8), type: "p", text: "" }], today());
+      if (parent) db.setNoteParent(n.id, parent.id);
+      let warning: string | undefined;
+      if (notionParent && notion.status().connected) {
+        try {
+          await notion.createPage(n.id, notionParent);
+        } catch (e) {
+          if (!(e instanceof NotionError)) throw e;
+          warning = "노션에 페이지를 만들지 못해 이 사이트에만 있는 노트로 만들었습니다: " + e.message;
+        }
+      }
+      return json({ ...db.getNote(n.id)!, warning }, 201);
     }
 
     const nm = path.match(/^\/api\/notes\/(\d+)$/);
     if (nm) {
       const n = db.getNote(Number(nm[1]));
       if (!n) return json({ error: "노트를 찾을 수 없습니다" }, 404);
-      if (method === "GET") return json(n);
+      const link = notion.pageOf(n.id);
+      if (method === "GET") {
+        notion.noteOpened(n.id);
+        // Where the page and the pages its blocks point to are, so the editor can link to them.
+        const pages = new Map(db.notionPages().map((l) => [l.page_id, l.note_id]));
+        const links: Record<string, { id: number; title: string }> = {};
+        const add = (page: string | undefined) => {
+          const id = page && pages.get(page);
+          const target = id ? db.getNote(id) : null;
+          if (target) links[page!] = { id: target.id, title: target.title };
+        };
+        for (const bl of n.blocks) {
+          add(bl.page);
+          for (const r of bl.rich ?? []) add((r.m?.page as { id?: string } | undefined)?.id);
+        }
+        return json({ ...n, links, notion: link ? { url: notion.notionUrl(link.page_id), props: link.props, readOnly: notion.isPartial(link.page_id) } : null });
+      }
       if (method === "PUT") {
         const b = await body(req);
-        const blocks = noteBlocks(b.blocks);
+        const blocks = cleanBlocks(b.blocks);
         if (typeof blocks === "string") return json({ error: blocks }, 400);
         if (!Number.isInteger(b.version)) return json({ error: "노트 버전이 없습니다" }, 400);
         if (!db.saveNote(n.id, b.version as number, str(b.title, 200), blocks, today())) {
           return json({ error: "다른 곳에서 이 노트가 바뀌었습니다", version: n.version }, 409);
         }
+        notion.noteSaved(n.id);
         const saved = db.getNote(n.id)!;
         return json({ ok: true, version: saved.version, updated_at: saved.updated_at });
       }
       if (method === "DELETE") {
+        // A Notion page goes to Notion's trash with the pages under it, so their notes go too.
+        if (link && notion.status().connected) {
+          try {
+            await notion.archive(link.page_id);
+          } catch (e) {
+            if (!(e instanceof NotionError)) throw e;
+            return json({ error: "노션에서 지우지 못해 노트를 그대로 두었습니다: " + e.message }, 502);
+          }
+          for (const id of db.noteDescendants(n.id).reverse()) {
+            const l = notion.pageOf(id);
+            if (l) db.deleteNotionPage(l.page_id);
+            db.deleteNote(id);
+          }
+        }
         db.deleteNote(n.id);
         return json({ ok: true });
       }
     }
 
-    // Notion import: POST { token } starts it in the background, GET tells how far it got.
-    // The token is used for this run only and never stored.
-    if (path === "/api/notion/import" && method === "GET") return json(notionJob ?? { status: "idle" });
-    if (path === "/api/notion/import" && method === "POST") {
-      if (notionJob?.status === "running") return json({ error: "이미 노션에서 가져오는 중입니다" }, 409);
+    // Notion: GET = connected or not and how the sync goes; PUT { token } connects (the token is kept to keep syncing),
+    // DELETE disconnects (notes stay); POST /api/notion/sync runs a full pass now; PUT /api/notion/root { pageId } picks
+    // the Notion page new top-level notes are made under (null = new top-level notes stay on this site).
+    if (path === "/api/notion" && method === "GET") {
+      const root = db.getSetting("notion_root");
+      const tops = db.notionPages().filter((l) => !l.parent && db.getNote(l.note_id)).map((l) => ({ id: l.page_id, title: db.getNote(l.note_id)!.title || "제목 없음" }));
+      return json({ ...notion.status(), root, pages: tops });
+    }
+    if (path === "/api/notion" && method === "PUT") {
       const token = str((await body(req)).token, 300);
       if (!token) return json({ error: "노션 토큰을 넣어 주세요" }, 400);
-      const job = (notionJob = newNotionJob());
-      const saveFile = async (name: string, mime: string, bytes: Blob) => {
-        const d = await google.upload(name, mime, bytes, origin);
-        return db.insertFile({ drive_id: d.id, name: d.name, title: d.name, mime: d.mimeType, size: Number(d.size ?? bytes.size), category: "기타", tags: "노션", note: "" });
-      };
-      importNotion({ token, apiBase: cfg.notionApi ?? "https://api.notion.com", db, saveFile, job }).then(
-        () => (job.status = "done"),
-        (e) => {
-          if (!(e instanceof NotionError)) console.error("notion import:", e);
-          job.status = "failed";
-          job.error = e instanceof NotionError ? e.message : "가져오다가 서버 오류가 났습니다";
-        },
-      );
-      return json(job, 202);
+      try {
+        await notion.connect(token);
+      } catch (e) {
+        if (!(e instanceof NotionError)) throw e;
+        return json({ error: e.message }, e.status === 401 ? 400 : 502);
+      }
+      return json(notion.status());
+    }
+    if (path === "/api/notion" && method === "DELETE") {
+      notion.disconnect();
+      return json(notion.status());
+    }
+    if (path === "/api/notion/sync" && method === "POST") {
+      if (!notion.status().connected) return json({ error: "노션이 연결되어 있지 않습니다" }, 400);
+      void notion.fullSync();
+      return json(notion.status(), 202);
+    }
+    if (path === "/api/notion/root" && method === "PUT") {
+      const id = (await body(req)).pageId;
+      if (id === null) db.raw.query("DELETE FROM settings WHERE key = 'notion_root'").run();
+      else if (typeof id === "string" && db.notionPage(id)) db.setSetting("notion_root", id);
+      else return json({ error: "노션 페이지를 찾을 수 없습니다" }, 404);
+      return json({ root: db.getSetting("notion_root") });
     }
 
     // Cloud files attached to a note, a task or a portfolio item: ?note=ID, ?task=ID, ?portfolio=ID,
@@ -778,6 +834,13 @@ ${body || `<section class="works"><p class="empty reveal">${mine ? "아직 포�
       if (!f || (!pub && !isAdmin(req))) return new Response("not found", { status: 404 });
       return sendFile(f, req, !RASTER.test(f.mime), pub ? "public, max-age=600" : "private, no-store");
     }
+    // A 파일함 file by a signed link (see fileLink): what Notion shows for a picture or file put in a note here.
+    const fl = path.match(/^\/f\/(\d+)\/([\w-]{22})(\/[^/]*)?$/);
+    if (fl && req.method === "GET") {
+      const f = db.getFile(Number(fl[1]));
+      if (!f || !linkOk(f.id, fl[2]!)) return new Response("not found", { status: 404 });
+      return sendFile(f, req, false, "private, max-age=3600");
+    }
     if (path === "/admin" && req.method === "GET") return new Response(adminHtml, { headers: { "Content-Type": "text/html; charset=utf-8" } });
     if (path === "/privacy" && req.method === "GET") return new Response(Bun.file(join(PUBLIC_DIR, "privacy.html")));
 
@@ -865,7 +928,8 @@ ${body || `<section class="works"><p class="empty reveal">${mine ? "아직 포�
     "default-src 'self'",
     "script-src 'self'",
     "style-src 'self' 'unsafe-inline'",
-    "img-src 'self'",
+    "img-src 'self' https: data:", // pictures in notes may come from anywhere Notion links to
+    "media-src 'self' https:",
     `connect-src 'self' ${google.apiOrigin}`,
     "object-src 'none'",
     "base-uri 'none'",
@@ -886,7 +950,7 @@ ${body || `<section class="works"><p class="empty reveal">${mine ? "아직 포�
     return res;
   }
 
-  return async function fetch(req: Request): Promise<Response> {
+  return Object.assign(async function fetch(req: Request): Promise<Response> {
     const path = new URL(req.url).pathname;
     try {
       return withSecurityHeaders(await handle(req), path);
@@ -895,5 +959,5 @@ ${body || `<section class="works"><p class="empty reveal">${mine ? "아직 포�
       console.error(e);
       return withSecurityHeaders(json({ error: "서버 오류" }, 500), path);
     }
-  };
+  }, { notion });
 }

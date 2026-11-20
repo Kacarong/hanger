@@ -1,7 +1,7 @@
 // 작업공간(관리) 화면.
 const CHUNK = 16 * 1024 * 1024; // must be a multiple of 256 KiB for Drive resumable uploads
 // 같은 ?v= 로 불러야 배포 직후 캐시의 옛 편집기와 섞이지 않는다.
-const { createEditor } = await import("./notes.js" + new URL(import.meta.url).search);
+const { createEditor, merge3 } = await import("./notes.js" + new URL(import.meta.url).search);
 const $ = (id) => document.getElementById(id);
 let me = null;
 let categories = [];
@@ -730,15 +730,17 @@ function updateOverdueBadge(n) {
 }
 
 // 노트: 고치면 잠깐 뒤 저장한다. 화면을 옮기거나 창을 닫을 때도 남은 것을 저장한다.
-// 저장하지 못한 초안은 버리지 않는다: 저장이 실패하면 다른 노트를 열지 않고, 다른 곳(다른 탭, 오늘 화면)에서
-// 노트가 바뀌었으면(409) 자동 저장을 멈추고 덮어쓸지 새로 불러올지 묻는다.
+// 저장하지 못한 초안은 버리지 않는다: 저장이 실패하면 다른 노트를 열지 않는다. 다른 곳(노션, 다른 탭, 오늘 화면)에서
+// 노트가 바뀌었으면(409) 블록마다 합쳐서(같은 블록을 둘 다 고쳤으면 이 화면 쪽) 다시 저장한다.
+// 열어 둔 노트는 10초마다 서버에 물어 노션에서 바뀐 내용을 받는다.
 let editor = null;
 let noteFiles = null; // attachBox of the open note
 let taskFiles = null; // attachBox of the task dialog
 let noteId = null; // the open note
 let noteVersion = 0; // the server version the editor content started from
 let noteDirty = false;
-let noteConflict = false;
+let noteBase = { title: "", blocks: [] }; // the note as the server last had it, for merging
+let noteLinks = {};
 let noteSaving = null; // the save in flight
 let noteLoadSeq = 0; // only the newest loadNotes may fill the editor
 let noteTimer;
@@ -747,34 +749,9 @@ const noteTime = (s) => new Intl.DateTimeFormat("ko-KR", { timeZone: "Asia/Seoul
 
 function noteChanged() {
   noteDirty = true;
-  if (noteConflict) return; // 덮어쓸지 불러올지 고를 때까지 저장하지 않는다
   $("note-status").textContent = "저장 전";
   clearTimeout(noteTimer);
   noteTimer = setTimeout(() => saveNote().catch(() => {}), 700);
-}
-
-function showConflict() {
-  $("note-status").replaceChildren(
-    el("span", { className: "error", textContent: "다른 곳에서 이 노트가 바뀌어 저장을 멈췄습니다. " }),
-    el("button", { className: "btn sm", type: "button", textContent: "내 내용으로 덮어쓰기", onclick: () => overwriteNote().catch(showError) }),
-    " ",
-    el("button", { className: "btn sm ghost", type: "button", textContent: "바뀐 내용 불러오기", onclick: () => reloadNote().catch(showError) }),
-  );
-}
-
-async function overwriteNote() {
-  const n = await call(`/api/notes/${noteId}`);
-  noteVersion = n.version;
-  noteConflict = false;
-  noteDirty = true;
-  await saveNote();
-}
-
-async function reloadNote() {
-  if (!confirm("이 화면에서 고친 내용은 버리고 바뀐 노트를 불러올까요?")) return;
-  noteConflict = false;
-  noteDirty = false;
-  await loadNotes();
 }
 
 // Resolves once everything typed so far is stored; rejects (keeping the draft) when it can't be.
@@ -782,31 +759,83 @@ async function saveNote(keepalive = false) {
   clearTimeout(noteTimer);
   while (noteSaving) await noteSaving.catch(() => {});
   if (!noteDirty || noteId === null) return;
-  if (noteConflict) throw new Error("다른 곳에서 바뀐 노트라 저장하지 않았습니다. 노트 위의 버튼으로 골라 주세요.");
   noteDirty = false;
   const id = noteId;
   const title = $("note-title").value;
+  const blocks = structuredClone(editor.get());
   $("note-status").textContent = "저장 중…";
-  noteSaving = call(`/api/notes/${id}`, { method: "PUT", body: { title, blocks: editor.get(), version: noteVersion }, keepalive });
+  noteSaving = call(`/api/notes/${id}`, { method: "PUT", body: { title, blocks, version: noteVersion }, keepalive });
   try {
     const r = await noteSaving;
     if (id !== noteId) return;
     noteVersion = r.version;
-    if (!noteDirty) $("note-status").textContent = "저장됨";
+    noteBase = { title, blocks };
+    if (!noteDirty) $("note-status").textContent = noteSyncText();
     const a = document.querySelector(`#note-list a[data-id="${id}"]`);
     if (a) a.replaceChildren(title || "제목 없음", el("small", { textContent: noteTime(r.updated_at) }));
   } catch (e) {
     if (id === noteId) {
       noteDirty = true; // 다음에 고치거나 화면을 옮길 때 다시 저장한다
       if (e.status === 409) {
-        noteConflict = true;
-        showConflict();
-      } else $("note-status").textContent = "저장 실패: " + e.message;
+        noteSaving = null;
+        await mergeNote(id);
+        return saveNote(keepalive);
+      }
+      $("note-status").textContent = "저장 실패: " + e.message;
     }
     throw e;
   } finally {
     noteSaving = null;
   }
+}
+const noteSyncText = () => (noteLinked ? "저장됨 · 노션에 반영" : "저장됨");
+let noteLinked = false;
+
+// 서버의 노트와 이 화면에서 고친 것을 합친다.
+async function mergeNote(id) {
+  const n = await call(`/api/notes/${id}`);
+  if (id !== noteId) return;
+  const local = { title: $("note-title").value, blocks: structuredClone(editor.get()) };
+  const blocks = merge3(noteBase.blocks, local.blocks, n.blocks);
+  const title = local.title !== noteBase.title ? local.title : n.title;
+  noteBase = { title: n.title, blocks: n.blocks };
+  noteVersion = n.version;
+  noteLinks = n.links ?? {};
+  if (document.activeElement !== $("note-title")) $("note-title").value = title;
+  editor.replace(blocks, noteLinks);
+  showNoteNotion(n);
+}
+
+// 열어 둔 노트를 서버(노션에서 바뀐 것)와 맞춘다. 고치는 중이면 다음 저장 때 합친다.
+async function refreshNote() {
+  if (noteId === null || document.visibilityState !== "visible" || noteSaving || currentTab() !== "notes") return;
+  const id = noteId;
+  const n = await call(`/api/notes/${id}`);
+  if (id !== noteId || n.version <= noteVersion) return;
+  if (noteDirty || noteSaving) return; // the next save meets a 409 and merges
+  noteBase = { title: n.title, blocks: n.blocks };
+  noteVersion = n.version;
+  noteLinks = n.links ?? {};
+  if (document.activeElement !== $("note-title")) $("note-title").value = n.title;
+  editor.replace(n.blocks, noteLinks);
+  showNoteNotion(n);
+  const a = document.querySelector(`#note-list a[data-id="${id}"]`);
+  if (a) a.replaceChildren(n.title || "제목 없음", el("small", { textContent: noteTime(n.updated_at) }));
+}
+
+// 노션 페이지인 노트: 노션에서 열기, 데이터베이스 행이면 열 값(읽기만).
+function showNoteNotion(n) {
+  const box = $("note-notion");
+  noteLinked = !!n.notion;
+  box.hidden = !n.notion;
+  if (!n.notion) return box.replaceChildren();
+  box.replaceChildren(
+    ...[
+    el("a", { href: n.notion.url, target: "_blank", rel: "noopener", className: "btn ghost sm" }, "노션에서 열기 ↗"),
+    n.notion.readOnly ? el("span", { className: "error", textContent: "너무 길거나 깊은 페이지라 여기서는 읽기만 합니다. 노션에서 고쳐 주세요." }) : null,
+    n.notion.props.length ? el("dl", { className: "note-props" }, ...n.notion.props.flatMap(([k, v]) => [el("dt", { textContent: k }), el("dd", { textContent: v })])) : null,
+    ].filter(Boolean),
+  );
 }
 
 // 노트 목록은 노션처럼 상위 노트 밑에 하위 노트를 접어 둔 트리다(검색할 때는 맞는 노트만 평평하게).
@@ -876,6 +905,7 @@ async function loadNotes() {
     } catch (e) {
       if (noteId !== null) history.replaceState(null, "", `#notes/${noteId}`); // 지금 노트에 머문다
       $("note-delete").hidden = noteId === null; // the bar was rebuilt by showTab
+      $("note-sub").hidden = noteId === null;
       showError("노트를 저장하지 못해 다른 노트를 열지 않았습니다: " + e.message);
       return;
     }
@@ -891,17 +921,22 @@ async function loadNotes() {
     noteId = note?.id ?? null;
     noteVersion = note?.version ?? 0;
     noteDirty = false;
-    noteConflict = false;
     page.hidden = !note;
     $("note-empty").hidden = !!note;
     $("note-delete").hidden = !note;
+    $("note-sub").hidden = !note;
     document.querySelectorAll("#note-list a").forEach((a) => a.classList.toggle("active", Number(a.dataset.id) === noteId));
     if (note) revealNote(note.id);
     if (!note) return localStorage.removeItem("note");
     localStorage.setItem("note", note.id);
     $("note-title").value = note.title;
-    $("note-status").textContent = "저장됨";
-    editor.set(note.blocks);
+    noteBase = { title: note.title, blocks: note.blocks };
+    noteLinks = note.links ?? {};
+    showNoteNotion(note);
+    $("note-status").textContent = noteSyncText();
+    editor.setReadOnly(!!note.notion?.readOnly);
+    $("note-title").readOnly = !!note.notion?.readOnly;
+    editor.set(note.blocks, noteLinks);
     noteFiles.show(note.id);
     page.inert = false;
     if (focusTitle) $("note-title").focus();
@@ -911,15 +946,20 @@ async function loadNotes() {
   }
 }
 
-async function newNote() {
+async function newNote(under = null) {
   await saveNote(); // 저장하지 못하면 지금 노트에 머문다
-  const n = await call("/api/notes", { method: "POST", body: {} });
+  const n = await call("/api/notes", { method: "POST", body: under ? { parent_id: under } : {} });
+  if (under) openNotes.add(under), localStorage.setItem("noteOpen", JSON.stringify([...openNotes]));
   focusTitle = true;
   location.hash = `#notes/${n.id}`;
+  if (n.warning) setTimeout(() => showError(n.warning), 300);
 }
 
 async function deleteNote() {
-  const kidsNote = noteList.some((n) => n.parent_id === noteId) ? " 하위 노트는 지우지 않고 한 단계 위로 옮깁니다." : "";
+  const hasKids = noteList.some((n) => n.parent_id === noteId);
+  const kidsNote = noteLinked
+    ? ` 노션에서도 휴지통으로 옮깁니다(노션 휴지통에서 되살리면 여기에도 돌아옵니다).${hasKids ? " 노션처럼 하위 노트도 함께 지워집니다." : ""}`
+    : hasKids ? " 하위 노트는 지우지 않고 한 단계 위로 옮깁니다." : "";
   if (noteId === null || !confirm(`"${$("note-title").value || "제목 없음"}" 노트를 삭제할까요? 이 노트에서 만든 할 일도 함께 지워집니다.${kidsNote}`)) return;
   clearTimeout(noteTimer);
   noteDirty = false;
@@ -930,32 +970,36 @@ async function deleteNote() {
   else location.hash = "#notes";
 }
 
-// 노션 가져오기는 서버에서 돌고, 화면은 1초마다 어디까지 했는지 묻는다(창을 닫아도 계속된다).
+// 노션 연동 창: 연결 상태, 토큰, 새 노트를 만들 노션 페이지. 맞추는 중이면 1초마다 진행을 묻는다.
 let notionTimer;
 function notionText(j) {
-  const counts = `새 노트 ${j.added} · 갱신 ${j.updated} · 그대로 ${j.unchanged}${j.files ? ` · 파일 ${j.files}개 복사` : ""}`;
-  if (j.status === "running") return `가져오는 중… 페이지 ${j.done}/${j.total || "?"}\n${counts}`;
-  if (j.status === "failed") return `가져오지 못했습니다: ${j.error}${j.done ? `\n(멈추기 전까지: ${counts})` : ""}`;
+  if (!j.connected) return j.error ? `연결되어 있지 않습니다. ${j.error}` : "연결되어 있지 않습니다.";
   return [
-    `다 가져왔습니다. ${counts}`,
-    !j.total && "통합에 연결된 페이지가 없습니다. 2번(페이지에 통합 연결)을 확인해 주세요.",
-    j.skipped.length && `여기서 고친 노트라 노션 내용으로 덮지 않음: ${j.skipped.join(", ")}`,
-    j.failed.length && `가져오지 못한 페이지: ${j.failed.join(", ")}`,
-    j.partial?.length && `일부만 가져온 페이지(너무 길거나 깊거나, 읽을 수 없는 데이터베이스가 있음): ${j.partial.join(", ")}`,
-    j.fileProblems && `가져오지 못한 파일 ${j.fileProblems}개 (노트에 "가져오지 못함"으로 표시, 다시 가져오면 또 시도합니다)`,
+    j.running ? `노션과 맞추는 중… 페이지 ${j.done}/${j.total || "?"}` : `연결됨${j.lastSync ? ` · 마지막으로 모두 맞춘 때 ${new Intl.DateTimeFormat("ko-KR", { hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(new Date(j.lastSync))}` : ""}`,
+    j.error && `문제: ${j.error}`,
+    j.failed?.length && `맞추지 못한 페이지: ${j.failed.join(", ")}`,
+    j.partial?.length && `너무 길거나 깊어서 여기서는 읽기만 하는 페이지: ${j.partial.join(", ")}`,
+    j.fileProblems && `노션에서 가져오지 못한 파일 ${j.fileProblems}개 (30분마다 다시 시도합니다)`,
   ].filter(Boolean).join("\n");
 }
 async function watchNotion(wasRunning = false) {
   clearTimeout(notionTimer);
-  const j = await call("/api/notion/import");
-  $("notion-status").textContent = j.status === "idle" ? "" : notionText(j);
-  $("notion-go").disabled = j.status === "running";
-  if (j.status === "running") notionTimer = setTimeout(() => watchNotion(true).catch(showError), 1000);
+  const j = await call("/api/notion");
+  $("notion-state").textContent = notionText(j);
+  $("notion-connect").hidden = j.connected && !j.error?.includes("토큰");
+  $("notion-go").textContent = j.connected ? "토큰 바꾸기" : "연결";
+  $("notion-off").hidden = !j.connected;
+  $("notion-sync").hidden = !j.connected;
+  $("notion-sync").disabled = j.running;
+  $("notion-root-row").hidden = !j.connected || !j.pages.length;
+  $("notion-root").replaceChildren(el("option", { value: "", textContent: "만들지 않음 (이 사이트에만)" }), ...j.pages.map((p) => el("option", { value: p.id, textContent: p.title })));
+  $("notion-root").value = j.root ?? "";
+  if (j.running && $("notion-dialog").open) notionTimer = setTimeout(() => watchNotion(true).catch(showError), 1000);
   else if (wasRunning && currentTab() === "notes") loadNotes().catch(showError);
 }
 function openNotion() {
   $("notion-token").value = "";
-  $("notion-status").textContent = "";
+  $("notion-state").textContent = "";
   $("notion-dialog").showModal();
   watchNotion().catch(showError);
 }
@@ -973,7 +1017,8 @@ const tabs = {
     load: () => loadNotes(),
     actions: () => [
       el("button", { className: "btn ghost danger", type: "button", id: "note-delete", title: "노트 삭제", ariaLabel: "노트 삭제", hidden: true, onclick: () => deleteNote().catch(showError) }, icon("trash")),
-      el("button", { className: "btn", type: "button", onclick: openNotion }, icon("download"), "노션에서 가져오기"),
+      el("button", { className: "btn", type: "button", onclick: openNotion }, icon("download"), "노션 연동"),
+      el("button", { className: "btn", type: "button", id: "note-sub", hidden: true, title: "지금 노트 아래에 하위 노트 만들기", onclick: () => newNote(noteId).catch(showError) }, icon("plus"), "하위 노트"),
       el("button", { className: "btn primary", type: "button", onclick: () => newNote().catch(showError) }, icon("plus"), "새 노트", el("kbd", { textContent: "N" })),
     ],
   },
@@ -1108,7 +1153,11 @@ async function init() {
   $("task-kind").append(...opts(taskKinds));
   $("up-category").append(...opts(categories));
   $("file-category").append(...opts(categories));
-  editor = createEditor($("note-editor"), noteChanged);
+  editor = createEditor($("note-editor"), noteChanged, {
+    // 사진·파일 블록: 클라우드에서 고른 파일마다 블록 하나.
+    pickFile: (onFile) => openPicker({ has: () => false, attach: async (f) => onFile(f) }),
+  });
+  setInterval(() => refreshNote().catch(() => {}), 10_000);
   noteFiles = attachBox($("note-files"), "note");
   taskFiles = attachBox($("task-files"), "task");
   itemFiles = attachBox($("item-files"), "portfolio", "사진·파일 (첫 파일이 대표 사진)");
@@ -1273,14 +1322,21 @@ async function init() {
   };
   $("notion-form").onsubmit = async (ev) => {
     ev.preventDefault();
+    if ($("notion-connect").hidden) return void ($("notion-connect").hidden = false); // "토큰 바꾸기": show the field first
     try {
-      await call("/api/notion/import", { method: "POST", body: { token: $("notion-token").value.trim() } });
+      await call("/api/notion", { method: "PUT", body: { token: $("notion-token").value.trim() } });
       $("notion-token").value = "";
       await watchNotion(true);
     } catch (e) {
-      $("notion-status").textContent = e.message;
+      $("notion-state").textContent = e.message;
     }
   };
+  $("notion-sync").onclick = () => call("/api/notion/sync", { method: "POST" }).then(() => watchNotion(true)).catch((e) => ($("notion-state").textContent = e.message));
+  $("notion-off").onclick = () => {
+    if (!confirm("노션 연결을 끊을까요? 노트는 그대로 남고, 다시 연결하면 이어서 맞춥니다.")) return;
+    call("/api/notion", { method: "DELETE" }).then(() => watchNotion()).catch(showError);
+  };
+  $("notion-root").onchange = () => call("/api/notion/root", { method: "PUT", body: { pageId: $("notion-root").value || null } }).catch(showError);
   $("logout").onclick = () => {
     storage(() => localStorage.setItem("noAutoLogin", "1")); // otherwise the reload would sign straight back in
     call("/auth/logout", { method: "POST" }).then(() => location.reload());

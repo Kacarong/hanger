@@ -1,4 +1,5 @@
 import { Database } from "bun:sqlite";
+import { blockTitle, type Block } from "./blocks";
 
 export type FileRow = {
   id: number;
@@ -44,15 +45,28 @@ export type TaskRow = {
 export const TASK_KINDS = ["할 일", "과제"];
 export type TaskFields = Pick<TaskRow, "kind" | "title" | "course" | "due_date" | "due_time" | "note">;
 
-// A note is a list of blocks. A "todo" block with a date is also a task (tasks.note_id/block_id),
+// A note is a list of blocks (src/blocks.ts). A "todo" block with a date is also a task (tasks.note_id/block_id),
 // so it shows up on the today screen and the calendar.
-export const BLOCK_TYPES = ["p", "h1", "h2", "h3", "todo", "bullet", "number", "quote", "code", "divider"];
-export const NOTE_MAX_BLOCKS = 3000;
-export const NOTE_MAX_TEXT = 500_000; // characters across all blocks of a note
-export type Block = { id: string; type: string; text: string; checked?: boolean; date?: string; time?: string };
+export { BLOCK_TYPES, NOTE_MAX_BLOCKS, NOTE_MAX_TEXT, blockTitle, type Block } from "./blocks";
 // version goes up on every write; a save must name the version it started from (see saveNote).
 export type NoteRow = { id: number; title: string; blocks: Block[]; version: number; parent_id: number | null; created_at: string; updated_at: string };
 type NoteRecord = Omit<NoteRow, "blocks"> & { blocks: string };
+
+// A note that is a Notion page. snapshot: the page as this site last read it from (or wrote to) Notion,
+// in note blocks; a save here is sent to Notion as the difference from it. null until the first read.
+export type NotionPageRow = {
+  page_id: string;
+  note_id: number;
+  edited: string; // Notion's last_edited_time when last read ('' = read it again)
+  version: number; // the note version the snapshot belongs to
+  kids: string[]; // child pages ("page:<id>") and databases ("db:<id>") found in it
+  snapshot: { title: string; blocks: Block[] } | null;
+  title_prop: string; // the name of the page's title property ("title", or a database's title column)
+  icon: string; // the page's emoji, shown in front of the note title
+  props: [string, string][]; // a database row's other columns, shown read-only
+  parent: string; // the Notion page it sits in ('' at the top or in a database)
+};
+type NotionPageRecord = Omit<NotionPageRow, "kids" | "snapshot" | "props"> & { kids: string; snapshot: string; props: string };
 
 // A cloud file attached to a note, a task, a portfolio item or the portfolio profile (target_id 0).
 // The file itself stays in the 파일함; detaching only drops the link.
@@ -79,9 +93,6 @@ export type PortfolioItem = {
 };
 export type PortfolioFields = Pick<PortfolioItem, "section_id" | "title" | "period" | "summary" | "body" | "link" | "public">;
 const DEFAULT_SECTIONS = ["업적", "작품", "특기", "취미", "내 정보"];
-
-// The task title of a todo block: its first line.
-export const blockTitle = (b: Block) => b.text.split("\n")[0]!.trim().slice(0, 200);
 
 // by_import = 1: the Notion import made this attachment, so a later import may take it off again. Ones the owner made stay.
 const ATTACHMENTS_COLUMNS = `
@@ -175,6 +186,11 @@ export function openDb(path: string) {
   if (!noteCols.includes("parent_id")) db.exec("ALTER TABLE notes ADD COLUMN parent_id INTEGER");
   const notionCols = (db.query("PRAGMA table_info(notion_pages)").all() as { name: string }[]).map((c) => c.name);
   if (!notionCols.includes("kids")) db.exec("ALTER TABLE notion_pages ADD COLUMN kids TEXT NOT NULL DEFAULT '[]'");
+  for (const [col, def] of [["snapshot", "TEXT NOT NULL DEFAULT ''"], ["title_prop", "TEXT NOT NULL DEFAULT 'title'"], ["icon", "TEXT NOT NULL DEFAULT ''"], ["props", "TEXT NOT NULL DEFAULT '[]'"], ["parent", "TEXT NOT NULL DEFAULT ''"]]) {
+    if (!notionCols.includes(col!)) db.exec(`ALTER TABLE notion_pages ADD COLUMN ${col} ${def}`);
+  }
+  // A block made on this site keeps its id in the note; this is the id Notion gave it (blocks read from Notion use Notion's id).
+  db.exec("CREATE TABLE IF NOT EXISTS notion_blocks (note_id INTEGER NOT NULL, block_id TEXT NOT NULL, notion_id TEXT NOT NULL UNIQUE, PRIMARY KEY (note_id, block_id))");
   const notionFileCols = (db.query("PRAGMA table_info(notion_files)").all() as { name: string }[]).map((c) => c.name);
   if (!notionFileCols.includes("source")) db.exec("ALTER TABLE notion_files ADD COLUMN source TEXT NOT NULL DEFAULT ''");
   const attachCols = (db.query("PRAGMA table_info(attachments)").all() as { name: string }[]).map((c) => c.name);
@@ -221,6 +237,7 @@ export function openDb(path: string) {
     (SELECT COUNT(*) FROM attachments WHERE target = 'task' AND target_id = tasks.id) AS files
     FROM tasks LEFT JOIN notes ON notes.id = tasks.note_id`;
   const TASK_ORDER = "ORDER BY due_date IS NULL, due_date, due_time IS NULL, due_time, tasks.id";
+  const notionRow = (r: NotionPageRecord): NotionPageRow => ({ ...r, kids: JSON.parse(r.kids), snapshot: r.snapshot ? JSON.parse(r.snapshot) : null, props: JSON.parse(r.props) });
   function getNote(id: number): NoteRow | null {
     const r = db.query("SELECT id, title, blocks, version, parent_id, created_at, updated_at FROM notes WHERE id = ?").get(id) as NoteRecord | null;
     return r ? { ...r, blocks: JSON.parse(r.blocks) as Block[] } : null;
@@ -435,13 +452,49 @@ export function openDb(path: string) {
     setNoteTimes(id: number, created: string, updated: string) {
       db.query("UPDATE notes SET created_at = ?, updated_at = ? WHERE id = ?").run(created, updated, id);
     },
-    notionPage(pageId: string): { note_id: number; edited: string; version: number; kids: string[] } | null {
-      const r = db.query("SELECT note_id, edited, version, kids FROM notion_pages WHERE page_id = ?").get(pageId) as { note_id: number; edited: string; version: number; kids: string } | null;
-      return r ? { ...r, kids: JSON.parse(r.kids) as string[] } : null;
+    notionPage(pageId: string): NotionPageRow | null {
+      const r = db.query("SELECT * FROM notion_pages WHERE page_id = ?").get(pageId) as NotionPageRecord | null;
+      return r ? notionRow(r) : null;
+    },
+    notionPageOfNote(noteId: number): NotionPageRow | null {
+      const r = db.query("SELECT * FROM notion_pages WHERE note_id = ?").get(noteId) as NotionPageRecord | null;
+      return r ? notionRow(r) : null;
+    },
+    notionPages(): NotionPageRow[] {
+      return (db.query("SELECT * FROM notion_pages").all() as NotionPageRecord[]).map(notionRow);
     },
     setNotionPage(pageId: string, noteId: number, edited: string, version: number, kids: string[]) {
-      db.query("INSERT OR REPLACE INTO notion_pages (page_id, note_id, edited, version, kids) VALUES (?, ?, ?, ?, ?)").run(pageId, noteId, edited, version, JSON.stringify(kids));
+      db.query("INSERT INTO notion_pages (page_id, note_id, edited, version, kids) VALUES (?, ?, ?, ?, ?) ON CONFLICT(page_id) DO UPDATE SET note_id = excluded.note_id, edited = excluded.edited, version = excluded.version, kids = excluded.kids").run(pageId, noteId, edited, version, JSON.stringify(kids));
     },
+    updateNotionPage(pageId: string, patch: Partial<Omit<NotionPageRow, "page_id">>) {
+      const enc: Record<string, unknown> = { ...patch };
+      if (patch.kids) enc.kids = JSON.stringify(patch.kids);
+      if (patch.props) enc.props = JSON.stringify(patch.props);
+      if ("snapshot" in patch) enc.snapshot = patch.snapshot ? JSON.stringify(patch.snapshot) : "";
+      const keys = Object.keys(enc);
+      if (keys.length) db.query(`UPDATE notion_pages SET ${keys.map((k) => `${k} = ?`).join(", ")} WHERE page_id = ?`).run(...(keys.map((k) => enc[k]) as (string | number)[]), pageId);
+    },
+    deleteNotionPage(pageId: string) {
+      const r = db.query("DELETE FROM notion_pages WHERE page_id = ? RETURNING note_id").get(pageId) as { note_id: number } | null;
+      if (r) db.query("DELETE FROM notion_blocks WHERE note_id = ?").run(r.note_id);
+    },
+    // note block id → Notion block id, for the blocks of a note made on this site.
+    notionBlockIds(noteId: number): Map<string, string> {
+      return new Map((db.query("SELECT block_id, notion_id FROM notion_blocks WHERE note_id = ?").all(noteId) as { block_id: string; notion_id: string }[]).map((r) => [r.block_id, r.notion_id]));
+    },
+    setNotionBlockId(noteId: number, blockId: string, notionId: string) {
+      db.query("INSERT OR REPLACE INTO notion_blocks (note_id, block_id, notion_id) VALUES (?, ?, ?)").run(noteId, blockId, notionId);
+    },
+    deleteNotionBlockId(noteId: number, blockId: string) {
+      db.query("DELETE FROM notion_blocks WHERE note_id = ? AND block_id = ?").run(noteId, blockId);
+    },
+    // Writes the note as read from Notion only if it was not saved here since `version`. Returns the new version, or null.
+    writeNoteIf: db.transaction((id: number, version: number, title: string, blocks: Block[], today: string): number | null => {
+      const n = getNote(id);
+      if (!n || n.version !== version) return null;
+      writeNote(id, title, blocks, today);
+      return n.version + 1;
+    }),
     // The 파일함 copy of a Notion file, if it is still there.
     notionFile(key: string): (FileRow & { source: string }) | null {
       return db.query("SELECT files.*, notion_files.source FROM notion_files JOIN files ON files.id = notion_files.file_id WHERE block_id = ?").get(key) as (FileRow & { source: string }) | null;
@@ -525,6 +578,10 @@ export function openDb(path: string) {
            WHERE a.file_id = ? AND (a.target = 'profile' OR i.public = 1)`,
         )
         .get(fileId);
+    },
+    // The notes under it, at any depth (nearest first).
+    noteDescendants(id: number): number[] {
+      return (db.query("WITH RECURSIVE t(id) AS (SELECT id FROM notes WHERE parent_id = ? UNION SELECT notes.id FROM notes JOIN t ON notes.parent_id = t.id) SELECT id FROM t").all(id) as { id: number }[]).map((r) => r.id);
     },
     // Notes under it move up to its parent, so deleting a note never takes others with it.
     deleteNote: db.transaction((id: number) => {

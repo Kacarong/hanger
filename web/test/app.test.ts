@@ -167,7 +167,7 @@ function makeApp(opts: { googleEnabled?: boolean; now?: () => Date; notionApi?: 
     db,
   );
   const fetch = createApp(
-    { baseUrl: "https://kacarong.kr", adminEmail: "owner@example.com", dataDir, googleEnabled: opts.googleEnabled ?? true, now: opts.now, notionApi: opts.notionApi },
+    { baseUrl: "https://kacarong.kr", adminEmail: "owner@example.com", dataDir, googleEnabled: opts.googleEnabled ?? true, now: opts.now, notionApi: opts.notionApi, notionDebounceMs: 0 },
     db,
     google,
   );
@@ -176,7 +176,7 @@ function makeApp(opts: { googleEnabled?: boolean; now?: () => Date; notionApi?: 
     if (init.cookie) headers.set("Cookie", init.cookie);
     return fetch(new Request("https://kacarong.kr" + path, { ...init, headers }));
   };
-  return { call, db, cleanup: () => rmSync(dataDir, { recursive: true, force: true }) };
+  return { call, db, notion: fetch.notion, cleanup: () => rmSync(dataDir, { recursive: true, force: true }) };
 }
 
 async function login(call: ReturnType<typeof makeApp>["call"], code = "good-code") {
@@ -945,421 +945,6 @@ test("클라우드 첨부: 노트·할 일에 파일함 파일을 붙이고 떼�
   }
 });
 
-test("노션 가져오기: 페이지·데이터베이스 행은 노트로, 파일은 파일함으로, 다시 돌리면 노션에서 바뀐 것만 갱신", async () => {
-  loginEmail = "owner@example.com";
-  const uid = (n: number) => `00000000-0000-0000-0000-${String(n).padStart(12, "0")}`;
-  const rt = (text: string, extra: object = {}) => ({ type: "text", plain_text: text, href: null, ...extra });
-  const children = new Map<string, object[]>();
-  let n = 100;
-  const blk = (type: string, data: object, kids?: object[], id = uid(n++)) => {
-    if (kids) children.set(id, kids);
-    return { object: "block", id, type, has_children: !!kids, [type]: data };
-  };
-  // A (in search) → child page SUB (in search) and HIDDEN (not in search), and database DB whose row ROW2 is not in search.
-  const [A, SUB, ROW, OLD, HIDDEN, DB, ROW2] = [1, 2, 3, 4, 5, 6, 7].map(uid) as [string, string, string, string, string, string, string];
-  const title = (t: string) => ({ 이름: { type: "title", title: [rt(t)] } });
-  const page = (id: string, t: string, edited: string, extra: object = {}): Record<string, unknown> => ({
-    object: "page", id, created_time: "2026-09-01T00:00:00.000Z", last_edited_time: edited, properties: title(t), ...extra,
-  });
-  let notion: ReturnType<typeof Bun.serve>;
-  const fileUrl = (name: string) => `${notion!.url}files/${name}?X-Amz-Signature=${n++}`; // the signature changes on every read, like Notion's
-  const pages: Record<string, unknown>[] = [
-    page(A, "강의 노트", "2026-11-10T01:00:00.000Z", { icon: { type: "emoji", emoji: "📚" } }),
-    page(SUB, "하위 페이지", "2026-11-05T00:00:00.000Z"),
-    page(ROW, "회의", "2026-11-12T00:00:00.000Z", {
-      properties: {
-        ...title("회의"),
-        날짜: { id: "d1", type: "date", date: { start: "2026-11-21", end: null } },
-        태그: { id: "t1", type: "multi_select", multi_select: [{ name: "학교" }, { name: "팀" }] },
-        상태: { id: "s1", type: "status", status: { name: "진행 중" } },
-        메모: { id: "m1", type: "rich_text", rich_text: [] },
-      },
-    }),
-    page(OLD, "지운 페이지", "2026-01-01T00:00:00.000Z", { archived: true }),
-  ];
-  const hidden = [
-    page(HIDDEN, "검색에 안 나오는 페이지", "2026-11-03T00:00:00.000Z"),
-    page(ROW2, "자료 행", "2026-11-04T00:00:00.000Z", {
-      parent: { type: "database_id", database_id: DB },
-      properties: { ...title("자료 행"), 파일: { id: "f%3A", type: "files", files: [{ name: "slides.pdf", type: "file", file: { url: "" } }, { name: "외부", type: "external", external: { url: "https://x.example/a" } }] } },
-    }),
-  ];
-  const byId = () => new Map([...pages, ...hidden].map((p) => [p.id as string, p]));
-  let throttled = false;
-  let missingFails = true; // a file that fails on the first run only
-  let childCalls = 0;
-  notion = Bun.serve({
-    port: 0,
-    async fetch(req) {
-      const url = new URL(req.url);
-      if (url.pathname === "/files/missing.png" && missingFails) return new Response("gone", { status: 503 });
-      if (url.pathname.startsWith("/files/")) return new Response(`BYTES-${url.pathname}`, { headers: { "Content-Type": "application/octet-stream" } });
-      if (req.headers.get("Authorization") !== "Bearer ntn_good") return Response.json({ code: "unauthorized" }, { status: 401 });
-      if (req.headers.get("Notion-Version") !== "2022-06-28") return new Response("version", { status: 400 });
-      const slice = (list: unknown[], cursor: string | null | undefined, size: number) => {
-        const i = Number(cursor ?? 0);
-        const more = i + size < list.length;
-        return Response.json({ results: list.slice(i, i + size), has_more: more, next_cursor: more ? String(i + size) : null });
-      };
-      if (url.pathname === "/v1/search" && req.method === "POST") {
-        if (!throttled) return ((throttled = true), new Response("slow down", { status: 429, headers: { "Retry-After": "0" } }));
-        const b = await req.json();
-        if (b.filter?.value === "database") return slice([], undefined, 1);
-        if (b.filter?.value !== "page") return new Response("filter", { status: 400 });
-        return slice(pages, b.start_cursor, 2);
-      }
-      const pg = url.pathname.match(/^\/v1\/pages\/([^/]+)$/);
-      if (pg) return byId().has(pg[1]!) ? Response.json(byId().get(pg[1]!)) : new Response("not found", { status: 404 });
-      const dq = url.pathname.match(/^\/v1\/databases\/([^/]+)\/query$/);
-      if (dq && req.method === "POST") {
-        if (dq[1] !== DB) return new Response("not found", { status: 404 });
-        // Row file links are signed fresh on every read.
-        (hidden[1]!.properties as any).파일.files[0].file.url = fileUrl("slides.pdf");
-        return slice([pages[2], hidden[1]], (await req.json()).start_cursor, 1);
-      }
-      const m = url.pathname.match(/^\/v1\/blocks\/([^/]+)\/children$/);
-      const list = m && children.get(m[1]!);
-      if (!list) return new Response("not found", { status: 404 });
-      childCalls++;
-      // File links are signed fresh on every read.
-      for (const b of list as any[]) if (b.image?.type === "file") b.image.file.url = fileUrl(b.image.file.name);
-      return slice(list, url.searchParams.get("start_cursor"), 4);
-    },
-  });
-  const file = (name: string) => ({ type: "file", file: { name, url: "" }, caption: [] });
-  // 35 toggles inside each other: the import goes 30 levels below the top and says the rest is missing.
-  let deep: object = blk("paragraph", { rich_text: [rt("바닥")] });
-  for (let i = 35; i >= 1; i--) deep = blk("toggle", { rich_text: [rt(`단계 ${i}`)] }, [deep]);
-  children.set(A, [
-    blk("heading_1", { rich_text: [rt("1주차")] }),
-    blk("paragraph", { rich_text: [rt("굵게 "), rt("링크", { href: "https://example.com" })] }),
-    blk("to_do", { checked: false, rich_text: [rt("과제 제출 "), { type: "mention", plain_text: "2026년 11월 20일", mention: { type: "date", date: { start: "2026-11-20T09:00:00.000+09:00" } } }] }),
-    blk("to_do", { checked: true, rich_text: [rt("끝난 일")] }),
-    blk("bulleted_list_item", { rich_text: [rt("항목")] }, [blk("bulleted_list_item", { rich_text: [rt("하위 항목")] })]),
-    blk("table", { table_width: 2 }, [blk("table_row", { cells: [[rt("a")], [rt("b")]] }), blk("table_row", { cells: [[rt("1")], [rt("2")]] })]),
-    blk("image", file("board.png")),
-    blk("image", file("missing.png")),
-    blk("image", { type: "external", external: { url: "https://img.example/x.png" }, caption: [rt("외부 그림")] }),
-    blk("child_page", { title: "하위 페이지" }, undefined, SUB),
-    blk("child_page", { title: "검색에 안 나오는 페이지" }, undefined, HIDDEN),
-    blk("child_database", { title: "자료" }, undefined, DB),
-    blk("code", { rich_text: [rt("print(1)")], language: "python" }),
-    blk("divider", {}),
-    blk("callout", { rich_text: [rt("주의")], icon: { type: "emoji", emoji: "💡" } }),
-    blk("column_list", {}, [blk("column", {}, [blk("paragraph", { rich_text: [rt("왼쪽")] })])]),
-    blk("unsupported", {}),
-  ]);
-  children.set(SUB, [blk("paragraph", { rich_text: [rt("하위 내용")] })]);
-  children.set(HIDDEN, [deep]);
-  children.set(ROW, []);
-  children.set(ROW2, []);
-
-  const { call, db, cleanup } = makeApp({ notionApi: notion.url.toString().replace(/\/$/, "") });
-  try {
-    const { cookie } = await login(call);
-    const req = (path: string, method: string, b?: object) => call(path, { method, cookie, headers: JSON_ORIGIN, body: b ? JSON.stringify(b) : undefined });
-    const status = async () => (await (await req("/api/notion/import", "GET")).json()) as Record<string, unknown>;
-    const finish = async () => {
-      for (let i = 0; i < 1000; i++) {
-        const j = await status();
-        if (j.status !== "running") return j;
-        await Bun.sleep(5);
-      }
-      throw new Error("가져오기가 끝나지 않음");
-    };
-    const run = async () => {
-      expect((await req("/api/notion/import", "POST", { token: "ntn_good" })).status).toBe(202);
-      return finish();
-    };
-    const attached = async (noteId: number) =>
-      ((await (await req(`/api/attachments?note=${noteId}`, "GET")).json()) as { title: string; drive_id: string; tags: string }[]).map((f) => f.title);
-
-    expect((await call("/api/notion/import", { method: "POST", headers: JSON_ORIGIN, body: JSON.stringify({ token: "ntn_good" }) })).status).toBe(401);
-    expect(await status()).toEqual({ status: "idle" });
-    expect((await req("/api/notion/import", "POST", {})).status).toBe(400);
-    expect((await req("/api/notion/import", "POST", { token: "ntn_bad" })).status).toBe(202);
-    const bad = await finish();
-    expect(bad.status).toBe("failed");
-    expect(bad.error).toContain("토큰");
-
-    // One run at a time; Notion's "slow down" (429) is waited out.
-    expect((await req("/api/notion/import", "POST", { token: "ntn_good" })).status).toBe(202);
-    expect((await req("/api/notion/import", "POST", { token: "ntn_good" })).status).toBe(409);
-    // Pages search missed are found through the page and the database that hold them.
-    expect(await finish()).toMatchObject({
-      status: "done", total: 5, done: 5, added: 5, updated: 0, unchanged: 0, skipped: [], failed: [], partial: ["검색에 안 나오는 페이지"], files: 2, fileProblems: 1,
-    });
-
-    // Notes keep Notion's titles (with the page icon) and edit times, so the list is in Notion's order.
-    const list = (await (await req("/api/notes", "GET")).json()) as { id: number; title: string; updated_at: string }[];
-    expect(list.map((x) => [x.title, x.updated_at])).toEqual([
-      ["회의", "2026-11-12 00:00:00"],
-      ["📚 강의 노트", "2026-11-10 01:00:00"],
-      ["하위 페이지", "2026-11-05 00:00:00"],
-      ["자료 행", "2026-11-04 00:00:00"],
-      ["검색에 안 나오는 페이지", "2026-11-03 00:00:00"],
-    ]);
-    const [rowId, aId, subId, row2Id, hiddenId] = list.map((x) => x.id) as [number, number, number, number, number];
-    const a = db.getNote(aId)!;
-    expect(a.blocks.map((b) => [b.type, b.text])).toEqual([
-      ["h1", "1주차"],
-      ["p", "굵게 링크 (https://example.com)"],
-      ["todo", "과제 제출"],
-      ["todo", "끝난 일"],
-      ["bullet", "항목"],
-      ["bullet", "하위 항목"],
-      ["p", "a | b"],
-      ["p", "1 | 2"],
-      ["p", "🖼 board.png"],
-      ["p", "🖼 missing.png (가져오지 못함: 다운로드 실패 (503))"],
-      ["p", "🖼 외부 그림 https://img.example/x.png"],
-      ["p", "📄 하위 페이지"],
-      ["p", "📄 검색에 안 나오는 페이지"],
-      ["p", "🗂 자료"],
-      ["code", "print(1)"],
-      ["divider", ""],
-      ["quote", "💡 주의"],
-      ["p", "왼쪽"],
-    ]);
-    // A dated checkbox is a task on the today screen and calendar; a checked one stays checked.
-    expect(a.blocks[2]).toMatchObject({ checked: false, date: "2026-11-20", time: "09:00" });
-    expect(a.blocks[3]).toMatchObject({ checked: true });
-    const task = db.listTasks({}).find((t) => t.note_id === aId)!;
-    expect(task).toMatchObject({ title: "과제 제출", due_date: "2026-11-20", due_time: "09:00", done: 0 });
-    // Database columns become lines at the top of the row's note, and files in a column are copied and attached.
-    expect(db.getNote(rowId)!.blocks.map((b) => b.text)).toEqual(["날짜: 2026-11-21\n태그: 학교, 팀\n상태: 진행 중"]);
-    expect(db.getNote(row2Id)!.blocks.map((b) => b.text)).toEqual(["파일: slides.pdf, 외부 https://x.example/a"]);
-    expect(await attached(row2Id)).toEqual(["slides.pdf"]);
-    expect(db.getNote(subId)!.blocks.map((b) => b.text)).toEqual(["하위 내용"]);
-    // The top level plus 30 nested levels come in, then a line says the rest is missing (the page is listed as partial above).
-    const deepNote = db.getNote(hiddenId)!.blocks.map((b) => b.text);
-    expect(deepNote.length).toBe(32);
-    expect(deepNote[30]).toBe("▸ 단계 31");
-    expect(deepNote[31]).toBe("(이 아래 더 깊이 들어간 내용은 가져오지 못했습니다)");
-
-    // The Notion-hosted image is copied into the 파일함 and attached to its note.
-    const files = (await (await req(`/api/attachments?note=${aId}`, "GET")).json()) as { title: string; tags: string; drive_id: string }[];
-    expect(files.map((f) => [f.title, f.tags])).toEqual([["board.png", "노션"]]);
-    expect(drive.get(files[0]!.drive_id)).toMatchObject({ name: "board.png", bytes: "BYTES-/files/board.png".length });
-
-    // A file that failed is tried again on the next run even though Notion has no newer edit.
-    missingFails = false;
-    expect(await run()).toMatchObject({ status: "done", added: 0, updated: 1, unchanged: 4, files: 1, fileProblems: 0 });
-    expect(await attached(aId)).toEqual(["board.png", "missing.png"]);
-    expect(db.getNote(aId)!.blocks[9]!.text).toBe("🖼 missing.png");
-
-    // Imported notes save normally from the editor. Editing one here...
-    const row = db.getNote(rowId)!;
-    expect((await req(`/api/notes/${rowId}`, "PUT", { title: "회의", version: row.version, blocks: [...row.blocks, { id: "mine", type: "p", text: "사이트에서 쓴 글" }] })).status).toBe(200);
-    // ...and deleting one.
-    await req(`/api/notes/${subId}`, "DELETE");
-
-    // Nothing new in Notion: no page content is read again and nothing is copied again (fresh signatures don't count as new files).
-    const calls = childCalls;
-    expect(await run()).toMatchObject({ status: "done", total: 5, added: 0, updated: 0, unchanged: 5, skipped: [], files: 0 });
-    expect(childCalls).toBe(calls);
-
-    // Edited in Notion: the image is replaced and the other file block removed, so the note's import attachments follow;
-    // the note edited here and the deleted one stay as they are.
-    for (const p of [...pages, ...hidden]) p.last_edited_time = "2026-11-15T00:00:00.000Z";
-    const aKids = children.get(A)! as any[];
-    aKids.find((b) => b.image?.file?.name === "board.png").image.file.name = "board-v2.png";
-    aKids.splice(aKids.findIndex((b) => b.image?.file?.name === "missing.png"), 1);
-    aKids.push(blk("paragraph", { rich_text: [rt("추가한 글")] }));
-    expect(await run()).toMatchObject({ status: "done", added: 0, updated: 3, unchanged: 1, skipped: ["회의"], failed: [], files: 1, fileProblems: 0 });
-    expect(db.getNote(aId)!.blocks.at(-1)).toMatchObject({ type: "p", text: "추가한 글" });
-    expect(await attached(aId)).toEqual(["board-v2.png"]);
-    expect(await attached(row2Id)).toEqual(["slides.pdf"]);
-    expect(db.getNote(rowId)!.blocks.at(-1)).toMatchObject({ text: "사이트에서 쓴 글" });
-    expect(db.getNote(subId)).toBeNull();
-    expect(db.listTasks({}).find((t) => t.note_id === aId)!.id).toBe(task.id);
-  } finally {
-    notion.stop(true);
-    cleanup();
-  }
-});
-
-// A small fake Notion for the tests below: pages by id, what search returns, block children and database rows.
-async function notionSetup() {
-  const pages = new Map<string, Record<string, unknown>>();
-  const search = { page: [] as string[], database: [] as { id: string; title: string }[] };
-  const children = new Map<string, object[]>();
-  const rows = new Map<string, string[]>();
-  const server = Bun.serve({
-    port: 0,
-    async fetch(req) {
-      const url = new URL(req.url);
-      if (url.pathname.startsWith("/files/")) return new Response(`BYTES-${url.pathname}`);
-      if (req.headers.get("Authorization") !== "Bearer ntn_good") return Response.json({}, { status: 401 });
-      const all = (results: unknown[]) => Response.json({ results, has_more: false, next_cursor: null });
-      if (url.pathname === "/v1/search") {
-        const v = (await req.json()).filter.value as "page" | "database";
-        return all(v === "page" ? search.page.map((id) => pages.get(id)) : search.database.map((d) => ({ object: "database", id: d.id, title: [{ type: "text", plain_text: d.title }] })));
-      }
-      const pg = url.pathname.match(/^\/v1\/pages\/([^/]+)$/);
-      if (pg) return pages.has(pg[1]!) ? Response.json(pages.get(pg[1]!)) : new Response("no", { status: 404 });
-      const dq = url.pathname.match(/^\/v1\/databases\/([^/]+)\/query$/);
-      if (dq) return rows.has(dq[1]!) ? all(rows.get(dq[1]!)!.map((id) => pages.get(id))) : new Response("no", { status: 404 });
-      const ch = url.pathname.match(/^\/v1\/blocks\/([^/]+)\/children$/);
-      if (ch) return children.has(ch[1]!) ? all(children.get(ch[1]!)!) : new Response("no", { status: 404 });
-      return new Response("no", { status: 404 });
-    },
-  });
-  let n = 0;
-  const id = () => `11111111-0000-0000-0000-${String(++n).padStart(12, "0")}`;
-  const page = (title: string, edited = "2026-11-10T00:00:00.000Z") => {
-    const pid = id();
-    pages.set(pid, { object: "page", id: pid, created_time: "2026-11-01T00:00:00.000Z", last_edited_time: edited, properties: { 이름: { type: "title", title: [{ type: "text", plain_text: title }] } } });
-    children.set(pid, []);
-    return pid;
-  };
-  const block = (type: string, data: object, blockId = id(), kids?: object[]) => {
-    if (kids) children.set(blockId, kids);
-    return { object: "block", id: blockId, type, has_children: !!kids, [type]: data };
-  };
-  const { call, db, cleanup } = makeApp({ notionApi: server.url.toString().replace(/\/$/, "") });
-  const { cookie } = await login(call);
-  const req = (path: string, method: string, b?: object) => call(path, { method, cookie, headers: JSON_ORIGIN, body: b ? JSON.stringify(b) : undefined });
-  const run = async () => {
-    expect((await req("/api/notion/import", "POST", { token: "ntn_good" })).status).toBe(202);
-    for (let i = 0; i < 1000; i++) {
-      const j = (await (await req("/api/notion/import", "GET")).json()) as Record<string, unknown>;
-      if (j.status !== "running") return j;
-      await Bun.sleep(5);
-    }
-    throw new Error("가져오기가 끝나지 않음");
-  };
-  const noteOf = (title: string) => db.listNotes().find((x) => x.title === title);
-  const fileUrl = (name: string) => `${server.url}files/${name}?X-Amz-Signature=${++n}`;
-  return { pages, search, children, rows, page, block, id, fileUrl, db, req, run, noteOf, done: () => (server.stop(true), cleanup()) };
-}
-
-test("노션 가져오기: 통합에 바로 연결한 최상위 데이터베이스의 행도, 검색에 안 나와도 가져옴", async () => {
-  loginEmail = "owner@example.com";
-  const t = await notionSetup();
-  try {
-    const db = t.id();
-    const row = t.page("DB에만 있는 행");
-    t.rows.set(db, [row]);
-    t.search.database.push({ id: db, title: "메모 DB" }, { id: t.id(), title: "링크된 보기" }); // the second can't be queried
-    expect(await t.run()).toMatchObject({ status: "done", total: 1, added: 1, partial: ["🗂 링크된 보기"] });
-    expect(t.noteOf("DB에만 있는 행")).toBeDefined();
-  } finally {
-    t.done();
-  }
-});
-
-test("노션 가져오기: 사이트에서 고친 부모 아래에 노션에서 새로 만든 하위 페이지도 가져옴", async () => {
-  loginEmail = "owner@example.com";
-  const t = await notionSetup();
-  try {
-    const parent = t.page("부모");
-    t.search.page.push(parent);
-    expect(await t.run()).toMatchObject({ status: "done", added: 1 });
-    const note = t.db.getNote(t.noteOf("부모")!.id)!;
-    expect((await t.req(`/api/notes/${note.id}`, "PUT", { title: "부모", version: note.version, blocks: [{ id: "mine", type: "p", text: "여기서 고침" }] })).status).toBe(200);
-    // In Notion: a new child page, inside a toggle, that search does not return.
-    const child = t.page("새 하위 페이지");
-    t.children.set(parent, [t.block("toggle", { rich_text: [] }, t.id(), [t.block("child_page", { title: "새 하위 페이지" }, child)])]);
-    t.pages.get(parent)!.last_edited_time = "2026-11-15T00:00:00.000Z";
-    expect(await t.run()).toMatchObject({ status: "done", added: 1, skipped: ["부모"] });
-    expect(t.noteOf("새 하위 페이지")).toBeDefined();
-    expect(t.db.getNote(note.id)!.blocks.map((b) => b.text)).toEqual(["여기서 고침"]);
-  } finally {
-    t.done();
-  }
-});
-
-test("노션 가져오기: 노션 사본 파일이라도 직접 붙인 첨부는 다시 가져와도 떼지 않음", async () => {
-  loginEmail = "owner@example.com";
-  const t = await notionSetup();
-  try {
-    const a = t.page("그림 있는 페이지");
-    const b = t.page("다른 페이지");
-    t.search.page.push(a, b);
-    t.children.set(a, [t.block("image", { type: "file", file: { url: t.fileUrl("pic.png") }, caption: [], name: "pic.png" })]);
-    t.children.set(b, [t.block("paragraph", { rich_text: [] })]);
-    expect(await t.run()).toMatchObject({ status: "done", added: 2, files: 1 });
-    const aId = t.noteOf("그림 있는 페이지")!.id;
-    const bId = t.noteOf("다른 페이지")!.id;
-    const pic = t.db.listAttachments("note", aId)[0]!;
-    // The owner attaches that Notion copy to the other note from the 파일함.
-    expect((await t.req("/api/attachments", "POST", { note: bId, fileId: pic.id })).status).toBe(201);
-    // Both pages change in Notion; the image leaves page A.
-    for (const id of [a, b]) t.pages.get(id)!.last_edited_time = "2026-11-15T00:00:00.000Z";
-    t.children.set(a, []);
-    expect(await t.run()).toMatchObject({ status: "done", updated: 2 });
-    expect(t.db.listAttachments("note", aId)).toEqual([]); // the import's own attachment comes off
-    expect(t.db.listAttachments("note", bId).map((f) => f.title)).toEqual(["pic.png"]); // the owner's stays
-  } finally {
-    t.done();
-  }
-});
-
-test("노션 가져오기: 깊이 제한에 걸린 노트도 편집기에서 그대로 저장됨", async () => {
-  loginEmail = "owner@example.com";
-  const t = await notionSetup();
-  try {
-    const p = t.page("깊은 페이지");
-    t.search.page.push(p);
-    let deep: object = t.block("paragraph", { rich_text: [{ type: "text", plain_text: "바닥" }] });
-    for (let i = 0; i < 35; i++) deep = t.block("toggle", { rich_text: [] }, t.id(), [deep]);
-    t.children.set(p, [deep]);
-    expect(await t.run()).toMatchObject({ status: "done", added: 1, partial: ["깊은 페이지"] });
-    const note = t.db.getNote(t.noteOf("깊은 페이지")!.id)!;
-    expect(note.blocks.at(-1)!.text).toBe("(이 아래 더 깊이 들어간 내용은 가져오지 못했습니다)");
-    expect((await t.req(`/api/notes/${note.id}`, "PUT", { title: note.title, version: note.version, blocks: note.blocks })).status).toBe(200);
-  } finally {
-    t.done();
-  }
-});
-
-test("노션 가져오기: 노션의 상위·하위 페이지 구조를 노트 목록에서도 그대로 둠", async () => {
-  loginEmail = "owner@example.com";
-  const t = await notionSetup();
-  try {
-    // 개인 페이지 TODO LIST 밑에 하위 페이지(토글 안 포함)와 데이터베이스가 있고, 하위 페이지 밑에 또 페이지가 있다.
-    const top = t.page("TODO LIST");
-    const sub = t.page("하위");
-    const inToggle = t.page("토글 안 하위");
-    const grand = t.page("손자");
-    const other = t.page("ETC");
-    const db = t.id();
-    const row = t.page("DB 행");
-    t.pages.get(row)!.parent = { type: "database_id", database_id: db };
-    t.rows.set(db, [row]);
-    t.children.set(top, [
-      t.block("child_page", { title: "하위" }, sub),
-      t.block("toggle", { rich_text: [] }, t.id(), [t.block("child_page", { title: "토글 안 하위" }, inToggle)]),
-      t.block("child_database", { title: "DB" }, db),
-    ]);
-    t.children.set(sub, [t.block("child_page", { title: "손자" }, grand)]);
-    t.search.page.push(grand, row, sub, top, other); // search lists children before their parents
-    t.search.database.push({ id: db, title: "DB" });
-    expect(await t.run()).toMatchObject({ status: "done", added: 6, failed: [] });
-    const parentOf = (title: string) => {
-      const p = t.noteOf(title)!.parent_id;
-      return p === null ? null : t.db.getNote(p)!.title;
-    };
-    expect(["TODO LIST", "하위", "토글 안 하위", "손자", "DB 행", "ETC"].map(parentOf)).toEqual([null, "TODO LIST", "TODO LIST", "하위", "TODO LIST", null]);
-
-    // Notes imported flat before this change get their parents on the next run, even with nothing new in Notion.
-    for (const n of t.db.listNotes()) t.db.setNoteParent(n.id, null);
-    expect(await t.run()).toMatchObject({ status: "done", unchanged: 6 });
-    expect(parentOf("손자")).toBe("하위");
-
-    // Deleting a note here moves the notes under it up one level instead of deleting them, and the next import keeps them there.
-    await t.req(`/api/notes/${t.noteOf("하위")!.id}`, "DELETE");
-    expect(parentOf("손자")).toBe("TODO LIST");
-    expect(await t.run()).toMatchObject({ status: "done" });
-    expect(t.noteOf("하위")).toBeUndefined();
-    expect(parentOf("손자")).toBe("TODO LIST");
-    expect(parentOf("토글 안 하위")).toBe("TODO LIST");
-  } finally {
-    t.done();
-  }
-});
-
 test("포트폴리오: 소개·섹션·항목을 자유롭게 고치고, 공개는 kacarong.kr에, 개인용은 내 포트폴리오에만", async () => {
   loginEmail = "owner@example.com";
   const { call, db, cleanup } = makeApp();
@@ -1502,5 +1087,416 @@ test("첨부를 노트·할 일에만 붙이던 DB를 열면 첨부는 그대로
     expect(openDb(path).listSections().map((x) => x.title)).toEqual(["업적", "작품", "특기", "취미", "내 정보", "작품"]); // seeded once only
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ---- Notion two-way sync, against a small in-memory Notion: pages, a block tree, databases.
+type NB = { object: "block"; id: string; type: string; has_children: boolean; archived: boolean; parent: string } & Record<string, any>;
+function fakeNotion() {
+  let n = 0;
+  let minute = 0;
+  const clock = () => new Date(Date.UTC(2026, 10, 10, 0, minute)).toISOString();
+  const id = () => `22222222-0000-0000-0000-${String(++n).padStart(12, "0")}`;
+  const pages = new Map<string, Record<string, any>>();
+  const blocks = new Map<string, NB>();
+  const kids = new Map<string, string[]>();
+  const dbs = new Map<string, { parent: string; title: string; rows: string[] }>();
+  const calls: string[] = [];
+  const plainOf = (rt: any[]) => rt.map((t) => (t.type === "text" ? t.text.content : t.type === "equation" ? t.equation.expression : t.mention.type === "date" ? `@${t.mention.date.start}` : "@멘션")).join("");
+  // Fills rich text in the way Notion answers it.
+  const rich = (rt: any[] = []) =>
+    rt.map((t) => ({ ...t, annotations: { bold: false, italic: false, strikethrough: false, underline: false, code: false, color: "default", ...t.annotations }, plain_text: plainOf([t]), href: t.text?.link?.url ?? null }));
+  const pageOf = (blockOrPage: string): string => (pages.has(blockOrPage) ? blockOrPage : pageOf(blocks.get(blockOrPage)!.parent));
+  const touch = (where: string) => {
+    minute++;
+    const p = pages.get(pageOf(where));
+    if (p) p.last_edited_time = clock();
+  };
+  const store = (parent: string, raw: any): NB => {
+    const bid = id();
+    const { children, object: _o, type, ...rest } = raw;
+    const data = { ...(rest[type] ?? {}) };
+    const inner = data.children;
+    delete data.children;
+    for (const k of ["rich_text", "caption"]) if (data[k]) data[k] = rich(data[k]);
+    if (type === "table_row") data.cells = data.cells.map((c: any[]) => rich(c));
+    if (data.type === "external") data.external = { url: data.external.url };
+    const b: NB = { object: "block", id: bid, type, has_children: false, archived: false, parent, [type]: data };
+    blocks.set(bid, b);
+    kids.set(bid, []);
+    for (const k of inner ?? children ?? []) insert(bid, [k], null);
+    return b;
+  };
+  function insert(parent: string, list: any[], after: string | null | "start" = null): NB[] {
+    const arr = kids.get(parent)!;
+    let at = after === null ? arr.length : after === "start" ? 0 : arr.indexOf(after) + 1;
+    const made = list.map((raw) => store(parent, raw));
+    for (const b of made) arr.splice(at++, 0, b.id);
+    const pb = blocks.get(parent);
+    if (pb) pb.has_children = arr.length > 0;
+    return made;
+  }
+  const page = (title: string, parent: { type: string; page_id?: string; database_id?: string } = { type: "workspace" }, extra: Record<string, any> = {}) => {
+    const pid = id();
+    pages.set(pid, { object: "page", id: pid, parent, created_time: clock(), last_edited_time: clock(), archived: false, icon: null, properties: { title: { id: "title", type: "title", title: rich([{ type: "text", text: { content: title } }]) } }, ...extra });
+    kids.set(pid, []);
+    if (parent.type === "page_id") {
+      const b = store(parent.page_id!, { type: "child_page", child_page: { title } });
+      blocks.delete(b.id);
+      blocks.set(pid, { ...b, id: pid });
+      kids.get(parent.page_id!)!.push(pid);
+      touch(parent.page_id!);
+    }
+    return pid;
+  };
+  const tree = (pid: string): any[] => kids.get(pid)!.map((k) => {
+    const b = blocks.get(k)!;
+    const d = b[b.type];
+    const text = d.rich_text ? d.rich_text.map((t: any) => t.plain_text).join("") : d.cells ? d.cells.map((c: any[]) => c.map((t) => t.plain_text).join("")).join("|") : d.title ?? d.expression ?? d.external?.url ?? "";
+    const sub = b.type === "child_page" ? [] : tree(k);
+    return sub.length ? [b.type, text, sub] : [b.type, text];
+  });
+  const server = Bun.serve({
+    port: 0,
+    async fetch(req) {
+      const url = new URL(req.url);
+      const p = url.pathname;
+      if (p.startsWith("/files/")) return new Response(`BYTES-${p}`, { headers: { "Content-Type": "image/png" } });
+      if (req.headers.get("Authorization") !== "Bearer ntn_good") return Response.json({ message: "unauthorized" }, { status: 401 });
+      const version = req.headers.get("Notion-Version");
+      calls.push(`${req.method} ${p}`);
+      const body = req.method === "GET" || req.method === "DELETE" ? {} : await req.json();
+      const list = (results: unknown[]) => Response.json({ object: "list", results, has_more: false, next_cursor: null });
+      if (p === "/v1/users/me") return Response.json({ object: "user", id: "me" });
+      if (p === "/v1/search") {
+        if (body.filter.value === "database") return list([...dbs].map(([did, d]) => ({ object: "database", id: did, title: rich([{ type: "text", text: { content: d.title } }]), parent: d.parent ? { type: "page_id", page_id: d.parent } : { type: "workspace" } })));
+        const all = [...pages.values()].filter((x) => !x.archived).sort((a, b) => b.last_edited_time.localeCompare(a.last_edited_time));
+        return list(all);
+      }
+      let m = p.match(/^\/v1\/pages\/([^/]+)$/);
+      if (m) {
+        const pg = pages.get(m[1]!);
+        if (!pg) return new Response("{}", { status: 404 });
+        if (req.method === "PATCH") {
+          if (body.archived) {
+            pg.archived = true;
+            const parent = pg.parent.page_id;
+            if (parent) kids.set(parent, kids.get(parent)!.filter((k) => k !== pg.id));
+          }
+          for (const [k, v] of Object.entries(body.properties ?? {}) as [string, any][]) pg.properties[k] = { ...pg.properties[k], title: rich(v.title) };
+          minute++;
+          pg.last_edited_time = clock();
+        }
+        return Response.json(pg);
+      }
+      if (p === "/v1/pages" && req.method === "POST") {
+        const pid = page(plainOf(body.properties.title.title), { type: "page_id", page_id: body.parent.page_id });
+        return Response.json(pages.get(pid));
+      }
+      m = p.match(/^\/v1\/blocks\/([^/]+)\/children$/);
+      if (m) {
+        const parent = m[1]!;
+        if (!kids.has(parent)) return new Response("{}", { status: 404 });
+        if (req.method === "GET") return list(kids.get(parent)!.map((k) => blocks.get(k)));
+        if (body.position && version !== "2026-03-11") return new Response("position needs 2026-03-11", { status: 400 });
+        if (body.after) return new Response("after is gone in 2026-03-11", { status: 400 });
+        const pos = body.position?.type === "start" ? "start" : body.position?.type === "after_block" ? body.position.after_block.id : null;
+        if (pos !== null && pos !== "start" && !kids.get(parent)!.includes(pos)) return new Response("no such sibling", { status: 400 });
+        const made = insert(parent, body.children, pos);
+        touch(parent);
+        return list(made);
+      }
+      m = p.match(/^\/v1\/blocks\/([^/]+)$/);
+      if (m) {
+        const b = blocks.get(m[1]!);
+        if (!b || b.archived) return new Response("{}", { status: 404 });
+        if (req.method === "DELETE") {
+          b.archived = true;
+          kids.set(b.parent, kids.get(b.parent)!.filter((k) => k !== b.id));
+          if (b.type === "child_page") pages.get(b.id)!.archived = true;
+          touch(b.parent);
+          return Response.json(b);
+        }
+        const [type] = Object.keys(body);
+        if (type !== b.type) return new Response(`can't change ${b.type} to ${type}`, { status: 400 });
+        const data = { ...body[type!] };
+        for (const k of ["rich_text", "caption"]) if (data[k]) data[k] = rich(data[k]);
+        if (type === "table_row") data.cells = data.cells.map((c: any[]) => rich(c));
+        b[type!] = { ...b[type!], ...data };
+        touch(b.parent);
+        return Response.json(b);
+      }
+      m = p.match(/^\/v1\/databases\/([^/]+)(\/query)?$/);
+      if (m) {
+        const d = dbs.get(m[1]!);
+        if (!d) return new Response("{}", { status: 404 });
+        if (m[2]) return list(d.rows.map((r) => pages.get(r)));
+        return Response.json({ object: "database", id: m[1], parent: { type: "page_id", page_id: d.parent } });
+      }
+      return new Response("unknown", { status: 404 });
+    },
+  });
+  const edit = (bid: string, data: Record<string, any>) => {
+    const b = blocks.get(bid)!;
+    for (const k of ["rich_text", "caption"]) if (data[k]) data[k] = rich(data[k]);
+    b[b.type] = { ...b[b.type], ...data };
+    touch(b.parent);
+  };
+  const txt = (content: string, annotations?: object, link?: string) => ({ type: "text", text: { content, link: link ? { url: link } : null }, ...(annotations ? { annotations } : {}) });
+  return { server, url: server.url.toString().replace(/\/$/, ""), pages, blocks, kids, dbs, calls, page, insert, tree, edit, txt, touch, id };
+}
+
+async function notionApp() {
+  const nt = fakeNotion();
+  const app = makeApp({ notionApi: nt.url });
+  const { cookie } = await login(app.call);
+  const req = (path: string, method: string, b?: object) => app.call(path, { method, cookie, headers: JSON_ORIGIN, body: b ? JSON.stringify(b) : undefined });
+  const getNote = async (id: number) => (await (await req(`/api/notes/${id}`, "GET")).json()) as { id: number; title: string; version: number; blocks: any[]; links: Record<string, { id: number; title: string }>; notion: { url: string; props: [string, string][] } | null };
+  const noteOf = (title: string) => app.db.listNotes().find((x) => x.title === title)!;
+  const save = async (id: number, blocks: object[], title?: string) => {
+    const n = await getNote(id);
+    const r = await req(`/api/notes/${id}`, "PUT", { title: title ?? n.title, blocks, version: n.version });
+    expect(r.status).toBe(200);
+    await app.notion.idle();
+    return (await r.json()) as { version: number };
+  };
+  return { nt, ...app, req, getNote, noteOf, save, done: () => (nt.server.stop(true), app.cleanup()) };
+}
+
+test("노션 연동: 연결하면 페이지를 서식·들여쓰기·토글·표·사진 그대로 노트로, 하위 페이지·DB 행은 트리로", async () => {
+  loginEmail = "owner@example.com";
+  const t = await notionApp();
+  try {
+    const { nt } = t;
+    const A = nt.page("강의 노트", undefined, { icon: { type: "emoji", emoji: "📚" } });
+    nt.insert(A, [
+      { type: "paragraph", paragraph: { rich_text: [nt.txt("굵게", { bold: true }), nt.txt(" 그리고 "), nt.txt("링크", undefined, "https://example.com")], color: "blue" } },
+      { type: "bulleted_list_item", bulleted_list_item: { rich_text: [nt.txt("항목")], children: [{ type: "bulleted_list_item", bulleted_list_item: { rich_text: [nt.txt("안쪽 항목")] } }] } },
+      { type: "toggle", toggle: { rich_text: [nt.txt("접는 글")], children: [{ type: "paragraph", paragraph: { rich_text: [nt.txt("숨은 내용")] } }] } },
+      { type: "to_do", to_do: { checked: false, rich_text: [nt.txt("과제 제출 "), { type: "mention", mention: { type: "date", date: { start: "2026-11-21" } } }] } },
+      { type: "callout", callout: { rich_text: [nt.txt("알림")], icon: { type: "emoji", emoji: "💡" }, color: "gray_background" } },
+      { type: "table", table: { table_width: 2, has_column_header: true, has_row_header: false, children: [{ type: "table_row", table_row: { cells: [[nt.txt("이름")], [nt.txt("값")]] } }, { type: "table_row", table_row: { cells: [[nt.txt("a")], [nt.txt("1", { bold: true })]] } }] } },
+      { type: "image", image: { type: "file", file: { url: `${nt.url}/files/photo.png?X-Amz-Signature=1` }, caption: [nt.txt("사진 설명")] } },
+      { type: "button", button: {} },
+    ]);
+    const SUB = nt.page("하위 페이지", { type: "page_id", page_id: A });
+    nt.insert(SUB, [{ type: "paragraph", paragraph: { rich_text: [nt.txt("하위 내용")] } }]);
+    const DB = nt.id();
+    nt.dbs.set(DB, { parent: A, title: "회의록", rows: [] });
+    const ROW = nt.page("회의", { type: "database_id", database_id: DB }, {});
+    nt.pages.get(ROW)!.properties.상태 = { id: "s", type: "status", status: { name: "진행 중" } };
+    nt.dbs.get(DB)!.rows.push(ROW);
+    nt.insert(A, [{ type: "child_database", child_database: { title: "회의록" } }]);
+
+    // A wrong token is refused; the right one is kept and a full pass starts.
+    expect((await t.req("/api/notion", "PUT", { token: "ntn_bad" })).status).toBe(400);
+    expect(await (await t.req("/api/notion", "GET")).json()).toMatchObject({ connected: false });
+    expect((await t.req("/api/notion", "PUT", { token: "ntn_good" })).status).toBe(200);
+    await t.notion.idle();
+    expect(t.db.getSetting("notion_token")).toBe("ntn_good");
+    expect(await (await t.req("/api/notion", "GET")).json()).toMatchObject({ connected: true, running: false, error: null, failed: [] });
+
+    const a = await t.getNote(t.noteOf("📚 강의 노트").id);
+    const types = a.blocks.map((b) => [b.type, b.text, b.d ?? 0]);
+    expect(types).toEqual([
+      ["p", "굵게 그리고 링크", 0],
+      ["bullet", "항목", 0],
+      ["bullet", "안쪽 항목", 1],
+      ["toggle", "접는 글", 0],
+      ["p", "숨은 내용", 1],
+      ["todo", "과제 제출", 0],
+      ["callout", "알림", 0],
+      ["table", "이름 | 값\na | 1", 0],
+      ["image", "사진 설명", 0],
+      ["opaque", "", 0],
+      ["page", "하위 페이지", 0],
+      ["db", "회의록", 0],
+    ]);
+    expect(a.blocks[0]).toMatchObject({ color: "blue", rich: [{ t: "굵게", b: 1 }, { t: " 그리고 " }, { t: "링크", href: "https://example.com" }] });
+    expect(a.blocks[5]).toMatchObject({ date: "2026-11-21", checked: false });
+    expect(a.blocks[6]).toMatchObject({ icon: "💡", color: "gray_background" });
+    expect(a.blocks[7]).toMatchObject({ width: 2, colHeader: 1, rows: [{ cells: [[{ t: "이름" }], [{ t: "값" }]] }, { cells: [[{ t: "a" }], [{ t: "1", b: 1 }]] }] });
+    expect(a.blocks[9]).toMatchObject({ nt: "button" });
+    // The Notion-hosted picture is copied into the 파일함 and shown from there.
+    const photo = t.db.getFile(a.blocks[8].fileId)!;
+    expect(photo).toMatchObject({ title: "photo.png", tags: "노션" });
+    // A dated checkbox is a task for the today screen and the calendar.
+    expect(t.db.listTasks({ from: "2026-11-21", to: "2026-11-21" }).map((x) => x.title)).toEqual(["과제 제출"]);
+    // Child pages and database rows sit under their page; the page block links to its note; a row shows its columns.
+    const sub = t.noteOf("하위 페이지");
+    const row = t.noteOf("회의");
+    expect([sub.parent_id, row.parent_id]).toEqual([a.id, a.id]);
+    expect(a.links[SUB]).toEqual({ id: sub.id, title: "하위 페이지" });
+    expect((await t.getNote(row.id)).notion).toMatchObject({ props: [["상태", "진행 중"]] });
+    expect(a.notion!.url).toBe(`https://www.notion.so/${A.replace(/-/g, "")}`);
+
+    // A full pass again with nothing new in Notion reads no page content and changes no note.
+    const versions = t.db.listNotes().map((x) => t.db.getNote(x.id)!.version);
+    nt.calls.length = 0;
+    await t.req("/api/notion/sync", "POST");
+    await t.notion.idle();
+    expect(nt.calls.filter((c) => c.includes("/children"))).toEqual([]);
+    expect(t.db.listNotes().map((x) => t.db.getNote(x.id)!.version)).toEqual(versions);
+  } finally {
+    t.done();
+  }
+});
+
+test("노션 연동: 여기서 고치면 블록 단위로 노션에 반영(서식·추가·맨 앞·들여쓰기·삭제·옮기기·제목·사진), 다시 읽어도 노트는 그대로", async () => {
+  loginEmail = "owner@example.com";
+  const t = await notionApp();
+  try {
+    const { nt } = t;
+    const A = nt.page("메모");
+    const [b1, b2, b3] = nt.insert(A, [
+      { type: "paragraph", paragraph: { rich_text: [nt.txt("첫 줄 "), nt.txt("굵게", { bold: true })] } },
+      { type: "bulleted_list_item", bulleted_list_item: { rich_text: [nt.txt("목록")] } },
+      { type: "paragraph", paragraph: { rich_text: [nt.txt("지울 줄")] } },
+    ]);
+    await t.req("/api/notion", "PUT", { token: "ntn_good" });
+    await t.notion.idle();
+    const note = t.noteOf("메모");
+    const before = await t.getNote(note.id);
+    const ids = before.blocks.map((b) => b.id);
+    expect(ids).toEqual([b1!.id, b2!.id, b3!.id]);
+
+    // Typing in the middle keeps the bold part; a new first line, a nested item, a deleted line, a new title.
+    nt.calls.length = 0;
+    const saved = await t.save(
+      note.id,
+      [
+        { id: "new1", type: "h2", text: "새 제목줄" },
+        { id: b1!.id, type: "p", text: "첫 줄 고침 굵게", rich: [{ t: "첫 줄 고침 " }, { t: "굵게", b: 1 }] },
+        { id: b2!.id, type: "bullet", text: "목록" },
+        { id: "new2", type: "bullet", text: "안쪽", d: 1, rich: [{ t: "안쪽", i: 1, color: "red" }] },
+      ],
+      "메모 (고침)",
+    );
+    expect(nt.tree(A)).toEqual([
+      ["heading_2", "새 제목줄"],
+      ["paragraph", "첫 줄 고침 굵게"],
+      ["bulleted_list_item", "목록", [["bulleted_list_item", "안쪽"]]],
+    ]);
+    expect(nt.blocks.get(b1!.id)!.paragraph.rich_text.map((x: any) => [x.plain_text, x.annotations.bold])).toEqual([["첫 줄 고침 ", false], ["굵게", true]]);
+    const inner = nt.blocks.get(nt.kids.get(b2!.id)![0]!)!;
+    expect(inner.bulleted_list_item.rich_text[0].annotations).toMatchObject({ italic: true, color: "red" });
+    expect(nt.blocks.get(b3!.id)!.archived).toBe(true);
+    expect(nt.pages.get(A)!.properties.title.title[0].plain_text).toBe("메모 (고침)");
+    // Only the changed blocks were touched (no rewrite of the whole page), and the note was not rewritten by reading it back.
+    expect(nt.calls.filter((c) => c.startsWith("PATCH /v1/blocks/") && !c.endsWith("/children"))).toEqual([`PATCH /v1/blocks/${b1!.id}`]);
+    let after = await t.getNote(note.id);
+    expect(after.version).toBe(saved.version);
+    expect(after.blocks.map((b) => b.id)).toEqual(["new1", b1!.id, b2!.id, "new2"]);
+
+    // Moving a block: it is made again in its new place, and keeps its id in the note.
+    // A picture from the cloud goes to Notion as a signed link to this site.
+    const pic = t.db.insertFile({ drive_id: "pic1", name: "그림.png", title: "그림", mime: "image/png", size: 5, category: "기타", tags: "", note: "" });
+    drive.set("pic1", { id: "pic1", name: "그림.png", mimeType: "image/png", parents: [], trashed: false, bytes: 5, content: "PNG!!" });
+    const cur = after.blocks;
+    await t.save(note.id, [cur[1], cur[0], cur[2], cur[3], { id: "img1", type: "image", text: "캡션", fileId: pic.id }]);
+    expect(nt.tree(A).map((x) => x[0])).toEqual(["paragraph", "heading_2", "bulleted_list_item", "image"]);
+    const img = nt.blocks.get(nt.kids.get(A)!.at(-1)!)!;
+    const link = img.image.external.url as string;
+    expect(link).toMatch(new RegExp(`^https://kacarong.kr/f/${pic.id}/[\\w-]{22}/`));
+    const served = await t.call(link.replace("https://kacarong.kr", ""));
+    expect(served.status).toBe(200);
+    expect(await served.text()).toBe("PNG!!");
+    expect((await t.call(`/f/${pic.id}/${"x".repeat(22)}/a.png`)).status).toBe(404);
+    after = await t.getNote(note.id);
+    expect(after.blocks.map((b) => b.id)).toEqual([b1!.id, "new1", b2!.id, "new2", "img1"]);
+    expect(after.blocks[4]).toMatchObject({ type: "image", fileId: pic.id }); // read back as the same cloud file
+    // Changing a block's type makes it again too (Notion can't change types).
+    await t.save(note.id, after.blocks.map((b) => (b.id === "new1" ? { ...b, type: "quote" } : b)));
+    expect(nt.tree(A).map((x) => x[0])).toEqual(["paragraph", "quote", "bulleted_list_item", "image"]);
+    expect((await t.getNote(note.id)).blocks.map((b) => b.id)).toEqual([b1!.id, "new1", b2!.id, "new2", "img1"]);
+  } finally {
+    t.done();
+  }
+});
+
+test("노션 연동: 노션에서 고친 것은 노트로, 양쪽에서 다른 블록을 고치면 둘 다 남고, 페이지 추가·삭제도 맞춰짐", async () => {
+  loginEmail = "owner@example.com";
+  const t = await notionApp();
+  try {
+    const { nt } = t;
+    const A = nt.page("공유 메모");
+    const [x, y] = nt.insert(A, [
+      { type: "paragraph", paragraph: { rich_text: [nt.txt("엑스")] } },
+      { type: "paragraph", paragraph: { rich_text: [nt.txt("와이")] } },
+    ]);
+    await t.req("/api/notion", "PUT", { token: "ntn_good" });
+    await t.notion.idle();
+    const note = t.noteOf("공유 메모");
+
+    // Edited in Notion: the poll brings it in.
+    nt.edit(x!.id, { rich_text: [nt.txt("엑스 (노션에서)")] });
+    await t.notion.poll();
+    await t.notion.idle();
+    expect((await t.getNote(note.id)).blocks.map((b) => b.text)).toEqual(["엑스 (노션에서)", "와이"]);
+
+    // Both sides at once: Notion changes x, this site (from the old version) changes y. Both stay, on both sides.
+    const old = await t.getNote(note.id);
+    nt.edit(x!.id, { rich_text: [nt.txt("엑스 2")] });
+    const r = await t.req(`/api/notes/${note.id}`, "PUT", { title: old.title, version: old.version, blocks: [old.blocks[0], { ...old.blocks[1], text: "와이 (여기서)" }] });
+    expect(r.status).toBe(200);
+    await t.notion.idle();
+    expect((await t.getNote(note.id)).blocks.map((b) => b.text)).toEqual(["엑스 2", "와이 (여기서)"]);
+    expect(nt.tree(A)).toEqual([["paragraph", "엑스 2"], ["paragraph", "와이 (여기서)"]]);
+
+    // A page added in Notion comes in on the next poll, under its parent's note.
+    const NEW = nt.page("노션에서 만든 페이지", { type: "page_id", page_id: A });
+    await t.notion.poll();
+    await t.notion.idle();
+    expect(t.noteOf("노션에서 만든 페이지").parent_id).toBe(note.id);
+    expect((await t.getNote(note.id)).blocks.at(-1)).toMatchObject({ type: "page", page: NEW });
+
+    // A note made here under a Notion note becomes a Notion page under that page.
+    const made = (await (await t.req("/api/notes", "POST", { title: "여기서 만든 하위", parent_id: note.id })).json()) as { id: number; blocks: any[] };
+    const madePage = [...nt.pages.values()].find((p) => p.properties.title.title[0]?.plain_text === "여기서 만든 하위")!;
+    expect(madePage.parent).toEqual({ type: "page_id", page_id: A });
+    await t.save(made.id, [{ id: made.blocks[0].id, type: "p", text: "내용" }]);
+    expect(nt.tree(madePage.id)).toEqual([["paragraph", "내용"]]);
+    // New top-level notes stay on this site until a Notion page is picked for them.
+    const local = (await (await t.req("/api/notes", "POST", { title: "사이트 노트" })).json()) as { id: number };
+    expect(t.db.notionPageOfNote(local.id)).toBeNull();
+    expect((await t.req("/api/notion/root", "PUT", { pageId: A })).status).toBe(200);
+    const rooted = (await (await t.req("/api/notes", "POST", { title: "새 최상위" })).json()) as { id: number };
+    expect(t.db.notionPageOfNote(rooted.id)).not.toBeNull();
+
+    // Deleted in Notion: the note goes on the next sync. Deleted here: the page goes to Notion's trash, with the pages under it.
+    nt.pages.get(NEW)!.archived = true;
+    await t.req("/api/notion/sync", "POST");
+    await t.notion.idle();
+    expect(t.db.listNotes().some((n) => n.title === "노션에서 만든 페이지")).toBe(false);
+    expect((await t.req(`/api/notes/${note.id}`, "DELETE")).status).toBe(200);
+    expect(nt.pages.get(A)!.archived).toBe(true);
+    expect(t.db.listNotes().map((n) => n.title)).toEqual(["사이트 노트"]);
+  } finally {
+    t.done();
+  }
+});
+
+test("노션 연동: 예전 가져오기로 만든 노트는 첫 동기화 때 노션 내용으로 바뀌고 가져오기 첨부는 떼어짐", async () => {
+  loginEmail = "owner@example.com";
+  const t = await notionApp();
+  try {
+    const { nt } = t;
+    const A = nt.page("옛 노트");
+    nt.insert(A, [{ type: "toggle", toggle: { rich_text: [nt.txt("토글")], children: [{ type: "paragraph", paragraph: { rich_text: [nt.txt("안")] } }] } }]);
+    // As the one-way import left it: flattened text, and the page's file attached to the note.
+    const old = t.db.insertNote("옛 노트", [{ id: "x", type: "p", text: "▸ 토글" }, { id: "y", type: "p", text: "안" }], "2026-11-19");
+    t.db.setNotionPage(A, old.id, "2026-11-01T00:00:00.000Z", old.version, []);
+    const f = t.db.insertFile({ drive_id: "old1", name: "a.png", title: "a.png", mime: "image/png", size: 1, category: "기타", tags: "노션", note: "" });
+    t.db.addAttachment("note", old.id, f.id, true);
+    const mine = t.db.insertFile({ drive_id: "old2", name: "b.png", title: "b.png", mime: "image/png", size: 1, category: "기타", tags: "", note: "" });
+    t.db.addAttachment("note", old.id, mine.id);
+    await t.req("/api/notion", "PUT", { token: "ntn_good" });
+    await t.notion.idle();
+    const n = await t.getNote(old.id);
+    expect(n.blocks.map((b) => [b.type, b.text, b.d ?? 0])).toEqual([["toggle", "토글", 0], ["p", "안", 1]]);
+    expect(t.db.listAttachments("note", old.id).map((x) => x.id)).toEqual([mine.id]);
+    expect(t.db.listNotes()).toHaveLength(1);
+  } finally {
+    t.done();
   }
 });
