@@ -6,6 +6,7 @@ const $ = (id) => document.getElementById(id);
 let me = null;
 let categories = [];
 let taskKinds = [];
+let taskCategories = [];
 
 const ICONS = {
   home: '<path d="M3 10.5 12 3l9 7.5V21h-6v-6H9v6H3z"/>',
@@ -585,6 +586,8 @@ function openTaskDialog(t = null, date = "") {
   editingTask = t;
   $("task-dialog-title").textContent = t ? "할 일 수정" : "새 할 일";
   $("task-kind").value = t?.kind ?? taskKinds[0];
+  // A new task from the 할 일·과제 tab starts in the category shown there.
+  $("task-category").value = t ? t.category : currentTab() === "tasks" && taskCategory() !== "*" ? taskCategory() : "";
   $("task-title").value = t?.title ?? "";
   $("task-course").value = t?.course ?? "";
   $("task-date").value = t?.due_date ?? date;
@@ -626,6 +629,7 @@ async function loadToday() {
 
 let taskDone = () => "0";
 let taskKind = () => "";
+let taskCategory = () => "*";
 async function loadTasks() {
   const params = new URLSearchParams();
   if (taskDone()) params.set("done", taskDone());
@@ -640,8 +644,14 @@ async function loadTasks() {
     stat("지난 일", String(today.overdue.length), "", today.overdue.length > 0),
   );
   const q = searchText();
-  const shown = tasks.filter((x) => matches(x, q));
-  $("task-list").replaceChildren(...(shown.length ? shown.map((x) => taskRow(x, today.date, reload, true)) : [emptyRow(7, q ? "검색 결과가 없습니다." : "없습니다.")]));
+  const shown = tasks.filter((x) => matches(x, q) && (taskCategory() === "*" || x.category === taskCategory()));
+  // One group per category, in the fixed order, 분류 없음 last.
+  const groups = [...taskCategories, ""].map((c) => [c || "분류 없음", shown.filter((x) => x.category === c)]).filter(([, items]) => items.length);
+  $("task-list").replaceChildren(
+    ...(groups.length
+      ? groups.flatMap(([title, items]) => [el("tr", { className: "group-row" }, el("td", { colSpan: 7, textContent: `${title} · ${items.length}` })), ...items.map((x) => taskRow(x, today.date, reload, true))])
+      : [emptyRow(7, q ? "검색 결과가 없습니다." : "없습니다.")]),
+  );
 }
 
 // 캘린더: 한 달(6주) 칸에 구글 캘린더 일정과 날짜 있는 할 일·과제를 함께 보여 준다.
@@ -1292,9 +1302,11 @@ async function init() {
   });
   categories = me.categories;
   taskKinds = me.taskKinds;
+  taskCategories = me.taskCategories;
   $("main").hidden = false;
   const opts = (list) => list.map((v) => el("option", { value: v, textContent: v }));
   $("task-kind").append(...opts(taskKinds));
+  $("task-category").append(el("option", { value: "", textContent: "분류 없음" }), ...opts(taskCategories));
   $("up-category").append(...opts(categories));
   $("file-category").append(...opts(categories));
   editor = createEditor($("note-editor"), noteChanged, {
@@ -1321,18 +1333,24 @@ async function init() {
   document.addEventListener("visibilitychange", () => document.visibilityState === "hidden" && saveNote(true).catch(() => {}));
   $("task-filter-kind").append(...taskKinds.map((k) => el("button", { type: "button", textContent: k })));
   $("task-filter-kind").querySelectorAll("button").forEach((b, i) => i && (b.dataset.v = taskKinds[i - 1]));
+  for (const c of [...taskCategories, ""]) {
+    const b = el("button", { type: "button", textContent: c.replace(/ 할 일$/, "") || "분류 없음", title: c || "분류 없음" }); // 오늘 · 꾸준히 · 나중에
+    b.dataset.v = c;
+    $("task-filter-category").append(b);
+  }
   $("filter-category").append(...categories.map((c) => el("button", { type: "button", textContent: c })));
   $("filter-category").querySelectorAll("button").forEach((b, i) => i && (b.dataset.v = categories[i - 1]));
 
   taskDone = seg("task-filter-done", () => loadTasks().catch(showError));
   taskKind = seg("task-filter-kind", () => loadTasks().catch(showError));
+  taskCategory = seg("task-filter-category", () => loadTasks().catch(showError));
   fileCategory = seg("filter-category", () => loadList().catch(showError));
 
   // 취소·닫기는 submit 버튼이 아니어야 Enter가 저장·올리기로 간다.
   document.querySelectorAll("dialog [data-close]").forEach((b) => (b.onclick = () => b.closest("dialog").close()));
   $("task-form").onsubmit = async (ev) => {
     ev.preventDefault();
-    const body = { kind: $("task-kind").value, title: $("task-title").value, course: $("task-course").value, due_date: $("task-date").value, due_time: $("task-time").value, note: $("task-note").value };
+    const body = { kind: $("task-kind").value, category: $("task-category").value, title: $("task-title").value, course: $("task-course").value, due_date: $("task-date").value, due_time: $("task-time").value, note: $("task-note").value };
     try {
       if (editingTask) await call(`/api/tasks/${editingTask.id}`, { method: "PATCH", body });
       else editingTask = await call("/api/tasks", { method: "POST", body }); // a retry after a failed attach must not add it twice

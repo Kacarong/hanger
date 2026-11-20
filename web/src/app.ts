@@ -2,7 +2,7 @@ import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypt
 import { mkdirSync, existsSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { cleanBlocks, editRuns, richOrNone } from "./blocks";
-import { ATTACH_TARGETS, CATEGORIES, TASK_KINDS, type AttachedFile, type Block, type Db, type ExamFields, type FileRow, type PortfolioFields, type PortfolioItem, type TaskFields } from "./db";
+import { ATTACH_TARGETS, CATEGORIES, TASK_CATEGORIES, TASK_KINDS, type AttachedFile, type Block, type Db, type ExamFields, type FileRow, type PortfolioFields, type PortfolioItem, type TaskFields } from "./db";
 import { GoogleError, type CalendarEvent, type Google } from "./google";
 import { createNotionSync, NotionError } from "./notion";
 import { passwordProblem } from "./password";
@@ -227,6 +227,10 @@ export function createApp(cfg: AppConfig, db: Db, google: Google) {
       if (!TASK_KINDS.includes(b.kind as string)) return "종류가 올바르지 않습니다";
       out.kind = b.kind as string;
     }
+    if ("category" in b) {
+      if (b.category !== "" && !TASK_CATEGORIES.includes(b.category as string)) return "카테고리가 올바르지 않습니다";
+      out.category = b.category as string;
+    }
     if ("title" in b) {
       out.title = str(b.title, 200);
       if (!out.title) return "제목을 입력해 주세요";
@@ -407,6 +411,7 @@ ${body || `<section class="works"><p class="empty reveal">${mine ? "아직 포�
         calendarConnected: !!db.getSetting("refresh_token") && google.calendarGranted(),
         categories: CATEGORIES,
         taskKinds: TASK_KINDS,
+        taskCategories: TASK_CATEGORIES,
         maxFileSize: MAX_FILE_SIZE,
       });
     }
@@ -490,7 +495,7 @@ ${body || `<section class="works"><p class="empty reveal">${mine ? "아직 포�
       const exam = b.exam_id === undefined || b.exam_id === null ? null : db.getExam(Number(b.exam_id));
       if (b.exam_id !== undefined && b.exam_id !== null && !exam) return json({ error: "시험을 찾을 수 없습니다" }, 404);
       const plan = exam ? { kind: "공부", course: exam.course, exam_id: exam.id } : {};
-      return json(db.insertTask({ kind: "할 일", course: "", due_date: null, due_time: null, note: "", ...f, title: f.title, ...plan }), 201);
+      return json(db.insertTask({ kind: "할 일", category: "", course: "", due_date: null, due_time: null, note: "", ...f, title: f.title, ...plan }), 201);
     }
 
     // 시험: every exam with its study plan (soonest exam first; the client splits off past ones).

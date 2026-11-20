@@ -65,6 +65,7 @@
         <div class="stats" id="task-stats"></div>
         <div class="toolbar">
           <div class="seg" id="task-filter-done"><button data-v="0" class="on">안 끝난 것</button><button data-v="1">끝낸 것</button><button data-v="">전체</button></div>
+          <div class="seg" id="task-filter-category"><button data-v="*" class="on">모든 카테고리</button></div>
           <span class="grow"></span>
           <div class="seg" id="task-filter-kind"><button data-v="" class="on">전체</button></div>
         </div>
@@ -139,6 +140,7 @@
       <label>종류<select class="input" id="task-kind"></select></label>
       <label>과목<input class="input" id="task-course"></label>
     </div>
+    <label>카테고리<select class="input" id="task-category"></select></label>
     <label>제목<input class="input" id="task-title" required></label>
     <div class="row">
       <label>날짜<input class="input" type="date" id="task-date"></label>

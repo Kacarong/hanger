@@ -31,6 +31,7 @@ export const CATEGORIES = ["포트폴리오", "플래닝", "작업", "과제", "
 export type TaskRow = {
   id: number;
   kind: string; // TASK_KINDS
+  category: string; // TASK_CATEGORIES, or "" for 분류 없음
   title: string;
   course: string; // 과목, mainly for 과제
   due_date: string | null; // YYYY-MM-DD in Asia/Seoul
@@ -48,7 +49,9 @@ export type TaskRow = {
 };
 
 export const TASK_KINDS = ["할 일", "과제", "공부"];
-export type TaskFields = Pick<TaskRow, "kind" | "title" | "course" | "due_date" | "due_time" | "note">;
+// The 할 일·과제 tab groups tasks by these; a task may have none ("").
+export const TASK_CATEGORIES = ["오늘 할 일", "꾸준히 할 일", "나중에 할 일"];
+export type TaskFields = Pick<TaskRow, "kind" | "category" | "title" | "course" | "due_date" | "due_time" | "note">;
 
 // An exam on the 시험 tab. Its study plan is tasks with exam_id (kind 공부), so each day of the plan
 // shows up on the today screen and the calendar like any task.
@@ -212,6 +215,7 @@ export function openDb(path: string) {
   if (!taskCols.includes("note_id")) db.exec("ALTER TABLE tasks ADD COLUMN note_id INTEGER; ALTER TABLE tasks ADD COLUMN block_id TEXT;");
   db.exec("CREATE INDEX IF NOT EXISTS tasks_note ON tasks (note_id)");
   if (!taskCols.includes("exam_id")) db.exec("ALTER TABLE tasks ADD COLUMN exam_id INTEGER");
+  if (!taskCols.includes("category")) db.exec("ALTER TABLE tasks ADD COLUMN category TEXT NOT NULL DEFAULT ''");
   db.exec(`
     CREATE INDEX IF NOT EXISTS tasks_exam ON tasks (exam_id);
     -- An exam takes its study plan with it.
@@ -445,7 +449,7 @@ export function openDb(path: string) {
     },
     insertTask(t: TaskFields & { exam_id?: number | null }): TaskRow {
       const id = (
-        db.query("INSERT INTO tasks (kind, title, course, due_date, due_time, note, exam_id) VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id").get(t.kind, t.title, t.course, t.due_date, t.due_time, t.note, t.exam_id ?? null) as { id: number }
+        db.query("INSERT INTO tasks (kind, category, title, course, due_date, due_time, note, exam_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id").get(t.kind, t.category, t.title, t.course, t.due_date, t.due_time, t.note, t.exam_id ?? null) as { id: number }
       ).id;
       return db.query(`${TASK_SELECT} WHERE tasks.id = ?`).get(id) as TaskRow;
     },

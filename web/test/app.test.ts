@@ -482,6 +482,10 @@ test("할 일·과제: 추가 → 오늘 화면 분류 → 완료 → 수정·�
     await add({ title: "날짜 없는 할 일" });
     expect(todayTodo).toMatchObject({ kind: "할 일", due_time: "18:00", done: 0 });
     expect(soon).toMatchObject({ kind: "과제", course: "디자인사" });
+    expect(todayTodo.category).toBe(""); // no category unless one is picked
+    const daily = (await add({ title: "운동", category: "꾸준히 할 일" })).task;
+    expect(daily.category).toBe("꾸준히 할 일");
+    expect((await add({ title: "x", category: "언젠가" })).status).toBe(400);
 
     expect((await add({ title: "" })).status).toBe(400);
     expect((await add({ title: "x", kind: "숙제" })).status).toBe(400);
@@ -505,6 +509,10 @@ test("할 일·과제: 추가 → 오늘 화면 분류 → 완료 → 수정·�
 
     expect(await (await patch(late.id, { title: "미룬 할 일", due_date: "" })).json()).toMatchObject({ title: "미룬 할 일", due_date: null });
     expect((await patch(late.id, { title: "" })).status).toBe(400);
+    expect(await (await patch(daily.id, { category: "나중에 할 일" })).json()).toMatchObject({ category: "나중에 할 일", title: "운동" });
+    expect(await (await patch(daily.id, { category: "" })).json()).toMatchObject({ category: "" });
+    expect((await patch(daily.id, { category: "오늘" })).status).toBe(400);
+    expect((await call(`/api/tasks/${daily.id}`, { method: "DELETE", cookie, headers: JSON_ORIGIN })).status).toBe(200);
     expect((await call("/api/tasks/9999", { method: "PATCH", cookie, headers: JSON_ORIGIN, body: "{}" })).status).toBe(404);
 
     // Two days later the 과제 is due today, and the 할 일 from 11-21 appears.

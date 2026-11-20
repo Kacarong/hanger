@@ -93,6 +93,8 @@ input[type="checkbox"] { accent-color: #ececf0; width: 15px; height: 15px; margi
 .seg { display: inline-flex; padding: 2px; border: 1px solid var(--line); border-radius: 7px; background: var(--bg); }
 .seg button { height: 26px; padding: 0 12px; border: 0; border-radius: 5px; background: none; color: var(--muted); cursor: pointer; }
 .seg button:hover { color: var(--fg); }
+#task-filter-category { flex-wrap: wrap; }
+#task-filter-category button { white-space: nowrap; }
 .seg button.on { background: var(--active); color: var(--fg); box-shadow: inset 0 0 0 1px var(--line-2); }
 
 /* 표 */
