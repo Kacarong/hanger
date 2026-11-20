@@ -1145,6 +1145,27 @@ test("시험: 일정 → 날짜별 공부 계획(오늘·캘린더·할 일에�
   }
 });
 
+test("origin 칸이 없던 DB: 예전 가져오기가 붙인 노션 사본만 노션 사본으로, 직접 올린 파일은 노션 태그여도 클라우드에", () => {
+  const dir = mkdtempSync(join(tmpdir(), "folio-test-"));
+  try {
+    const path = join(dir, "old.db");
+    const raw = new Database(path);
+    raw.exec(`
+      CREATE TABLE files (id INTEGER PRIMARY KEY AUTOINCREMENT, drive_id TEXT NOT NULL UNIQUE, name TEXT NOT NULL, title TEXT NOT NULL, mime TEXT NOT NULL DEFAULT '', size INTEGER NOT NULL DEFAULT 0, category TEXT NOT NULL DEFAULT '기타', tags TEXT NOT NULL DEFAULT '', note TEXT NOT NULL DEFAULT '', shared INTEGER NOT NULL DEFAULT 0, public INTEGER NOT NULL DEFAULT 0, web_view_link TEXT NOT NULL DEFAULT '', web_content_link TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL DEFAULT (datetime('now')), folder_id INTEGER);
+      CREATE TABLE attachments (id INTEGER PRIMARY KEY AUTOINCREMENT, target TEXT NOT NULL CHECK (target IN ('note', 'task', 'portfolio', 'profile')), target_id INTEGER NOT NULL, file_id INTEGER NOT NULL, created_at TEXT NOT NULL DEFAULT (datetime('now')), by_import INTEGER NOT NULL DEFAULT 0, UNIQUE (target, target_id, file_id));
+      INSERT INTO files (drive_id, name, title, tags) VALUES ('i1', 'imported.png', 'imported.png', '노션'), ('m1', 'mine.png', 'mine.png', '노션');
+      INSERT INTO attachments (target, target_id, file_id, by_import) VALUES ('note', 1, 1, 1), ('note', 1, 2, 0);
+    `);
+    raw.close();
+    const db = openDb(path);
+    expect([db.getFile(1)!.origin, db.getFile(2)!.origin]).toEqual(["notion", ""]);
+    expect(db.listFiles({}).map((f) => f.title)).toEqual(["mine.png"]);
+    db.raw.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("첨부를 노트·할 일에만 붙이던 DB를 열면 첨부는 그대로, 포트폴리오에도 붙일 수 있음", () => {
   const dir = mkdtempSync(join(tmpdir(), "folio-test-"));
   try {
@@ -1157,16 +1178,20 @@ test("첨부를 노트·할 일에만 붙이던 DB를 열면 첨부는 그대로
       CREATE TRIGGER attachments_file_gone AFTER DELETE ON files BEGIN DELETE FROM attachments WHERE file_id = old.id; END;
       INSERT INTO files (drive_id, name, title) VALUES ('d1', 'a.pdf', 'a.pdf');
       INSERT INTO files (drive_id, name, title, tags) VALUES ('d2', 'Untitled.png', 'Untitled.png', '노션');
+      INSERT INTO files (drive_id, name, title, tags) VALUES ('d3', '노션 정리.pdf', '노션 정리.pdf', '노션');
+      INSERT INTO files (drive_id, name, title, tags) VALUES ('d4', 'old.png', 'old.png', '노션');
+      CREATE TABLE notion_files (block_id TEXT PRIMARY KEY, file_id INTEGER NOT NULL);
+      INSERT INTO notion_files (block_id, file_id) VALUES ('b1', 2);
       INSERT INTO attachments (target, target_id, file_id) VALUES ('note', 7, 1);
     `);
     raw.close();
     const db = openDb(path);
     expect(db.listAttachments("note", 7).map((f) => f.title)).toEqual(["a.pdf"]);
     expect(db.getFile(1)!.folder_id).toBeNull();
-    // A copy the Notion import made is no longer one of the cloud's files.
-    expect([db.getFile(1)!.origin, db.getFile(2)!.origin]).toEqual(["", "notion"]);
-    expect(db.listFiles({}).map((f) => f.title)).toEqual(["a.pdf"]);
-    expect(db.usage().files).toBe(1);
+    // A copy the Notion import made is no longer one of the cloud's files; an upload the owner tagged 노션 still is.
+    expect([1, 2, 3, 4].map((id) => db.getFile(id)!.origin)).toEqual(["", "notion", "", ""]);
+    expect(db.listFiles({}).map((f) => f.title)).toEqual(["old.png", "노션 정리.pdf", "a.pdf"]);
+    expect(db.usage().files).toBe(3);
     const s = db.insertSection("작품");
     const item = db.insertItem({ section_id: s.id, title: "t", period: "", summary: "", body: "", link: "", public: 1 });
     expect(db.addAttachment("portfolio", item.id, 1)).toBe(true);

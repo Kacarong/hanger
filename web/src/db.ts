@@ -237,8 +237,10 @@ export function openDb(path: string) {
   const fileCols = (db.query("PRAGMA table_info(files)").all() as { name: string }[]).map((c) => c.name);
   if (!fileCols.includes("folder_id")) db.exec("ALTER TABLE files ADD COLUMN folder_id INTEGER");
   if (!fileCols.includes("origin")) {
-    // Copies made by the Notion import/sync before this column were tagged 노션.
-    db.exec("ALTER TABLE files ADD COLUMN origin TEXT NOT NULL DEFAULT ''; UPDATE files SET origin = 'notion' WHERE tags = '노션' OR id IN (SELECT file_id FROM notion_files);");
+    // Copies the Notion import/sync made before this column: recorded in notion_files, or attached by the import.
+    // Not by the 노션 tag: the owner may have tagged an upload of their own that way.
+    db.exec(`ALTER TABLE files ADD COLUMN origin TEXT NOT NULL DEFAULT '';
+      UPDATE files SET origin = 'notion' WHERE id IN (SELECT file_id FROM notion_files) OR id IN (SELECT file_id FROM attachments WHERE by_import = 1);`);
   }
   // Attachments tables made before portfolio items and the profile could have files: widen the target check.
   // SQLite can't change a CHECK in place, so copy the table. The triggers that name it go first and come back below.
