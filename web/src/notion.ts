@@ -172,6 +172,7 @@ function treeOf(blocks: Block[]): Node[] {
   return root;
 }
 const subtreeOk = (n: Node): boolean => remakeable(n.b) && n.kids.every(subtreeOk);
+const subtreeIds = (n: Node): string[] => [n.b.id, ...(n.b.rows ?? []).map((r) => r.id), ...n.kids.flatMap(subtreeIds)];
 const subtreeSize = (n: Node): number => 1 + n.kids.reduce((s, k) => s + subtreeSize(k), 0);
 
 // Merges the note (local) and Notion (remote) against what they both were (base), block by block.
@@ -595,12 +596,28 @@ export function createNotionSync(o: {
           const id = made[k]!.id;
           nid.set(n.b.id, id);
           db.setNotionBlockId(noteId, n.b.id, id);
-          p.made.add(n.b.id);
           prev = id;
         }
-        for (const n of chunk) {
-          if (n.b.type === "table") await mapRows(p, n.b);
-          if (n.kids.length) await reconcile(p, nid.get(n.b.id)!, [], n.kids);
+        // A new copy counts as made (so its old copy may be deleted) only once everything under it is made too.
+        // If that fails, the half-made copies from here on are deleted again and their ids go back to the old copies,
+        // so Notion and the note stay as before and the next sync makes the change again.
+        for (const [k, n] of chunk.entries()) {
+          try {
+            if (n.b.type === "table") await mapRows(p, n.b);
+            if (n.kids.length) await reconcile(p, nid.get(n.b.id)!, [], n.kids);
+            p.made.add(n.b.id);
+          } catch (e) {
+            for (const undo of chunk.slice(k)) {
+              await api("DELETE", `/v1/blocks/${nid.get(undo.b.id)}`).catch(() => {}); // what is under it goes with it
+              for (const id of subtreeIds(undo)) {
+                p.made.delete(id);
+                const o = p.orig.get(id);
+                if (o) nid.set(id, o), db.setNotionBlockId(noteId, id, o);
+                else nid.delete(id), db.deleteNotionBlockId(noteId, id);
+              }
+            }
+            throw e;
+          }
         }
       }
     };

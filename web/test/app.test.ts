@@ -1102,7 +1102,7 @@ function fakeNotion() {
   const kids = new Map<string, string[]>();
   const dbs = new Map<string, { parent: string; title: string; rows: string[] }>();
   const calls: string[] = [];
-  const ctl = { failNext: null as RegExp | null }; // the next request matching this fails once
+  const ctl = { failNext: null as RegExp | null, skip: 0 }; // the next request matching this (after `skip` of them) fails once
   const plainOf = (rt: any[]) => rt.map((t) => (t.type === "text" ? t.text.content : t.type === "equation" ? t.equation.expression : t.mention.type === "date" ? `@${t.mention.date.start}` : "@멘션")).join("");
   // Fills rich text in the way Notion answers it.
   const rich = (rt: any[] = []) =>
@@ -1166,8 +1166,9 @@ function fakeNotion() {
       if (req.headers.get("Authorization") !== "Bearer ntn_good") return Response.json({ message: "unauthorized" }, { status: 401 });
       const version = req.headers.get("Notion-Version");
       calls.push(`${req.method} ${p}`);
-      if (ctl.failNext?.test(`${req.method} ${p}`)) {
+      if (ctl.failNext?.test(`${req.method} ${p}`) && ctl.skip-- <= 0) {
         ctl.failNext = null;
+        ctl.skip = 0;
         return new Response("injected failure", { status: 400 });
       }
       const body = req.method === "GET" || req.method === "DELETE" ? {} : await req.json();
@@ -1582,6 +1583,59 @@ test("노션 연동: 꾸민 체크박스는 다른 블록만 고치면 건드리
     expect(b.rich.map((x: { t: string }) => x.t).join("")).toBe("보고서 제출하기");
     expect(b.rich[0]).toEqual({ t: "보고서", b: 1 });
     expect(nt.tree(P)[0]).toEqual(["to_do", "보고서 제출하기@2026-11-21"]);
+  } finally {
+    t.done();
+  }
+});
+
+test("노션 연동: 새 사본의 하위 블록을 만들다 실패하면 옛 블록과 하위가 노션·노트에 남고, 다음 동기화에서 마저 바뀜", async () => {
+  loginEmail = "owner@example.com";
+  const t = await notionApp();
+  try {
+    const { nt } = t;
+    const P = nt.page("하위 실패");
+    const [a] = nt.insert(P, [
+      { type: "paragraph", paragraph: { rich_text: [nt.txt("에이")], children: [{ type: "paragraph", paragraph: { rich_text: [nt.txt("씨")] } }] } },
+      { type: "toggle", toggle: { rich_text: [nt.txt("비")], children: [{ type: "paragraph", paragraph: { rich_text: [nt.txt("디")] } }, { type: "paragraph", paragraph: { rich_text: [nt.txt("이")] } }] } },
+    ]);
+    await t.req("/api/notion", "PUT", { token: "ntn_good" });
+    await t.notion.idle();
+    const note = t.noteOf("하위 실패");
+    const appendFailsForKid = () => {
+      nt.ctl.failNext = /^PATCH \/v1\/blocks\/[^/]+\/children$/;
+      nt.ctl.skip = 1; // the parent's new copy is made, the child under it fails
+    };
+    const saveRaw = async (blocks: object[]) => {
+      const n = await t.getNote(note.id);
+      expect((await t.req(`/api/notes/${note.id}`, "PUT", { title: n.title, version: n.version, blocks })).status).toBe(200);
+      await t.notion.idle();
+    };
+    const texts = async () => (await t.getNote(note.id)).blocks.map((x) => [x.type, x.text, x.d ?? 0]);
+    const original = [["paragraph", "에이", [["paragraph", "씨"]]], ["toggle", "비", [["paragraph", "디"], ["paragraph", "이"]]]];
+
+    // 1) A (with C under it) becomes a quote.
+    let n = await t.getNote(note.id);
+    appendFailsForKid();
+    await saveRaw(n.blocks.map((x) => (x.id === a!.id ? { ...x, type: "quote" } : x)));
+    expect((await (await t.req("/api/notion", "GET")).json()).error).toContain("injected failure");
+    expect(nt.tree(P)).toEqual(original); // nothing lost, no half-made copy left
+    expect(await texts()).toEqual([["quote", "에이", 0], ["p", "씨", 1], ["toggle", "비", 0], ["p", "디", 1], ["p", "이", 1]]);
+    await t.notion.syncNote(note.id);
+    expect(nt.tree(P)).toEqual([["quote", "에이", [["paragraph", "씨"]]], original[1]]);
+    expect(await texts()).toEqual([["quote", "에이", 0], ["p", "씨", 1], ["toggle", "비", 0], ["p", "디", 1], ["p", "이", 1]]);
+
+    // 2) A (with C) moves below B: B is heavier, so A is the one made again.
+    n = await t.getNote(note.id);
+    const moved = [...n.blocks.slice(2), ...n.blocks.slice(0, 2)];
+    appendFailsForKid();
+    await saveRaw(moved);
+    expect(nt.tree(P)).toEqual([["quote", "에이", [["paragraph", "씨"]]], original[1]]);
+    expect(await texts()).toEqual([["toggle", "비", 0], ["p", "디", 1], ["p", "이", 1], ["quote", "에이", 0], ["p", "씨", 1]]);
+    await t.notion.syncNote(note.id);
+    expect(nt.tree(P)).toEqual([original[1], ["quote", "에이", [["paragraph", "씨"]]]]);
+    const after = await t.getNote(note.id);
+    expect(after.blocks.map((x) => x.text)).toEqual(["비", "디", "이", "에이", "씨"]);
+    expect(new Set(after.blocks.map((x) => x.id)).size).toBe(5);
   } finally {
     t.done();
   }
