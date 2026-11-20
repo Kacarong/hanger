@@ -61,7 +61,7 @@ function el(tag, props = {}, ...children) {
 }
 const iconBtn = (label, iconName, onclick, extra = "") => el("button", { className: `btn ghost sm ${extra}`, type: "button", onclick, title: label, ariaLabel: label }, icon(iconName));
 const stat = (label, value, sub, warn = false) =>
-  el("div", { className: "stat" }, el("div", { className: "label", textContent: label }), el("div", { className: "value" + (warn ? " warn" : ""), textContent: value }), el("div", { className: "sub", textContent: sub }));
+  el("div", { className: "stat" }, el("div", { className: "label", textContent: label }), el("div", { className: "value" + (warn ? " warn" : ""), textContent: value }), sub ? el("div", { className: "sub", textContent: sub }) : null);
 const pill = (text, color) => el("span", { className: `pill ${color}`, textContent: text });
 const emptyRow = (cols, text) => el("tr", { className: "empty-row" }, el("td", { colSpan: cols, textContent: text }));
 
@@ -298,7 +298,7 @@ async function loadPickList() {
             }),
           );
         })
-      : [el("li", { className: "muted", textContent: q ? "검색 결과가 없습니다." : "파일함이 비어 있습니다. \"새로 올리기\"로 올려 보세요." })]),
+      : [el("li", { className: "muted", textContent: q ? "검색 결과가 없습니다." : "파일함이 비어 있습니다." })]),
   );
 }
 
@@ -496,7 +496,7 @@ async function refreshSections() {
         el("table", { className: "table" }, el("tbody", {}, ...(rows.length ? rows : [emptyRow(5, "아직 항목이 없습니다.")]))),
       );
     }),
-    pf.sections.length ? "" : el("p", { className: "notice", textContent: "섹션이 없습니다. 오른쪽 위 \"섹션 추가\"로 만들어 보세요." }),
+    pf.sections.length ? "" : el("p", { className: "notice", textContent: "섹션이 없습니다." }),
   );
 }
 
@@ -599,10 +599,10 @@ async function loadToday() {
   const wd = new Intl.DateTimeFormat("ko-KR", { weekday: "long", timeZone: "Asia/Seoul" }).format(new Date(t.date + "T12:00:00+09:00"));
   $("page-title").textContent = `오늘 · ${md(t.date)} ${wd}`;
   $("today-stats").replaceChildren(
-    stat("지난 일", String(t.overdue.length), "날짜가 지났는데 안 끝낸 것", t.overdue.length > 0),
-    stat("오늘", String(t.today.length), "오늘 날짜의 할 일·과제"),
-    stat("다가오는 과제", String(t.upcoming.length), "3일 안에 마감"),
-    stat("오늘 끝낸 일", String(t.doneToday.length), "수고했어요"),
+    stat("지난 일", String(t.overdue.length), "", t.overdue.length > 0),
+    stat("오늘", String(t.today.length), ""),
+    stat("다가오는 과제", String(t.upcoming.length), "3일 안"),
+    stat("오늘 끝낸 일", String(t.doneToday.length), ""),
   );
   const q = searchText();
   const row = (x) => taskRow(x, t.date, reload, false);
@@ -633,9 +633,9 @@ async function loadTasks() {
   const reload = () => loadTasks().catch(showError);
   const left = (k) => all.filter((x) => x.kind === k).length;
   $("task-stats").replaceChildren(
-    stat("남은 할 일", String(left("할 일")), "안 끝낸 할 일"),
+    stat("남은 할 일", String(left("할 일")), ""),
     stat("남은 과제", String(left("과제")), `3일 안 마감 ${today.upcoming.length}개`),
-    stat("지난 일", String(today.overdue.length), "날짜가 지났는데 안 끝낸 것", today.overdue.length > 0),
+    stat("지난 일", String(today.overdue.length), "", today.overdue.length > 0),
   );
   const q = searchText();
   const shown = tasks.filter((x) => matches(x, q));
@@ -784,9 +784,9 @@ async function loadExams() {
   const planDone = plan.filter((t) => t.done).length;
   const todayPlan = exams.flatMap((e) => e.plan).filter((t) => t.due_date === today);
   $("exam-stats").replaceChildren(
-    stat("다가오는 시험", String(ahead.length), ahead.length ? `가장 가까운 시험 ${dday(today, ahead[0].date)} · ${ahead[0].title}` : "날짜가 정해진 시험이 없습니다"),
-    stat("오늘 공부", `${todayPlan.filter((t) => t.done).length}/${todayPlan.length}`, "오늘 날짜의 공부 계획 중 끝낸 것"),
-    stat("계획 진행", plan.length ? Math.round((planDone / plan.length) * 100) + "%" : "—", `남은 시험의 공부 계획 ${planDone}/${plan.length}개 끝냄`),
+    stat("다가오는 시험", String(ahead.length), ahead.length ? `${dday(today, ahead[0].date)} · ${ahead[0].title}` : ""),
+    stat("오늘 공부", `${todayPlan.filter((t) => t.done).length}/${todayPlan.length}`, ""),
+    stat("계획 진행", plan.length ? Math.round((planDone / plan.length) * 100) + "%" : "—", `${planDone}/${plan.length}`),
   );
   const upcoming = shown.filter((e) => !e.date || e.date >= today);
   const past = shown.filter((e) => e.date && e.date < today).reverse(); // the latest first
@@ -795,7 +795,7 @@ async function loadExams() {
     const fold = el("details", { className: "exam-past", open: pastOpen || !!q, ontoggle() { if (!q) pastOpen = this.open; } }, el("summary", { textContent: `지난 시험 · ${past.length}` }), ...past.map((e) => examCard(e, today, reload)));
     out.push(fold);
   }
-  if (!shown.length) out.push(el("p", { className: "notice", textContent: q ? "검색 결과가 없습니다." : '아직 시험이 없습니다. 오른쪽 위 "새 시험"으로 시험 일정을 넣고, 시험마다 날짜별 공부 계획을 적어 보세요. 공부 계획은 오늘 화면과 캘린더에도 나옵니다.' }));
+  if (!shown.length) out.push(el("p", { className: "notice", textContent: q ? "검색 결과가 없습니다." : "아직 시험이 없습니다." }));
   $("exam-list").replaceChildren(...out);
   if (examFocus !== null) $(`plan-text-${examFocus}`)?.focus();
   examFocus = null;
@@ -811,7 +811,7 @@ function examCard(e, today, reload) {
   let next = last && last >= today ? plusDays(last, 1) : today;
   if (e.date && next > e.date && e.date >= today) next = e.date;
   const dateIn = el("input", { className: "input", type: "date", value: next, ariaLabel: "공부할 날짜" });
-  const textIn = el("input", { className: "input", id: `plan-text-${e.id}`, placeholder: "공부할 내용 (예: 1장 복습) 쓰고 Enter", maxLength: 200 });
+  const textIn = el("input", { className: "input", id: `plan-text-${e.id}`, placeholder: "공부할 내용", maxLength: 200 });
   const add = async (ev) => {
     ev.preventDefault();
     if (!textIn.value.trim()) return textIn.focus();
@@ -973,7 +973,7 @@ function showNoteNotion(n) {
   box.replaceChildren(
     ...[
     el("a", { href: n.notion.url, target: "_blank", rel: "noopener", className: "btn ghost sm" }, "노션에서 열기 ↗"),
-    n.notion.readOnly ? el("span", { className: "error", textContent: "너무 길거나 깊은 페이지라 여기서는 읽기만 합니다. 노션에서 고쳐 주세요." }) : null,
+    n.notion.readOnly ? el("span", { className: "error", textContent: "읽기 전용" }) : null,
     n.notion.props.length ? el("dl", { className: "note-props" }, ...n.notion.props.flatMap(([k, v]) => [el("dt", { textContent: k }), el("dd", { textContent: v })])) : null,
     ].filter(Boolean),
   );
@@ -1119,8 +1119,8 @@ function notionText(j) {
     j.running ? `노션과 맞추는 중… 페이지 ${j.done}/${j.total || "?"}` : `연결됨${j.lastSync ? ` · 마지막으로 모두 맞춘 때 ${new Intl.DateTimeFormat("ko-KR", { hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(new Date(j.lastSync))}` : ""}`,
     j.error && `문제: ${j.error}`,
     j.failed?.length && `맞추지 못한 페이지: ${j.failed.join(", ")}`,
-    j.partial?.length && `너무 길거나 깊어서 여기서는 읽기만 하는 페이지: ${j.partial.join(", ")}`,
-    j.fileProblems && `노션에서 가져오지 못한 파일 ${j.fileProblems}개 (30분마다 다시 시도합니다)`,
+    j.partial?.length && `읽기 전용 페이지: ${j.partial.join(", ")}`,
+    j.fileProblems && `가져오지 못한 파일 ${j.fileProblems}개`,
   ].filter(Boolean).join("\n");
 }
 async function watchNotion(wasRunning = false) {
@@ -1192,14 +1192,14 @@ const newTaskBtn = () => el("button", { className: "btn primary", type: "button"
 
 function openUpload() {
   $("progress").replaceChildren();
-  $("upload-where").textContent = `${pathText(currentFolder())}에 · 파일당 1GB 미만`;
+  $("upload-where").textContent = pathText(currentFolder());
   $("upload-dialog").showModal();
 }
 
 function showPicked() {
   const files = [...$("files").files];
   $("drop-text").textContent = !files.length
-    ? "파일을 여기로 끌어다 놓거나 눌러서 고르세요"
+    ? "파일 고르기"
     : files.length === 1 ? files[0].name : `${files[0].name} 외 ${files.length - 1}개`;
 }
 

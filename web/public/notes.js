@@ -25,7 +25,7 @@ const EXTRA = [
 const TEXT_TYPES = ["p", "h1", "h2", "h3", "todo", "bullet", "number", "quote", "toggle", "callout", "code"];
 const RICH_TYPES = TEXT_TYPES.filter((t) => t !== "code");
 const LIST_TYPES = ["todo", "bullet", "number", "toggle"]; // Enter continues these
-const PLACEHOLDER = { p: "글을 쓰거나 / 를 눌러 블록을 고르세요", h1: "제목 1", h2: "제목 2", h3: "제목 3", todo: "할 일", bullet: "목록", number: "목록", quote: "인용", code: "코드", toggle: "토글", callout: "콜아웃", equation: "수식 (LaTeX)" };
+const PLACEHOLDER = { p: "", h1: "제목 1", h2: "제목 2", h3: "제목 3", todo: "할 일", bullet: "목록", number: "목록", quote: "인용", code: "코드", toggle: "토글", callout: "콜아웃", equation: "수식 (LaTeX)" };
 export const COLORS = [
   ["default", "기본"], ["gray", "회색"], ["brown", "갈색"], ["orange", "주황"], ["yellow", "노랑"],
   ["green", "초록"], ["blue", "파랑"], ["purple", "보라"], ["pink", "분홍"], ["red", "빨강"],
