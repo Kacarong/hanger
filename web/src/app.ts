@@ -2,7 +2,7 @@ import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypt
 import { mkdirSync, existsSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { cleanBlocks, editRuns, richOrNone } from "./blocks";
-import { ATTACH_TARGETS, CATEGORIES, TASK_KINDS, type AttachedFile, type Block, type Db, type FileRow, type PortfolioFields, type PortfolioItem, type TaskFields } from "./db";
+import { ATTACH_TARGETS, CATEGORIES, TASK_KINDS, type AttachedFile, type Block, type Db, type ExamFields, type FileRow, type PortfolioFields, type PortfolioItem, type TaskFields } from "./db";
 import { GoogleError, type CalendarEvent, type Google } from "./google";
 import { createNotionSync, NotionError } from "./notion";
 import { passwordProblem } from "./password";
@@ -11,6 +11,7 @@ export const MAX_FILE_SIZE = 1024 ** 3; // files must be under 1GB
 const SESSION_DAYS = 30;
 const CALENDAR_MAX_DAYS = 62; // longest range /api/calendar serves (a 6-week month grid is 42)
 const UPCOMING_DAYS = 3; // 과제 due within this many days show up on the today screen
+const EXAM_DAYS = 14; // exams within this many days show up on the today screen
 const LOGIN_FAIL_LIMIT = 5; // password failures allowed per LOGIN_FAIL_WINDOW
 const LOGIN_FAIL_WINDOW = 15 * 60_000;
 const PUBLIC_DIR = join(import.meta.dir, "..", "public");
@@ -139,12 +140,27 @@ export function createApp(cfg: AppConfig, db: Db, google: Google) {
   if (!db.getSetting("file_link_secret")) db.setSetting("file_link_secret", randomBytes(32).toString("hex"));
   const linkSig = (id: number) => createHmac("sha256", db.getSetting("file_link_secret")!).update(String(id)).digest("base64url").slice(0, 22);
   const linkOk = (id: number, sig: string) => sig.length === 22 && timingSafeEqual(Buffer.from(sig), Buffer.from(linkSig(id)));
+  // Notion copies made before they had their own Drive folder sit in the cloud's folder: move them out, once.
+  async function moveNotionCopies() {
+    if (!cfg.googleEnabled || !db.getSetting("refresh_token") || db.getSetting("notion_copies_moved")) return;
+    const to = await google.notionFolder();
+    for (const f of db.notionCopies()) {
+      try {
+        const from = (await google.getFile(f.drive_id)).parents?.[0];
+        if (from && from !== to) await google.move(f.drive_id, from, to);
+      } catch (e) {
+        if (!(e instanceof GoogleError && e.status === 404)) throw e; // gone from Drive: nothing to move
+      }
+    }
+    db.setSetting("notion_copies_moved", "1");
+  }
+
   const notion = createNotionSync({
     db,
     apiBase: cfg.notionApi ?? "https://api.notion.com",
     saveFile: async (name, mime, bytes) => {
-      const d = await google.upload(name, mime, bytes, origin);
-      return db.insertFile({ drive_id: d.id, name: d.name, title: d.name, mime: d.mimeType, size: Number(d.size ?? bytes.size), category: "기타", tags: "노션", note: "" });
+      const d = await google.upload(name, mime, bytes, origin, await google.notionFolder());
+      return db.insertFile({ drive_id: d.id, name: d.name, title: d.name, mime: d.mimeType, size: Number(d.size ?? bytes.size), category: "기타", tags: "노션", note: "", origin: "notion" });
     },
     fileLink: (id, name) => `${origin}/f/${id}/${linkSig(id)}/${encodeURIComponent(name.replace(/[\/]/g, "_"))}`,
     fileOfLink: (u) => {
@@ -231,6 +247,29 @@ export function createApp(cfg: AppConfig, db: Db, google: Google) {
   }
 
 
+  // Validates exam fields from a request body. Only keys present in the body are returned.
+  function examFields(b: Record<string, unknown>): Partial<ExamFields> | string {
+    const out: Partial<ExamFields> = {};
+    if ("title" in b) {
+      out.title = str(b.title, 200);
+      if (!out.title) return "시험 이름을 입력해 주세요";
+    }
+    if ("course" in b) out.course = str(b.course, 100);
+    if ("place" in b) out.place = str(b.place, 200);
+    if ("scope" in b) out.scope = str(b.scope, 5000);
+    if ("note" in b) out.note = str(b.note, 5000);
+    if ("date" in b) {
+      const v = str(b.date, 10);
+      if (v && !isDate(v)) return "날짜가 올바르지 않습니다";
+      out.date = v || null;
+    }
+    if ("time" in b) {
+      const v = str(b.time, 5);
+      if (v && !isTime(v)) return "시간이 올바르지 않습니다";
+      out.time = v || null;
+    }
+    return out;
+  }
 
   // The portfolio page. mine = the owner's own view (/admin/portfolio): private items too, marked 개인용.
   function renderPortfolio(mine = false): Response {
@@ -410,6 +449,7 @@ ${body || `<section class="works"><p class="empty reveal">${mine ? "아직 포�
         today: open.filter((t) => t.due_date === d),
         upcoming: open.filter((t) => t.due_date! > d && t.kind === "과제"),
         doneToday: db.listTasks({ done: true, doneOn: d }),
+        exams: db.listExams({ from: d, to: addDays(d, EXAM_DAYS) }),
       });
     }
 
@@ -420,14 +460,15 @@ ${body || `<section class="works"><p class="empty reveal">${mine ? "아직 포�
       const to = url.searchParams.get("to") ?? "";
       if (!isDate(from) || !isDate(to) || to < from || to > addDays(from, CALENDAR_MAX_DAYS - 1)) return json({ error: "날짜 범위가 올바르지 않습니다" }, 400);
       const tasks = db.listTasks({ from, to });
-      if (!cfg.googleEnabled || !db.getSetting("refresh_token")) return json({ tasks, events: [], google: "off" });
-      if (!google.calendarGranted()) return json({ tasks, events: [], google: "need_consent" });
+      const exams = db.listExams({ from, to });
+      if (!cfg.googleEnabled || !db.getSetting("refresh_token")) return json({ tasks, exams, events: [], google: "off" });
+      if (!google.calendarGranted()) return json({ tasks, exams, events: [], google: "need_consent" });
       try {
         const events = await google.events(`${from}T00:00:00+09:00`, `${addDays(to, 1)}T00:00:00+09:00`);
-        return json({ tasks, events: events.map(calendarItem).filter((e) => e.endDate >= from && e.startDate <= to), google: "ok" });
+        return json({ tasks, exams, events: events.map(calendarItem).filter((e) => e.endDate >= from && e.startDate <= to), google: "ok" });
       } catch (e) {
         if (!(e instanceof GoogleError)) throw e;
-        return json({ tasks, events: [], google: "error", error: e.message });
+        return json({ tasks, exams, events: [], google: "error", error: e.message });
       }
     }
 
@@ -440,11 +481,45 @@ ${body || `<section class="works"><p class="empty reveal">${mine ? "아직 포�
       return json(db.listTasks({ done: done === null ? undefined : done === "1", from, to, kind: q.get("kind") ?? undefined }));
     }
 
+    // exam_id adds a day to that exam's study plan: kind 공부, the exam's course.
     if (path === "/api/tasks" && method === "POST") {
-      const f = taskFields(await body(req));
+      const b = await body(req);
+      const f = taskFields(b);
       if (typeof f === "string") return json({ error: f }, 400);
       if (!f.title) return json({ error: "제목을 입력해 주세요" }, 400);
-      return json(db.insertTask({ kind: "할 일", course: "", due_date: null, due_time: null, note: "", ...f, title: f.title }), 201);
+      const exam = b.exam_id === undefined || b.exam_id === null ? null : db.getExam(Number(b.exam_id));
+      if (b.exam_id !== undefined && b.exam_id !== null && !exam) return json({ error: "시험을 찾을 수 없습니다" }, 404);
+      const plan = exam ? { kind: "공부", course: exam.course, exam_id: exam.id } : {};
+      return json(db.insertTask({ kind: "할 일", course: "", due_date: null, due_time: null, note: "", ...f, title: f.title, ...plan }), 201);
+    }
+
+    // 시험: every exam with its study plan (soonest exam first; the client splits off past ones).
+    if (path === "/api/exams" && method === "GET") {
+      const plan = db.listTasks({ planned: true });
+      return json({ date: today(), exams: db.listExams().map((e) => ({ ...e, plan: plan.filter((t) => t.exam_id === e.id) })) });
+    }
+
+    if (path === "/api/exams" && method === "POST") {
+      const f = examFields(await body(req));
+      if (typeof f === "string") return json({ error: f }, 400);
+      if (!f.title) return json({ error: "시험 이름을 입력해 주세요" }, 400);
+      return json(db.insertExam({ course: "", date: null, time: null, place: "", scope: "", note: "", ...f, title: f.title }), 201);
+    }
+
+    const em = path.match(/^\/api\/exams\/(\d+)$/);
+    if (em) {
+      const exam = db.getExam(Number(em[1]));
+      if (!exam) return json({ error: "시험을 찾을 수 없습니다" }, 404);
+      if (method === "PATCH") {
+        const f = examFields(await body(req));
+        if (typeof f === "string") return json({ error: f }, 400);
+        db.updateExam(exam.id, f);
+        return json(db.getExam(exam.id));
+      }
+      if (method === "DELETE") {
+        db.deleteExam(exam.id);
+        return json({ ok: true });
+      }
     }
 
     const tm = path.match(/^\/api\/tasks\/(\d+)$/);
@@ -963,5 +1038,5 @@ ${body || `<section class="works"><p class="empty reveal">${mine ? "아직 포�
       console.error(e);
       return withSecurityHeaders(json({ error: "서버 오류" }, 500), path);
     }
-  }, { notion });
+  }, { notion, moveNotionCopies });
 }

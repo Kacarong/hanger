@@ -29,6 +29,7 @@ const ICONS = {
   star: '<path d="m12 3 2.7 5.6 6.1.9-4.4 4.3 1 6.1-5.4-2.9-5.4 2.9 1-6.1-4.4-4.3 6.1-.9z"/>',
   up: '<path d="m6 15 6-6 6 6"/>',
   down: '<path d="m6 9 6 6 6-6"/>',
+  exam: '<rect x="5" y="4" width="14" height="17" rx="2"/><path d="M9 4V2.5h6V4M9 10h6M9 14h6M9 18h3"/>',
   eye: '<path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/>',
 };
 const icon = (name) => {
@@ -558,8 +559,9 @@ function taskRow(t, today, reload, withActions) {
       t.files ? el("span", { className: "clip", title: `첨부 파일 ${t.files}개` }, icon("clip"), String(t.files)) : null,
       t.note ? el("span", { className: "sub", textContent: t.note }) : null,
       t.note_id ? el("span", { className: "sub" }, el("a", { href: `#notes/${t.note_id}`, textContent: `노트 · ${t.note_title || "제목 없음"}` })) : null,
+      t.exam_id ? el("span", { className: "sub" }, el("a", { href: "#exams", textContent: `시험 · ${t.exam_title}` })) : null,
     ),
-    el("td", { className: "hide-sm" }, pill(t.kind, t.kind === "과제" ? "blue" : "gray")),
+    el("td", { className: "hide-sm" }, pill(t.kind, t.kind === "과제" ? "blue" : t.kind === "공부" ? "amber" : "gray")),
     el("td", { className: "hide-sm muted", textContent: t.course || "—" }),
     dueCell(t, today),
     el("td", {}, taskStatus(t, today)),
@@ -603,17 +605,19 @@ async function loadToday() {
     stat("오늘 끝낸 일", String(t.doneToday.length), "수고했어요"),
   );
   const q = searchText();
+  const row = (x) => taskRow(x, t.date, reload, false);
   const sections = [
-    ["지난 일", t.overdue],
-    ["오늘", t.today],
-    ["다가오는 과제 (3일 안)", t.upcoming],
-    ["오늘 끝낸 일", t.doneToday],
+    ["지난 일", t.overdue, row],
+    ["오늘", t.today, row],
+    ["다가오는 시험 (2주 안)", t.exams, (e) => examTodayRow(e, t.date)],
+    ["다가오는 과제 (3일 안)", t.upcoming, row],
+    ["오늘 끝낸 일", t.doneToday, row],
   ]
-    .map(([title, items]) => [title, items.filter((x) => matches(x, q))])
+    .map(([title, items, make]) => [title, items.filter((x) => matches(x, q)), make])
     .filter(([, items]) => items.length);
   $("today-list").replaceChildren(
     ...(sections.length
-      ? sections.flatMap(([title, items]) => [el("tr", { className: "group-row" }, el("td", { colSpan: 6, textContent: `${title} · ${items.length}` })), ...items.map((x) => taskRow(x, t.date, reload, false))])
+      ? sections.flatMap(([title, items, make]) => [el("tr", { className: "group-row" }, el("td", { colSpan: 6, textContent: `${title} · ${items.length}` })), ...items.map(make)])
       : [emptyRow(6, "오늘 할 일이 없습니다.")]),
   );
 }
@@ -682,6 +686,7 @@ async function loadCalendar() {
     }
   }
   for (const t of data.tasks) if (matches(t, q)) put(t.due_date, { sort: t.due_time ?? "~", node: () => taskItem(t, today, reload) });
+  for (const e of data.exams) if (matches(e, q)) put(e.date, { sort: e.time ?? "", node: () => examItem(e) });
 
   const heads = ["일", "월", "화", "수", "목", "금", "토"].map((w) => el("div", { className: "cal-head", textContent: w }));
   const days = [];
@@ -721,6 +726,140 @@ function taskItem(t, today, reload) {
     el("i", { className: "dot" }),
     t.due_time ? el("span", { className: "t", textContent: t.due_time }) : null,
     el("span", { textContent: (t.course ? `[${t.course}] ` : "") + t.title }),
+  );
+}
+
+function examItem(e) {
+  return el(
+    "a",
+    { className: "cal-item exam", href: "#exams", title: `시험 · ${e.title}${e.time ? " · " + e.time : ""}${e.place ? " · " + e.place : ""}` },
+    el("i", { className: "dot" }),
+    e.time ? el("span", { className: "t", textContent: e.time }) : null,
+    el("span", { textContent: `시험 · ${e.title}` }),
+  );
+}
+
+// 시험: 시험마다 일정(날짜·시간·장소·범위)과 날짜별 공부 계획. 공부 계획 하나하나는 할 일(종류 "공부")이라
+// 오늘 화면과 캘린더에도 나오고, 거기서 체크해도 여기에 반영된다.
+const weekday = (d) => "일월화수목금토"[new Date(d + "T00:00:00Z").getUTCDay()];
+const dday = (today, date) => {
+  const n = daysBetween(today, date);
+  return n === 0 ? "D-day" : n > 0 ? `D-${n}` : `D+${-n}`;
+};
+const dayLabel = (d) => `${md(d)} (${weekday(d)})`;
+let editingExam = null;
+let examFocus = null; // the exam whose "add" box gets the focus back after the list is redrawn
+let pastOpen = false; // the 지난 시험 fold stays as it was across redraws
+const EXAM_KEYS = ["title", "course", "date", "time", "place", "scope", "note"];
+
+function openExamDialog(e = null) {
+  editingExam = e;
+  $("exam-dialog-title").textContent = e ? "시험 수정" : "새 시험";
+  for (const k of EXAM_KEYS) $(`exam-${k}`).value = e?.[k] ?? "";
+  $("exam-msg").textContent = "";
+  $("exam-dialog").showModal();
+}
+
+function examTodayRow(e, today) {
+  const n = daysBetween(today, e.date);
+  return el(
+    "tr",
+    {},
+    el("td", {}, el("span", { className: "exam-mark" }, icon("exam"))),
+    el("td", {}, el("a", { className: "title", href: "#exams", textContent: e.title }), e.place ? el("span", { className: "sub", textContent: e.place }) : null),
+    el("td", { className: "hide-sm" }, pill("시험", "orange")),
+    el("td", { className: "hide-sm muted", textContent: e.course || "—" }),
+    el("td", {}, el("span", { className: "date-main", textContent: md(e.date) + (e.time ? " " + e.time : "") }), el("span", { className: `date-note ${n <= 3 ? "soon" : "ok"}`, textContent: dday(today, e.date) })),
+    el("td", {}, pill(n === 0 ? "오늘" : dday(today, e.date), n <= 3 ? "orange" : "amber")),
+  );
+}
+
+async function loadExams() {
+  const { date: today, exams } = await call("/api/exams");
+  const reload = () => loadExams().catch(showError);
+  const q = searchText();
+  const shown = exams.filter((e) => !q || [e.title, e.course, e.place, e.scope, e.note, ...e.plan.map((t) => t.title)].join("\n").toLowerCase().includes(q));
+  const ahead = exams.filter((e) => e.date && e.date >= today);
+  const plan = exams.filter((e) => !e.date || e.date >= today).flatMap((e) => e.plan);
+  const planDone = plan.filter((t) => t.done).length;
+  const todayPlan = exams.flatMap((e) => e.plan).filter((t) => t.due_date === today);
+  $("exam-stats").replaceChildren(
+    stat("다가오는 시험", String(ahead.length), ahead.length ? `가장 가까운 시험 ${dday(today, ahead[0].date)} · ${ahead[0].title}` : "날짜가 정해진 시험이 없습니다"),
+    stat("오늘 공부", `${todayPlan.filter((t) => t.done).length}/${todayPlan.length}`, "오늘 날짜의 공부 계획 중 끝낸 것"),
+    stat("계획 진행", plan.length ? Math.round((planDone / plan.length) * 100) + "%" : "—", `남은 시험의 공부 계획 ${planDone}/${plan.length}개 끝냄`),
+  );
+  const upcoming = shown.filter((e) => !e.date || e.date >= today);
+  const past = shown.filter((e) => e.date && e.date < today).reverse(); // the latest first
+  const out = upcoming.map((e) => examCard(e, today, reload));
+  if (past.length) {
+    const fold = el("details", { className: "exam-past", open: pastOpen || !!q, ontoggle() { if (!q) pastOpen = this.open; } }, el("summary", { textContent: `지난 시험 · ${past.length}` }), ...past.map((e) => examCard(e, today, reload)));
+    out.push(fold);
+  }
+  if (!shown.length) out.push(el("p", { className: "notice", textContent: q ? "검색 결과가 없습니다." : '아직 시험이 없습니다. 오른쪽 위 "새 시험"으로 시험 일정을 넣고, 시험마다 날짜별 공부 계획을 적어 보세요. 공부 계획은 오늘 화면과 캘린더에도 나옵니다.' }));
+  $("exam-list").replaceChildren(...out);
+  if (examFocus !== null) $(`plan-text-${examFocus}`)?.focus();
+  examFocus = null;
+}
+
+function examCard(e, today, reload) {
+  const done = e.plan.filter((t) => t.done).length;
+  const n = e.date ? daysBetween(today, e.date) : null;
+  const badge = n === null ? pill("날짜 미정", "gray") : n < 0 ? pill("끝남", "gray") : pill(dday(today, e.date), n <= 3 ? "orange" : n <= 7 ? "amber" : "blue");
+  const when = e.date ? dayLabel(e.date) + (e.time ? " " + e.time : "") : "날짜 미정";
+  // The next free day after the plan so far: writing a plan day after day needs no date picking.
+  const last = e.plan.map((t) => t.due_date).filter(Boolean).sort().at(-1);
+  let next = last && last >= today ? plusDays(last, 1) : today;
+  if (e.date && next > e.date && e.date >= today) next = e.date;
+  const dateIn = el("input", { className: "input", type: "date", value: next, ariaLabel: "공부할 날짜" });
+  const textIn = el("input", { className: "input", id: `plan-text-${e.id}`, placeholder: "공부할 내용 (예: 1장 복습) 쓰고 Enter", maxLength: 200 });
+  const add = async (ev) => {
+    ev.preventDefault();
+    if (!textIn.value.trim()) return textIn.focus();
+    try {
+      await call("/api/tasks", { method: "POST", body: { exam_id: e.id, title: textIn.value, due_date: dateIn.value } });
+      examFocus = e.id;
+      await loadExams();
+    } catch (err) {
+      showError(err);
+    }
+  };
+  const remove = () => confirm(`"${e.title}" 시험과 그 공부 계획을 모두 지울까요?`) && call(`/api/exams/${e.id}`, { method: "DELETE" }).then(reload, showError);
+  return el(
+    "section",
+    { className: "exam" + (n !== null && n < 0 ? " past" : "") },
+    el(
+      "div",
+      { className: "exam-head" },
+      badge,
+      el("div", { className: "grow" }, el("h2", { textContent: e.title }), el("div", { className: "muted", textContent: [e.course, when, e.place].filter(Boolean).join(" · ") })),
+      iconBtn("시험 수정", "edit", () => openExamDialog(e)),
+      iconBtn("시험 삭제", "trash", remove, "danger"),
+    ),
+    e.scope ? el("div", { className: "exam-text" }, el("span", { className: "muted", textContent: "범위" }), el("p", { textContent: e.scope })) : null,
+    e.note ? el("div", { className: "exam-text" }, el("span", { className: "muted", textContent: "메모" }), el("p", { textContent: e.note })) : null,
+    el(
+      "div",
+      { className: "exam-progress" },
+      el("span", { textContent: `공부 계획 ${done}/${e.plan.length}` }),
+      el("div", { className: "bar-track" }, el("div", { className: "bar-fill", style: `width:${e.plan.length ? (done / e.plan.length) * 100 : 0}%` })),
+    ),
+    e.plan.length ? el("ul", { className: "plan" }, ...e.plan.map((t) => planRow(t, today, reload))) : null,
+    el("form", { className: "plan-add", onsubmit: add }, dateIn, textIn, el("button", { className: "btn", type: "submit" }, icon("plus"), "추가")),
+  );
+}
+
+function planRow(t, today, reload) {
+  const update = (patch) => call(`/api/tasks/${t.id}`, { method: "PATCH", body: patch }).then(reload, showError);
+  const late = !t.done && t.due_date && t.due_date < today;
+  return el(
+    "li",
+    { className: t.done ? "done" : t.due_date === today ? "today" : late ? "late" : "" },
+    el("input", { type: "checkbox", checked: !!t.done, title: "끝냄 표시", onchange() { update({ done: this.checked }); } }),
+    el("span", { className: "plan-date", textContent: t.due_date ? dayLabel(t.due_date) : "날짜 없음" }),
+    el("span", { className: "plan-title", textContent: t.title }),
+    !t.done && t.due_date === today ? pill("오늘", "blue") : late ? pill("밀림", "orange") : null,
+    iconBtn("수정", "edit", () => openTaskDialog(t)),
+    iconBtn("삭제", "trash", () => confirm(`"${t.title}" 을(를) 계획에서 지울까요?`) && call(`/api/tasks/${t.id}`, { method: "DELETE" }).then(reload, showError), "danger"),
   );
 }
 
@@ -1014,6 +1153,7 @@ const tabs = {
   today: { title: "오늘", load: () => loadToday(), actions: () => [newTaskBtn()] },
   tasks: { title: "할 일·과제", load: () => loadTasks(), actions: () => [newTaskBtn()] },
   calendar: { title: "캘린더", load: () => loadCalendar(), actions: () => [newTaskBtn()] },
+  exams: { title: "시험", load: () => loadExams(), actions: () => [el("button", { className: "btn primary", type: "button", onclick: () => openExamDialog() }, icon("plus"), "새 시험", el("kbd", { textContent: "N" }))] },
   notes: {
     title: "노트",
     load: () => loadNotes(),
@@ -1240,6 +1380,18 @@ async function init() {
       $("folder-msg").textContent = e.message;
     }
   };
+  $("exam-form").onsubmit = async (ev) => {
+    ev.preventDefault();
+    const body = Object.fromEntries(EXAM_KEYS.map((k) => [k, $(`exam-${k}`).value]));
+    try {
+      if (editingExam) await call(`/api/exams/${editingExam.id}`, { method: "PATCH", body });
+      else await call("/api/exams", { method: "POST", body });
+      $("exam-dialog").close();
+      tabs[currentTab()].load().catch(showError);
+    } catch (e) {
+      $("exam-msg").textContent = e.message;
+    }
+  };
   $("profile-form").onsubmit = async (ev) => {
     ev.preventDefault();
     try {
@@ -1294,6 +1446,7 @@ async function init() {
     if (ev.key === "/") (ev.preventDefault(), $("global-search").focus());
     else if (ev.key.toLowerCase() === "n" && currentTab() === "notes") (ev.preventDefault(), newNote().catch(showError));
     else if (ev.key.toLowerCase() === "n" && currentTab() === "portfolio") (ev.preventDefault(), openItemDialog());
+    else if (ev.key.toLowerCase() === "n" && currentTab() === "exams") (ev.preventDefault(), openExamDialog());
     else if (ev.key.toLowerCase() === "n" && currentTab() !== "files") (ev.preventDefault(), openTaskDialog());
     else if (ev.key.toLowerCase() === "u" && currentTab() === "files" && me.driveConnected) (ev.preventDefault(), openUpload());
   });

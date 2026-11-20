@@ -356,3 +356,40 @@ span.note-fold { cursor: default; }
   .cal-item { padding: 1px 2px; font-size: 11px; }
   .cal-item .t { display: none; }
 }
+
+/* 시험 */
+.exam { margin: 16px; padding: 14px 16px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel-2); display: grid; gap: 10px; }
+.exam.past { opacity: .75; }
+.exam-head { display: flex; align-items: flex-start; gap: 10px; }
+.exam-head .grow { flex: 1; min-width: 0; }
+.exam-head h2 { margin: 0 0 2px; font-size: 15px; font-weight: 600; }
+.exam-head .pill { margin-top: 1px; }
+.exam-text { display: grid; grid-template-columns: 34px 1fr; gap: 8px; font-size: 13px; }
+.exam-text p { margin: 0; white-space: pre-wrap; color: var(--fg-2); }
+.exam-progress { display: flex; align-items: center; gap: 10px; font-size: 12px; color: var(--muted); }
+.exam-progress .bar-track { flex: 1; max-width: 280px; height: 4px; border-radius: 2px; background: var(--line); overflow: hidden; }
+.exam-progress .bar-fill { height: 100%; background: var(--green); }
+.plan { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--line); }
+.plan li { display: flex; align-items: center; gap: 10px; min-height: 36px; padding: 2px 0; border-bottom: 1px solid var(--line); }
+.plan .plan-date { flex: none; width: 92px; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.plan .plan-title { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.plan li.done .plan-title { color: var(--muted); text-decoration: line-through; }
+.plan li.today .plan-date { color: var(--blue); }
+.plan li.late .plan-date { color: var(--orange); }
+.plan li .btn { opacity: .35; }
+.plan li:hover .btn { opacity: 1; }
+.plan-add { display: flex; gap: 8px; }
+.plan-add input[type="date"] { width: 150px; flex: none; }
+.plan-add input:not([type]) { flex: 1; min-width: 0; }
+.exam-past { margin: 8px 0 24px; }
+.exam-past summary { padding: 8px 16px; color: var(--muted); cursor: pointer; }
+.exam-mark { display: inline-grid; place-items: center; width: 15px; color: var(--orange); }
+.cal-item.exam { color: var(--orange); font-weight: 500; }
+.cal-item.exam .dot { background: var(--orange); }
+@media (max-width: 860px) {
+  .exam { margin: 12px; padding: 12px; }
+  .plan .plan-date { width: 78px; }
+  .plan li .btn { opacity: 1; }
+  .plan-add { flex-wrap: wrap; }
+  .plan-add input[type="date"] { width: 100%; }
+}

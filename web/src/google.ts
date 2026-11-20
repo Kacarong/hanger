@@ -136,19 +136,28 @@ export function createGoogle(cfg: GoogleConfig, db: Db) {
     return ((await res.json()) as { id: string }).id;
   }
 
+  // A top-level Drive folder made once and remembered in settings[key].
   // Shared while in flight so concurrent first uploads don't each create a folder.
-  let creatingRoot: Promise<string> | null = null;
-
-  function rootFolder(): Promise<string> {
-    const existing = db.getSetting("root_folder_id");
+  const creating = new Map<string, Promise<string>>();
+  function ownFolder(key: string, name: string): Promise<string> {
+    const existing = db.getSetting(key);
     if (existing) return Promise.resolve(existing);
-    creatingRoot ??= (async () => {
-      const id = await createFolder("kacarong.kr 파일함");
-      db.setSetting("root_folder_id", id);
-      return id;
-    })().finally(() => (creatingRoot = null));
-    return creatingRoot;
+    if (!creating.has(key)) {
+      creating.set(
+        key,
+        (async () => {
+          const id = await createFolder(name);
+          db.setSetting(key, id);
+          return id;
+        })().finally(() => creating.delete(key)),
+      );
+    }
+    return creating.get(key)!;
   }
+  // The cloud's files, laid out like the cloud.
+  const rootFolder = () => ownFolder("root_folder_id", "kacarong.kr 파일함");
+  // Copies of files in Notion pages, kept apart so the cloud's folder holds only what was uploaded to the cloud.
+  const notionFolder = () => ownFolder("notion_folder_id", "kacarong.kr 노션 파일");
 
   async function getFile(id: string): Promise<DriveFile> {
     const res = await api(`/drive/v3/files/${encodeURIComponent(id)}?fields=${FILE_FIELDS}`, {}, "파일 조회");
@@ -166,6 +175,7 @@ export function createGoogle(cfg: GoogleConfig, db: Db) {
     exchangeCode,
     saveTokens,
     rootFolder,
+    notionFolder,
     createFolder,
     getFile,
     calendarGranted,
@@ -245,9 +255,9 @@ export function createGoogle(cfg: GoogleConfig, db: Db) {
       return { next: range ? Number(range.split("-")[1]) + 1 : 0 };
     },
 
-    // Uploads bytes the server already holds (the Notion import) in one PUT to a resumable session.
-    async upload(name: string, mimeType: string, bytes: Blob, origin: string): Promise<DriveFile> {
-      const location = await this.startUpload({ name, mimeType, size: bytes.size, origin });
+    // Uploads bytes the server already holds (Notion files) in one PUT to a resumable session.
+    async upload(name: string, mimeType: string, bytes: Blob, origin: string, parent?: string): Promise<DriveFile> {
+      const location = await this.startUpload({ name, mimeType, size: bytes.size, origin, parent });
       const res = await check(await fetch(location, { method: "PUT", headers: { "Content-Type": mimeType }, body: bytes }), "업로드");
       return (await res.json()) as DriveFile;
     },

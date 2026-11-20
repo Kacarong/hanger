@@ -12,6 +12,9 @@ export type FileRow = {
   tags: string;
   note: string;
   folder_id: number | null; // NULL = the top of the cloud
+  // '' = a file uploaded to the cloud. 'notion' = the copy of a file in a Notion page: it shows in its note
+  // but is not one of the cloud's files (the cloud lists, counts and picks only its own uploads).
+  origin: string;
   // shared/public/web_*_link are left over from when files were shared through Drive links; nothing reads them now.
   shared: number;
   public: number;
@@ -38,12 +41,29 @@ export type TaskRow = {
   created_at: string;
   note_id: number | null; // set when the task is a dated checkbox inside a note
   block_id: string | null;
+  exam_id: number | null; // set when the task is a day of an exam's study plan (kind 공부)
   note_title?: string | null; // joined in by listTasks/getTask
+  exam_title?: string | null; // joined in by listTasks/getTask
   files?: number; // how many cloud files are attached, joined in by listTasks/getTask
 };
 
-export const TASK_KINDS = ["할 일", "과제"];
+export const TASK_KINDS = ["할 일", "과제", "공부"];
 export type TaskFields = Pick<TaskRow, "kind" | "title" | "course" | "due_date" | "due_time" | "note">;
+
+// An exam on the 시험 tab. Its study plan is tasks with exam_id (kind 공부), so each day of the plan
+// shows up on the today screen and the calendar like any task.
+export type ExamRow = {
+  id: number;
+  title: string;
+  course: string;
+  date: string | null; // YYYY-MM-DD, null = not fixed yet
+  time: string | null; // HH:MM
+  place: string;
+  scope: string; // 시험 범위
+  note: string;
+  created_at: string;
+};
+export type ExamFields = Pick<ExamRow, "title" | "course" | "date" | "time" | "place" | "scope" | "note">;
 
 // A note is a list of blocks (src/blocks.ts). A "todo" block with a date is also a task (tasks.note_id/block_id),
 // so it shows up on the today screen and the calendar.
@@ -154,6 +174,17 @@ export function openDb(path: string) {
       drive_id TEXT NOT NULL,
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
+    CREATE TABLE IF NOT EXISTS exams (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      title TEXT NOT NULL,
+      course TEXT NOT NULL DEFAULT '',
+      date TEXT,
+      time TEXT,
+      place TEXT NOT NULL DEFAULT '',
+      scope TEXT NOT NULL DEFAULT '',
+      note TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
     CREATE TABLE IF NOT EXISTS portfolio_sections (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, sort INTEGER NOT NULL DEFAULT 0);
     CREATE TABLE IF NOT EXISTS portfolio_items (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -180,6 +211,14 @@ export function openDb(path: string) {
   const taskCols = (db.query("PRAGMA table_info(tasks)").all() as { name: string }[]).map((c) => c.name);
   if (!taskCols.includes("note_id")) db.exec("ALTER TABLE tasks ADD COLUMN note_id INTEGER; ALTER TABLE tasks ADD COLUMN block_id TEXT;");
   db.exec("CREATE INDEX IF NOT EXISTS tasks_note ON tasks (note_id)");
+  if (!taskCols.includes("exam_id")) db.exec("ALTER TABLE tasks ADD COLUMN exam_id INTEGER");
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS tasks_exam ON tasks (exam_id);
+    -- An exam takes its study plan with it.
+    CREATE TRIGGER IF NOT EXISTS tasks_exam_gone AFTER DELETE ON exams BEGIN
+      DELETE FROM tasks WHERE exam_id = old.id;
+    END;
+  `);
   const noteCols = (db.query("PRAGMA table_info(notes)").all() as { name: string }[]).map((c) => c.name);
   if (!noteCols.includes("version")) db.exec("ALTER TABLE notes ADD COLUMN version INTEGER NOT NULL DEFAULT 0");
   // parent_id: the note this one sits under in the list (the Notion import keeps Notion's page tree); NULL = top level.
@@ -197,6 +236,10 @@ export function openDb(path: string) {
   if (!attachCols.includes("by_import")) db.exec("ALTER TABLE attachments ADD COLUMN by_import INTEGER NOT NULL DEFAULT 0");
   const fileCols = (db.query("PRAGMA table_info(files)").all() as { name: string }[]).map((c) => c.name);
   if (!fileCols.includes("folder_id")) db.exec("ALTER TABLE files ADD COLUMN folder_id INTEGER");
+  if (!fileCols.includes("origin")) {
+    // Copies made by the Notion import/sync before this column were tagged 노션.
+    db.exec("ALTER TABLE files ADD COLUMN origin TEXT NOT NULL DEFAULT ''; UPDATE files SET origin = 'notion' WHERE tags = '노션' OR id IN (SELECT file_id FROM notion_files);");
+  }
   // Attachments tables made before portfolio items and the profile could have files: widen the target check.
   // SQLite can't change a CHECK in place, so copy the table. The triggers that name it go first and come back below.
   const attachSql = (db.query("SELECT sql FROM sqlite_master WHERE name = 'attachments'").get() as { sql: string }).sql;
@@ -233,9 +276,9 @@ export function openDb(path: string) {
       db.query("INSERT INTO settings (key, value) VALUES ('portfolio_seeded', '1')").run();
     })();
   }
-  const TASK_SELECT = `SELECT tasks.*, notes.title AS note_title,
+  const TASK_SELECT = `SELECT tasks.*, notes.title AS note_title, exams.title AS exam_title,
     (SELECT COUNT(*) FROM attachments WHERE target = 'task' AND target_id = tasks.id) AS files
-    FROM tasks LEFT JOIN notes ON notes.id = tasks.note_id`;
+    FROM tasks LEFT JOIN notes ON notes.id = tasks.note_id LEFT JOIN exams ON exams.id = tasks.exam_id`;
   const TASK_ORDER = "ORDER BY due_date IS NULL, due_date, due_time IS NULL, due_time, tasks.id";
   const notionRow = (r: NotionPageRecord): NotionPageRow => ({ ...r, kids: JSON.parse(r.kids), snapshot: r.snapshot ? JSON.parse(r.snapshot) : null, props: JSON.parse(r.props) });
   function getNote(id: number): NoteRow | null {
@@ -294,7 +337,7 @@ export function openDb(path: string) {
     },
     // folder: a folder id, or null for the top of the cloud; undefined = every folder (search, the picker).
     listFiles(opts: { q?: string; category?: string; folder?: number | null }): FileRow[] {
-      const where: string[] = [];
+      const where: string[] = ["origin = ''"];
       const args: (string | number)[] = [];
       if (opts.folder === null) where.push("folder_id IS NULL");
       else if (opts.folder !== undefined) {
@@ -310,11 +353,11 @@ export function openDb(path: string) {
         const like = `%${opts.q}%`;
         args.push(like, like, like, like);
       }
-      const sql = `SELECT * FROM files ${where.length ? "WHERE " + where.join(" AND ") : ""} ORDER BY id DESC`;
+      const sql = `SELECT * FROM files WHERE ${where.join(" AND ")} ORDER BY id DESC`;
       return db.query(sql).all(...args) as FileRow[];
     },
     usage(): { files: number; bytes: number } {
-      return db.query("SELECT COUNT(*) AS files, COALESCE(SUM(size), 0) AS bytes FROM files").get() as { files: number; bytes: number };
+      return db.query("SELECT COUNT(*) AS files, COALESCE(SUM(size), 0) AS bytes FROM files WHERE origin = ''").get() as { files: number; bytes: number };
     },
     getFile(id: number): FileRow | null {
       return db.query("SELECT * FROM files WHERE id = ?").get(id) as FileRow | null;
@@ -322,10 +365,13 @@ export function openDb(path: string) {
     getFileByDriveId(driveId: string): FileRow | null {
       return db.query("SELECT * FROM files WHERE drive_id = ?").get(driveId) as FileRow | null;
     },
-    insertFile(f: Pick<FileRow, "drive_id" | "name" | "title" | "mime" | "size" | "category" | "tags" | "note"> & { folder_id?: number | null }): FileRow {
+    insertFile(f: Pick<FileRow, "drive_id" | "name" | "title" | "mime" | "size" | "category" | "tags" | "note"> & { folder_id?: number | null; origin?: string }): FileRow {
       return db
-        .query("INSERT INTO files (drive_id, name, title, mime, size, category, tags, note, folder_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *")
-        .get(f.drive_id, f.name, f.title, f.mime, f.size, f.category, f.tags, f.note, f.folder_id ?? null) as FileRow;
+        .query("INSERT INTO files (drive_id, name, title, mime, size, category, tags, note, folder_id, origin) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *")
+        .get(f.drive_id, f.name, f.title, f.mime, f.size, f.category, f.tags, f.note, f.folder_id ?? null, f.origin ?? "") as FileRow;
+    },
+    notionCopies(): FileRow[] {
+      return db.query("SELECT * FROM files WHERE origin = 'notion'").all() as FileRow[];
     },
     updateFile(id: number, patch: Partial<Pick<FileRow, "title" | "category" | "tags" | "note" | "folder_id">>) {
       const keys = Object.keys(patch) as (keyof typeof patch)[];
@@ -365,9 +411,10 @@ export function openDb(path: string) {
       return files;
     }),
     // from/to are inclusive YYYY-MM-DD bounds on due_date; a bound excludes undated tasks.
-    listTasks(opts: { done?: boolean; from?: string; to?: string; kind?: string; doneOn?: string }): TaskRow[] {
+    listTasks(opts: { done?: boolean; from?: string; to?: string; kind?: string; doneOn?: string; planned?: boolean }): TaskRow[] {
       const where: string[] = [];
       const args: (string | number)[] = [];
+      if (opts.planned) where.push("exam_id IS NOT NULL");
       if (opts.done !== undefined) {
         where.push("done = ?");
         args.push(opts.done ? 1 : 0);
@@ -394,10 +441,11 @@ export function openDb(path: string) {
     getTask(id: number): TaskRow | null {
       return db.query(`${TASK_SELECT} WHERE tasks.id = ?`).get(id) as TaskRow | null;
     },
-    insertTask(t: TaskFields): TaskRow {
-      return db
-        .query("INSERT INTO tasks (kind, title, course, due_date, due_time, note) VALUES (?, ?, ?, ?, ?, ?) RETURNING *")
-        .get(t.kind, t.title, t.course, t.due_date, t.due_time, t.note) as TaskRow;
+    insertTask(t: TaskFields & { exam_id?: number | null }): TaskRow {
+      const id = (
+        db.query("INSERT INTO tasks (kind, title, course, due_date, due_time, note, exam_id) VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id").get(t.kind, t.title, t.course, t.due_date, t.due_time, t.note, t.exam_id ?? null) as { id: number }
+      ).id;
+      return db.query(`${TASK_SELECT} WHERE tasks.id = ?`).get(id) as TaskRow;
     },
     updateTask(id: number, patch: Partial<TaskFields & Pick<TaskRow, "done" | "done_at">>) {
       const keys = Object.keys(patch) as (keyof typeof patch)[];
@@ -407,6 +455,27 @@ export function openDb(path: string) {
     },
     deleteTask(id: number) {
       db.query("DELETE FROM tasks WHERE id = ?").run(id);
+    },
+    // Exams with a date first (soonest first), then the ones without a date.
+    listExams(opts: { from?: string; to?: string } = {}): ExamRow[] {
+      if (opts.from && opts.to) return db.query("SELECT * FROM exams WHERE date BETWEEN ? AND ? ORDER BY date, time IS NULL, time, id").all(opts.from, opts.to) as ExamRow[];
+      return db.query("SELECT * FROM exams ORDER BY date IS NULL, date, time IS NULL, time, id").all() as ExamRow[];
+    },
+    getExam(id: number): ExamRow | null {
+      return db.query("SELECT * FROM exams WHERE id = ?").get(id) as ExamRow | null;
+    },
+    insertExam(e: ExamFields): ExamRow {
+      return db.query("INSERT INTO exams (title, course, date, time, place, scope, note) VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING *").get(e.title, e.course, e.date, e.time, e.place, e.scope, e.note) as ExamRow;
+    },
+    // The study plan follows the exam's course.
+    updateExam: db.transaction((id: number, patch: Partial<ExamFields>) => {
+      const keys = Object.keys(patch) as (keyof typeof patch)[];
+      if (!keys.length) return;
+      db.query(`UPDATE exams SET ${keys.map((k) => `${k} = ?`).join(", ")} WHERE id = ?`).run(...keys.map((k) => patch[k] ?? null), id);
+      if (patch.course !== undefined) db.query("UPDATE tasks SET course = ? WHERE exam_id = ?").run(patch.course, id);
+    }),
+    deleteExam(id: number) {
+      db.query("DELETE FROM exams WHERE id = ?").run(id); // its plan goes by trigger
     },
     listNotes(q?: string): Pick<NoteRow, "id" | "title" | "parent_id" | "updated_at">[] {
       const like = `%${q ?? ""}%`;

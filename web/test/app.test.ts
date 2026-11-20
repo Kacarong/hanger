@@ -176,7 +176,7 @@ function makeApp(opts: { googleEnabled?: boolean; now?: () => Date; notionApi?: 
     if (init.cookie) headers.set("Cookie", init.cookie);
     return fetch(new Request("https://kacarong.kr" + path, { ...init, headers }));
   };
-  return { call, db, notion: fetch.notion, cleanup: () => rmSync(dataDir, { recursive: true, force: true }) };
+  return { call, db, notion: fetch.notion, moveNotionCopies: fetch.moveNotionCopies, cleanup: () => rmSync(dataDir, { recursive: true, force: true }) };
 }
 
 async function login(call: ReturnType<typeof makeApp>["call"], code = "good-code") {
@@ -1060,6 +1060,91 @@ test("포트폴리오 페이지는 소개·섹션·항목을 HTML 이스케이�
   }
 });
 
+test("예전 노션 사본은 드라이브에서도 클라우드 폴더 밖(노션 파일 폴더)으로 한 번 옮겨짐", async () => {
+  loginEmail = "owner@example.com";
+  const { call, db, moveNotionCopies, cleanup } = makeApp();
+  try {
+    const { cookie } = await login(call);
+    const file = (id: string, parents: string[]) => drive.set(id, { id, name: id, mimeType: "image/png", parents, trashed: false, bytes: 3 });
+    file("mvroot", []);
+    db.setSetting("root_folder_id", "mvroot");
+    file("mvn1", ["mvroot"]);
+    file("mvu1", ["mvroot"]);
+    const add = (drive_id: string, origin: string) => db.insertFile({ drive_id, name: "a.png", title: "a.png", mime: "image/png", size: 3, category: "기타", tags: "", note: "", origin });
+    add("mvn1", "notion");
+    add("mvgone", "notion"); // no longer in Drive: skipped
+    const mine = add("mvu1", "");
+    expect((await (await call("/api/files", { cookie })).json()).map((f: { id: number }) => f.id)).toEqual([mine.id]);
+
+    await moveNotionCopies();
+    const notionFolder = db.getSetting("notion_folder_id")!;
+    expect(drive.get(notionFolder)!.name).toBe("kacarong.kr 노션 파일");
+    expect(drive.get("mvn1")!.parents).toEqual([notionFolder]);
+    expect(drive.get("mvu1")!.parents).toEqual(["mvroot"]); // the cloud's own file stays
+    expect(db.getSetting("notion_copies_moved")).toBe("1");
+  } finally {
+    cleanup();
+  }
+});
+
+test("시험: 일정 → 날짜별 공부 계획(오늘·캘린더·할 일에도) → 과목을 바꾸면 계획도 → 시험을 지우면 계획도", async () => {
+  const { call, db, cleanup } = makeApp({ googleEnabled: false, now: () => new Date("2026-11-20T03:00:00Z") });
+  try {
+    db.setSetting("password_hash", await Bun.password.hash("correct horse battery"));
+    const { cookie } = await passwordLogin(call, "correct horse battery");
+    expect((await call("/api/exams")).status).toBe(401);
+    const req = async (path: string, method: string, b?: object) => {
+      const r = await call(path, { method, cookie, headers: JSON_ORIGIN, body: b ? JSON.stringify(b) : undefined });
+      return { status: r.status, body: (await r.json()) as any };
+    };
+
+    const mid = (await req("/api/exams", "POST", { title: "토질역학 중간고사", course: "토질역학", date: "2026-11-30", time: "10:00", place: "공학관 301", scope: "1~5장" })).body;
+    expect(mid).toMatchObject({ title: "토질역학 중간고사", course: "토질역학", date: "2026-11-30", time: "10:00", place: "공학관 301", scope: "1~5장", note: "" });
+    await req("/api/exams", "POST", { title: "토익", date: "2026-12-20" }); // more than two weeks away
+    await req("/api/exams", "POST", { title: "날짜 미정 시험" });
+    await req("/api/exams", "POST", { title: "지난 퀴즈", date: "2026-11-10" });
+    expect((await req("/api/exams", "POST", { title: "" })).status).toBe(400);
+    expect((await req("/api/exams", "POST", { title: "x", date: "2026-02-30" })).status).toBe(400);
+    expect((await req("/api/exams", "POST", { title: "x", time: "24:00" })).status).toBe(400);
+
+    // A study plan day is a task of kind 공부 with the exam's course.
+    const day1 = (await req("/api/tasks", "POST", { exam_id: mid.id, title: "1장 복습", due_date: "2026-11-20" })).body;
+    const day2 = (await req("/api/tasks", "POST", { exam_id: mid.id, title: "2장 문제풀이", due_date: "2026-11-21", kind: "할 일" })).body;
+    expect(day1).toMatchObject({ kind: "공부", course: "토질역학", exam_id: mid.id, exam_title: "토질역학 중간고사" });
+    expect(day2).toMatchObject({ kind: "공부" });
+    expect((await req("/api/tasks", "POST", { exam_id: 9999, title: "x" })).status).toBe(404);
+
+    let list = (await req("/api/exams", "GET")).body;
+    expect(list.date).toBe("2026-11-20");
+    expect(list.exams.map((e: any) => e.title)).toEqual(["지난 퀴즈", "토질역학 중간고사", "토익", "날짜 미정 시험"]);
+    expect(list.exams[1].plan.map((t: any) => t.title)).toEqual(["1장 복습", "2장 문제풀이"]);
+
+    // The today screen shows today's plan day and exams within two weeks; the calendar shows both.
+    const today = (await req("/api/today", "GET")).body;
+    expect(today.today.map((t: any) => t.title)).toEqual(["1장 복습"]);
+    expect(today.exams.map((e: any) => e.title)).toEqual(["토질역학 중간고사"]);
+    const cal = (await req("/api/calendar?from=2026-11-01&to=2026-11-30", "GET")).body;
+    expect(cal.exams.map((e: any) => e.title)).toEqual(["지난 퀴즈", "토질역학 중간고사"]);
+    expect(cal.tasks.map((t: any) => t.title)).toEqual(["1장 복습", "2장 문제풀이"]);
+
+    // Checked off from the today screen, it is done on the 시험 tab too.
+    await req(`/api/tasks/${day1.id}`, "PATCH", { done: true });
+    expect((await req("/api/exams", "GET")).body.exams[1].plan[0]).toMatchObject({ done: 1, done_at: "2026-11-20" });
+
+    expect((await req(`/api/exams/${mid.id}`, "PATCH", { course: "토질역학1", date: "2026-12-01", time: "" })).body).toMatchObject({ course: "토질역학1", date: "2026-12-01", time: null, title: "토질역학 중간고사" });
+    expect(db.getTask(day2.id)).toMatchObject({ course: "토질역학1" });
+    expect((await req(`/api/exams/${mid.id}`, "PATCH", { title: " " })).status).toBe(400);
+    expect((await req("/api/exams/9999", "PATCH", { title: "x" })).status).toBe(404);
+
+    expect((await req(`/api/exams/${mid.id}`, "DELETE")).status).toBe(200);
+    expect([db.getTask(day1.id), db.getTask(day2.id)]).toEqual([null, null]);
+    list = (await req("/api/exams", "GET")).body;
+    expect(list.exams.map((e: any) => e.title)).toEqual(["지난 퀴즈", "토익", "날짜 미정 시험"]);
+  } finally {
+    cleanup();
+  }
+});
+
 test("첨부를 노트·할 일에만 붙이던 DB를 열면 첨부는 그대로, 포트폴리오에도 붙일 수 있음", () => {
   const dir = mkdtempSync(join(tmpdir(), "folio-test-"));
   try {
@@ -1071,12 +1156,17 @@ test("첨부를 노트·할 일에만 붙이던 DB를 열면 첨부는 그대로
       CREATE TABLE attachments (id INTEGER PRIMARY KEY AUTOINCREMENT, target TEXT NOT NULL CHECK (target IN ('note', 'task')), target_id INTEGER NOT NULL, file_id INTEGER NOT NULL, created_at TEXT NOT NULL DEFAULT (datetime('now')), UNIQUE (target, target_id, file_id));
       CREATE TRIGGER attachments_file_gone AFTER DELETE ON files BEGIN DELETE FROM attachments WHERE file_id = old.id; END;
       INSERT INTO files (drive_id, name, title) VALUES ('d1', 'a.pdf', 'a.pdf');
+      INSERT INTO files (drive_id, name, title, tags) VALUES ('d2', 'Untitled.png', 'Untitled.png', '노션');
       INSERT INTO attachments (target, target_id, file_id) VALUES ('note', 7, 1);
     `);
     raw.close();
     const db = openDb(path);
     expect(db.listAttachments("note", 7).map((f) => f.title)).toEqual(["a.pdf"]);
     expect(db.getFile(1)!.folder_id).toBeNull();
+    // A copy the Notion import made is no longer one of the cloud's files.
+    expect([db.getFile(1)!.origin, db.getFile(2)!.origin]).toEqual(["", "notion"]);
+    expect(db.listFiles({}).map((f) => f.title)).toEqual(["a.pdf"]);
+    expect(db.usage().files).toBe(1);
     const s = db.insertSection("작품");
     const item = db.insertItem({ section_id: s.id, title: "t", period: "", summary: "", body: "", link: "", public: 1 });
     expect(db.addAttachment("portfolio", item.id, 1)).toBe(true);
@@ -1325,7 +1415,13 @@ test("노션 연동: 연결하면 페이지를 서식·들여쓰기·토글·표
     expect(a.blocks[9]).toMatchObject({ nt: "button" });
     // The Notion-hosted picture is copied into the 파일함 and shown from there.
     const photo = t.db.getFile(a.blocks[8].fileId)!;
-    expect(photo).toMatchObject({ title: "photo.png", tags: "노션" });
+    expect(photo).toMatchObject({ title: "photo.png", origin: "notion" });
+    // The copy sits in its own Drive folder and is not one of the cloud's files (list, picker, usage).
+    expect(drive.get(photo.drive_id)!.parents).toEqual([t.db.getSetting("notion_folder_id")!]);
+    expect(await (await t.req("/api/files", "GET")).json()).toEqual([]);
+    expect(await (await t.req("/api/files?folder=root", "GET")).json()).toEqual([]);
+    expect(await (await t.req("/api/quota", "GET")).json()).toMatchObject({ files: 0, bytes: 0 });
+    expect((await t.req(`/api/files/${photo.id}/content`, "GET")).status).toBe(200); // the note still shows it
     // A dated checkbox is a task for the today screen and the calendar.
     expect(t.db.listTasks({ from: "2026-11-21", to: "2026-11-21" }).map((x) => x.title)).toEqual(["과제 제출"]);
     // Child pages and database rows sit under their page; the page block links to its note; a row shows its columns.
