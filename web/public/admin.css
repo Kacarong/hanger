@@ -43,7 +43,7 @@ input[type="checkbox"] { accent-color: #ececf0; width: 15px; height: 15px; margi
 .login-card { width: min(360px, 100%); padding: 28px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); }
 .login-card h1 { margin: 16px 0 4px; font-size: 18px; font-weight: 600; }
 .login-card p { margin: 0 0 20px; color: var(--muted); }
-.login-card form { display: grid; gap: 10px; }
+.login-card form { display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; }
 .login-card .btn { justify-content: center; height: 34px; }
 .login-card .google { display: block; margin-top: 12px; text-align: center; color: var(--muted); }
 .login-card .google:hover { color: var(--fg); }
