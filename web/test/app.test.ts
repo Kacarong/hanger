@@ -747,6 +747,12 @@ test("보안 헤더: CSP·프레임 금지·nosniff·HSTS, 개인 데이터는 �
     expect((await call("/api/me")).headers.get("Cache-Control")).toBe("no-store");
     expect((await call("/")).headers.get("Cache-Control")).toBeNull();
     expect(await (await call("/")).text()).not.toContain("onerror="); // inline handlers would be blocked by the CSP
+    // App install: the manifest is linked from the workspace, and the Android app's key is published.
+    expect(await (await call("/admin")).text()).toContain('rel="manifest"');
+    expect((await (await call("/static/manifest.webmanifest")).json()).start_url).toBe("/admin");
+    const links = await call("/.well-known/assetlinks.json");
+    expect(links.headers.get("Content-Type")).toContain("application/json");
+    expect((await links.json())[0].target.package_name).toBe("kr.kacarong.workspace");
   } finally {
     cleanup();
   }

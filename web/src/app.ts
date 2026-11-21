@@ -927,6 +927,8 @@ ${body || `<section class="works"><p class="empty reveal">${mine ? "아직 포�
     }
     if (path === "/admin" && req.method === "GET") return new Response(adminHtml, { headers: { "Content-Type": "text/html; charset=utf-8" } });
     if (path === "/privacy" && req.method === "GET") return new Response(Bun.file(join(PUBLIC_DIR, "privacy.html")));
+    // The Android app (android/) opens full screen only if this lists its signing key.
+    if (path === "/.well-known/assetlinks.json" && req.method === "GET") return new Response(Bun.file(join(PUBLIC_DIR, "assetlinks.json")));
 
     const t = path.match(/^\/thumb\/(\d+)$/);
     if (t && req.method === "GET") return thumb(Number(t[1]), req);

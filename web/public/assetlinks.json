@@ -1,0 +1,8 @@
+[{
+  "relation": ["delegate_permission/common.handle_all_urls"],
+  "target": {
+    "namespace": "android_app",
+    "package_name": "kr.kacarong.workspace",
+    "sha256_cert_fingerprints": ["7E:AA:29:E3:A1:36:87:16:ED:4E:72:BF:C5:FC:B1:7B:A5:C8:A5:41:1D:07:B2:F9:DE:0E:3A:3D:92:B2:0D:6F"]
+  }
+}]
