@@ -54,4 +54,6 @@
 ## 남은 일
 1. (완료) 사용자: OAuth 클라이언트 + 프로덕션 게시 + 관리자 이메일.
 2. (완료) DNS·배포.
-4. (완료) 실제 계정으로 업로드 CORS·공유 해제 확인. 다음: 노션 연동(사용자가 토큰을 넣어 실제 계정으로 첫 동기화 확인) → PWA/TWA → Flutter PC.
+4. (완료) 실제 계정으로 업로드 CORS·공유 해제 확인. 노션 연동(완료, 실제 계정으로 동기화 중).
+5. (완료 2026-11-22) PWA/TWA: /admin에 manifest(start_url /admin, scope /, 검은 바탕 K 배지 아이콘, 서비스 워커 없음 — unifi-site와 같음). android/ = unifi-site TWA 껍데기를 가져온 kr.kacarong.workspace(링크는 /admin만 앱으로). 서명 키 지문은 web/public/assetlinks.json → /.well-known/assetlinks.json. 에뮬레이터에서 전체 화면·도메인 verified 확인. v1.0.0 APK(versionCode 1)를 사용자에게 전달.
+6. 다음: Flutter PC(Windows 업로드 전용 + 자동 업데이트).
