@@ -565,7 +565,7 @@ function taskRow(t, today, reload, withActions) {
       t.exam_id ? el("span", { className: "sub" }, el("a", { href: "#exams", textContent: `시험 · ${t.exam_title}` })) : null,
     ),
     el("td", { className: "hide-sm" }, pill(t.kind, t.kind === "과제" ? "blue" : t.kind === "공부" ? "amber" : "gray")),
-    el("td", { className: "hide-sm muted", textContent: t.course || "—" }),
+    withActions ? null : el("td", { className: "hide-sm muted", textContent: t.course || "—" }), // 할 일·과제 탭에는 과목 칸이 없다
     dueCell(t, today),
     el("td", {}, taskStatus(t, today)),
     withActions
@@ -581,6 +581,7 @@ function taskRow(t, today, reload, withActions) {
   );
 }
 
+const TODAY_CATEGORY = "오늘 할 일"; // 고르면 날짜가 오늘로 채워진다
 let editingTask = null;
 function openTaskDialog(t = null, date = "") {
   editingTask = t;
@@ -589,8 +590,7 @@ function openTaskDialog(t = null, date = "") {
   // A new task from the 할 일·과제 tab starts in the category shown there.
   $("task-category").value = t ? t.category : currentTab() === "tasks" && taskCategory() !== "*" ? taskCategory() : "";
   $("task-title").value = t?.title ?? "";
-  $("task-course").value = t?.course ?? "";
-  $("task-date").value = t?.due_date ?? date;
+  $("task-date").value = t?.due_date ?? (date || ($("task-category").value === TODAY_CATEGORY ? seoulToday() : ""));
   $("task-time").value = t?.due_time ?? "";
   $("task-note").value = t?.note ?? "";
   taskFiles.show(t?.id ?? null, () => ($("task-kind").value === "과제" ? "과제" : "기타"));
@@ -649,8 +649,8 @@ async function loadTasks() {
   const groups = [...taskCategories, ""].map((c) => [c || "분류 없음", shown.filter((x) => x.category === c)]).filter(([, items]) => items.length);
   $("task-list").replaceChildren(
     ...(groups.length
-      ? groups.flatMap(([title, items]) => [el("tr", { className: "group-row" }, el("td", { colSpan: 7, textContent: `${title} · ${items.length}` })), ...items.map((x) => taskRow(x, today.date, reload, true))])
-      : [emptyRow(7, q ? "검색 결과가 없습니다." : "없습니다.")]),
+      ? groups.flatMap(([title, items]) => [el("tr", { className: "group-row" }, el("td", { colSpan: 6, textContent: `${title} · ${items.length}` })), ...items.map((x) => taskRow(x, today.date, reload, true))])
+      : [emptyRow(6, q ? "검색 결과가 없습니다." : "없습니다.")]),
   );
 }
 
@@ -1307,6 +1307,7 @@ async function init() {
   const opts = (list) => list.map((v) => el("option", { value: v, textContent: v }));
   $("task-kind").append(...opts(taskKinds));
   $("task-category").append(el("option", { value: "", textContent: "분류 없음" }), ...opts(taskCategories));
+  $("task-category").onchange = () => $("task-category").value === TODAY_CATEGORY && ($("task-date").value = seoulToday());
   $("up-category").append(...opts(categories));
   $("file-category").append(...opts(categories));
   editor = createEditor($("note-editor"), noteChanged, {
@@ -1350,7 +1351,7 @@ async function init() {
   document.querySelectorAll("dialog [data-close]").forEach((b) => (b.onclick = () => b.closest("dialog").close()));
   $("task-form").onsubmit = async (ev) => {
     ev.preventDefault();
-    const body = { kind: $("task-kind").value, category: $("task-category").value, title: $("task-title").value, course: $("task-course").value, due_date: $("task-date").value, due_time: $("task-time").value, note: $("task-note").value };
+    const body = { kind: $("task-kind").value, category: $("task-category").value, title: $("task-title").value, due_date: $("task-date").value, due_time: $("task-time").value, note: $("task-note").value };
     try {
       if (editingTask) await call(`/api/tasks/${editingTask.id}`, { method: "PATCH", body });
       else editingTask = await call("/api/tasks", { method: "POST", body }); // a retry after a failed attach must not add it twice
