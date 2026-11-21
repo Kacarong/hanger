@@ -39,7 +39,7 @@ input[type="checkbox"] { accent-color: #ececf0; width: 15px; height: 15px; margi
 .error { color: var(--orange); }
 
 /* 로그인 */
-.login { min-height: 100%; display: grid; place-items: center; padding: 24px; background: radial-gradient(800px 300px at 50% -10%, rgba(120,140,255,.18), transparent 70%), var(--bg); }
+.login { min-height: 100%; display: grid; grid-template-columns: minmax(0, 1fr); place-items: center; padding: 24px; background: radial-gradient(800px 300px at 50% -10%, rgba(120,140,255,.18), transparent 70%), var(--bg); }
 .login-card { width: min(360px, 100%); padding: 28px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); }
 .login-card h1 { margin: 16px 0 4px; font-size: 18px; font-weight: 600; }
 .login-card p { margin: 0 0 20px; color: var(--muted); }
