@@ -582,6 +582,8 @@ function taskRow(t, today, reload, withActions) {
 }
 
 const TODAY_CATEGORY = "오늘 할 일"; // 고르면 날짜가 오늘로 채워진다
+const STEADY_CATEGORY = "꾸준히 할 일"; // 고르면 날짜·시간 칸이 숨는다
+const syncTaskWhen = () => ($("task-when").hidden = $("task-category").value === STEADY_CATEGORY);
 let editingTask = null;
 function openTaskDialog(t = null, date = "") {
   editingTask = t;
@@ -593,6 +595,7 @@ function openTaskDialog(t = null, date = "") {
   $("task-date").value = t?.due_date ?? (date || ($("task-category").value === TODAY_CATEGORY ? seoulToday() : ""));
   $("task-time").value = t?.due_time ?? "";
   $("task-note").value = t?.note ?? "";
+  syncTaskWhen();
   taskFiles.show(t?.id ?? null, () => ($("task-kind").value === "과제" ? "과제" : "기타"));
   $("task-dialog").showModal();
 }
@@ -1307,7 +1310,10 @@ async function init() {
   const opts = (list) => list.map((v) => el("option", { value: v, textContent: v }));
   $("task-kind").append(...opts(taskKinds));
   $("task-category").append(el("option", { value: "", textContent: "분류 없음" }), ...opts(taskCategories));
-  $("task-category").onchange = () => $("task-category").value === TODAY_CATEGORY && ($("task-date").value = seoulToday());
+  $("task-category").onchange = () => {
+    if ($("task-category").value === TODAY_CATEGORY) $("task-date").value = seoulToday();
+    syncTaskWhen();
+  };
   $("up-category").append(...opts(categories));
   $("file-category").append(...opts(categories));
   editor = createEditor($("note-editor"), noteChanged, {
@@ -1351,7 +1357,10 @@ async function init() {
   document.querySelectorAll("dialog [data-close]").forEach((b) => (b.onclick = () => b.closest("dialog").close()));
   $("task-form").onsubmit = async (ev) => {
     ev.preventDefault();
-    const body = { kind: $("task-kind").value, category: $("task-category").value, title: $("task-title").value, due_date: $("task-date").value, due_time: $("task-time").value, note: $("task-note").value };
+    const body = { kind: $("task-kind").value, category: $("task-category").value, title: $("task-title").value, note: $("task-note").value };
+    // 꾸준히 할 일은 날짜·시간 없이 저장한다. 노트에서 온 할 일은 날짜를 지우면 할 일에서 빠지므로 그대로 둔다.
+    if (!$("task-when").hidden) Object.assign(body, { due_date: $("task-date").value, due_time: $("task-time").value });
+    else if (!editingTask?.note_id) Object.assign(body, { due_date: "", due_time: "" });
     try {
       if (editingTask) await call(`/api/tasks/${editingTask.id}`, { method: "PATCH", body });
       else editingTask = await call("/api/tasks", { method: "POST", body }); // a retry after a failed attach must not add it twice
