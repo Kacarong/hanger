@@ -15,7 +15,7 @@
 - 저장: 사용자 구글 드라이브(유료 400GB). OAuth scope `drive.file` (앱이 만든 파일만). 삭제 = 드라이브 휴지통.
 - 업로드: 서버가 resumable 세션만 열고(Origin 헤더 포함), 브라우저가 구글로 직접 PUT (16MB 조각). Cloudflare 100MB 제한·약관 회피.
 - 다운로드: (2026-11-20부터) 사이트가 드라이브에서 받아 그대로 흘려보낸다(아래 참고). 드라이브 링크 공유는 쓰지 않는다. 썸네일은 서버가 캐시.
-- 파일당 1GB 미만. 앱: 웹사이트 그대로(TWA, 나중에). PC: Flutter Windows 업로드 전용 + 자동 업데이트 (나중에).
+- 파일당 1GB 미만. 앱: 웹사이트 그대로(TWA, 나중에). PC: (2026-11-22 변경) 웹과 똑같은 Tauri 껍데기, desktop/.
 - 주소: unifi-site cloudflared 터널(.9, `~/.cloudflared/config.yml`)에 kacarong.kr ingress 추가 → 127.0.0.1:2992.
 
 ## 상태
@@ -56,4 +56,4 @@
 2. (완료) DNS·배포.
 4. (완료) 실제 계정으로 업로드 CORS·공유 해제 확인. 노션 연동(완료, 실제 계정으로 동기화 중).
 5. (완료 2026-11-22) PWA/TWA: /admin에 manifest(start_url /admin, scope /, 검은 바탕 K 배지 아이콘, 서비스 워커 없음 — unifi-site와 같음). android/ = unifi-site TWA 껍데기를 가져온 kr.kacarong.workspace(링크는 /admin만 앱으로). 서명 키 지문은 web/public/assetlinks.json → /.well-known/assetlinks.json. 에뮬레이터에서 전체 화면·도메인 verified 확인. v1.0.0 APK(versionCode 1)를 사용자에게 전달.
-6. 다음: Flutter PC(Windows 업로드 전용 + 자동 업데이트).
+6. (완료 2026-11-22) PC 프로그램: 사용자 결정 "웹이랑 완전히 똑같은 프로그램" → 업로드 전용(Flutter) 대신 desktop/ = Tauri 2 + WebView2 껍데기(kacarong.kr/admin, 안드로이드 TWA와 같은 방식, 사이트를 고치면 프로그램은 그대로). 사이트·구글 로그인은 창 안, 다른 주소는 기본 브라우저, 이 사이트의 새 창 링크는 새 창, 끌어놓기는 사이트로, 한 번만 실행. 사용자 설치 NSIS(관리자 권한 없음). 프로그램 자체 자동 업데이트는 없음(화면은 사이트에서 늘 최신). win-ci VM에서 설치·실행·구글 로그인 화면(비밀번호 단계까지, 막힘 없음)·제거 확인. v1.0.0 설치 파일을 사용자에게 전달.

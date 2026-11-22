@@ -1,0 +1,15 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "kacarong 작업공간",
+  "identifier": "kr.kacarong.workspace",
+  "build": {
+    "frontendDist": "https://kacarong.kr/admin"
+  },
+  "app": {
+    "windows": []
+  },
+  "bundle": {
+    "active": false,
+    "icon": ["icons/icon.ico", "icons/icon.png"]
+  }
+}
