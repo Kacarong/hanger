@@ -877,6 +877,65 @@ test("알림: 기기 구독 → 아침 요약·과제 마감 전·시험 전날�
   }
 });
 
+test("포트폴리오: 섹션 보기 방식(큰 카드·격자·목록), 항목에 노트를 붙이면 공개 페이지에 자세히 보기 + 노트 사진도 공개", async () => {
+  const { call, db, cleanup } = makeApp({ googleEnabled: false });
+  try {
+    db.setSetting("password_hash", await Bun.password.hash("correct horse battery"));
+    const { cookie } = await passwordLogin(call, "correct horse battery");
+    const req = (path: string, method = "GET", b?: object) => call(path, { method, cookie, headers: JSON_ORIGIN, body: b ? JSON.stringify(b) : undefined });
+    const pic = db.insertFile({ drive_id: "d-note-pic", name: "shot.png", title: "shot.png", mime: "image/png", size: 10, category: "기타", tags: "", note: "" });
+    const note = db.insertNote(
+      "작업 기록",
+      [
+        { id: "a", type: "h1", text: "만든 과정" },
+        { id: "b", type: "p", text: "굵게 링크 <script>x</script>", rich: [{ t: "굵게", b: 1 }, { t: " " }, { t: "링크", href: "https://example.com/a" }, { t: " " }, { t: "나쁜", href: "javascript:alert(1)" }, { t: " <script>x</script>" }] },
+        { id: "c", type: "number", text: "첫째" },
+        { id: "d", type: "number", text: "둘째", d: 1 },
+        { id: "e", type: "image", text: "완성 사진", fileId: pic.id },
+        { id: "f", type: "table", text: "", width: 2, colHeader: 1, rows: [{ id: "r1", cells: [[{ t: "항목" }], [{ t: "값" }]] }, { id: "r2", cells: [[{ t: "기간" }], [{ t: "3주" }]] }] },
+      ],
+      "2026-11-22",
+    );
+    const { sections } = (await (await req("/api/portfolio")).json()) as { sections: { id: number; title: string; layout: string }[] };
+    expect(sections.every((x) => x.layout === "cards")).toBe(true); // the default
+    const work = sections.find((x) => x.title === "작품")!;
+    expect((await req(`/api/portfolio/sections/${work.id}`, "PATCH", { layout: "mosaic" })).status).toBe(400);
+    expect(await (await req(`/api/portfolio/sections/${work.id}`, "PATCH", { layout: "grid" })).json()).toMatchObject({ title: "작품", layout: "grid" });
+    expect((await req("/api/portfolio/items", "POST", { section_id: work.id, title: "x", note_id: 999 })).status).toBe(400);
+    const item = (await (await req("/api/portfolio/items", "POST", { section_id: work.id, title: "다리 모형", public: true, note_id: note.id })).json()) as { id: number; note_id: number };
+    expect(item.note_id).toBe(note.id);
+
+    let html = await (await call("/")).text();
+    expect(html).toContain(`class="works layout-grid"`);
+    expect(html).toContain(`<article class="tile reveal">`);
+    expect(html).toContain("<summary>자세히 보기</summary>");
+    expect(html).toContain("<h4>만든 과정</h4>");
+    expect(html).toContain("<strong>굵게</strong>");
+    expect(html).toContain(`<a href="https://example.com/a" target="_blank" rel="noopener">링크</a>`);
+    expect(html).not.toContain("javascript:");
+    expect(html).not.toContain("<script>x");
+    expect(html).toContain("&lt;script&gt;x&lt;/script&gt;");
+    expect(html).toContain(`<p class="nb-li" style="margin-left:1.4em"><span>1.</span>둘째</p>`); // numbering under a different depth starts over
+    expect(html).toContain(`<img src="/portfolio/file/${pic.id}" alt="" loading="lazy"><figcaption>완성 사진</figcaption>`);
+    expect(html).toContain("<th>항목</th><th>값</th></tr><tr><td>기간</td><td>3주</td>");
+    expect(db.isPublicFile(pic.id)).toBe(true); // the note's picture opens for anyone while the item is public
+
+    await req(`/api/portfolio/sections/${work.id}`, "PATCH", { layout: "list" });
+    html = await (await call("/")).text();
+    expect(html).toContain(`class="works layout-list"`);
+    expect(html).not.toContain(`class="tile reveal"`);
+
+    // Private item or no note: the picture is private again, and no 자세히 보기.
+    await req(`/api/portfolio/items/${item.id}`, "PATCH", { public: false });
+    expect(db.isPublicFile(pic.id)).toBe(false);
+    await req(`/api/portfolio/items/${item.id}`, "PATCH", { public: true, note_id: null });
+    expect(db.isPublicFile(pic.id)).toBe(false);
+    expect(await (await call("/")).text()).not.toContain("자세히 보기");
+  } finally {
+    cleanup();
+  }
+});
+
 test("정적 파일 주소에 버전이 붙고, 그 주소로 파일이 열림", async () => {
   const { call, cleanup } = makeApp({ googleEnabled: false });
   try {

@@ -111,7 +111,9 @@ export type AttachedFile = FileRow & { attachment_id: number };
 // The portfolio: a profile (name, one-liner, about text, photo = its first attached image) and sections of items.
 // Items are public (on kacarong.kr) or private (only on /admin/portfolio). sort orders sections and items within a section.
 export type Profile = { name: string; headline: string; about: string };
-export type PortfolioSection = { id: number; title: string; sort: number };
+// layout: how the portfolio page shows the section — "cards" (big alternating cards), "grid" (small cards side by side), "list" (rows, no pictures).
+export const SECTION_LAYOUTS = ["cards", "grid", "list"];
+export type PortfolioSection = { id: number; title: string; sort: number; layout: string };
 export type PortfolioItem = {
   id: number;
   section_id: number;
@@ -121,11 +123,12 @@ export type PortfolioItem = {
   body: string;
   link: string;
   public: number;
+  note_id: number | null; // a note shown under the item (자세히 보기); its pictures become public with the item
   sort: number;
   created_at: string;
   updated_at: string;
 };
-export type PortfolioFields = Pick<PortfolioItem, "section_id" | "title" | "period" | "summary" | "body" | "link" | "public">;
+export type PortfolioFields = Pick<PortfolioItem, "section_id" | "title" | "period" | "summary" | "body" | "link" | "public"> & { note_id?: number | null };
 const DEFAULT_SECTIONS = ["업적", "작품", "특기", "취미", "내 정보"];
 
 // by_import = 1: the Notion import made this attachment, so a later import may take it off again. Ones the owner made stay.
@@ -304,6 +307,10 @@ export function openDb(path: string) {
       DELETE FROM attachments WHERE target = 'portfolio' AND target_id = old.id;
     END;
   `);
+  const pfItemCols = (db.query("PRAGMA table_info(portfolio_items)").all() as { name: string }[]).map((c) => c.name);
+  if (!pfItemCols.includes("note_id")) db.exec("ALTER TABLE portfolio_items ADD COLUMN note_id INTEGER");
+  const pfSectionCols = (db.query("PRAGMA table_info(portfolio_sections)").all() as { name: string }[]).map((c) => c.name);
+  if (!pfSectionCols.includes("layout")) db.exec("ALTER TABLE portfolio_sections ADD COLUMN layout TEXT NOT NULL DEFAULT 'cards'");
   // Tasks and exams this site put in the owner's Google Calendar (key "task:<id>" / "exam:<id>").
   // hash: the event body last sent, so only changed items are sent again.
   db.exec("CREATE TABLE IF NOT EXISTS gcal_links (key TEXT PRIMARY KEY, calendar_id TEXT NOT NULL, event_id TEXT NOT NULL, hash TEXT NOT NULL)");
@@ -713,6 +720,9 @@ export function openDb(path: string) {
     renameSection(id: number, title: string) {
       db.query("UPDATE portfolio_sections SET title = ? WHERE id = ?").run(title, id);
     },
+    setSectionLayout(id: number, layout: string) {
+      db.query("UPDATE portfolio_sections SET layout = ? WHERE id = ?").run(layout, id);
+    },
     // Its items go too (and their attachments, by trigger).
     deleteSection: db.transaction((id: number) => {
       db.query("DELETE FROM portfolio_items WHERE section_id = ?").run(id);
@@ -727,17 +737,17 @@ export function openDb(path: string) {
     insertItem(f: PortfolioFields): PortfolioItem {
       return db
         .query(
-          `INSERT INTO portfolio_items (section_id, title, period, summary, body, link, public, sort)
-           VALUES (?, ?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(sort), -1) + 1 FROM portfolio_items WHERE section_id = ?)) RETURNING *`,
+          `INSERT INTO portfolio_items (section_id, title, period, summary, body, link, public, note_id, sort)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(sort), -1) + 1 FROM portfolio_items WHERE section_id = ?)) RETURNING *`,
         )
-        .get(f.section_id, f.title, f.period, f.summary, f.body, f.link, f.public, f.section_id) as PortfolioItem;
+        .get(f.section_id, f.title, f.period, f.summary, f.body, f.link, f.public, f.note_id ?? null, f.section_id) as PortfolioItem;
     },
     // Moving an item to another section puts it at the end there.
     updateItem: db.transaction((id: number, patch: Partial<PortfolioFields>) => {
       const before = db.query("SELECT section_id FROM portfolio_items WHERE id = ?").get(id) as { section_id: number };
       const keys = Object.keys(patch) as (keyof PortfolioFields)[];
       if (!keys.length) return;
-      db.query(`UPDATE portfolio_items SET ${keys.map((k) => `${k} = ?`).join(", ")}, updated_at = datetime('now') WHERE id = ?`).run(...keys.map((k) => patch[k]!), id);
+      db.query(`UPDATE portfolio_items SET ${keys.map((k) => `${k} = ?`).join(", ")}, updated_at = datetime('now') WHERE id = ?`).run(...keys.map((k) => patch[k] ?? null), id);
       if (patch.section_id !== undefined && patch.section_id !== before.section_id) {
         db.query("UPDATE portfolio_items SET sort = (SELECT COALESCE(MAX(sort), -1) + 1 FROM portfolio_items WHERE section_id = ? AND id != ?) WHERE id = ?").run(patch.section_id, id, id);
       }
@@ -758,14 +768,17 @@ export function openDb(path: string) {
       ids.forEach((x, n) => db.query(`UPDATE ${table} SET sort = ? WHERE id = ?`).run(n, x));
       return true;
     }),
-    // A file anyone may fetch: attached to the profile or to a public portfolio item.
+    // A file anyone may fetch: attached to the profile or to a public portfolio item, or a picture/file in the note of a public item.
     isPublicFile(fileId: number): boolean {
       return !!db
         .query(
           `SELECT 1 FROM attachments a LEFT JOIN portfolio_items i ON a.target = 'portfolio' AND i.id = a.target_id
-           WHERE a.file_id = ? AND (a.target = 'profile' OR i.public = 1)`,
+           WHERE a.file_id = ? AND (a.target = 'profile' OR i.public = 1)
+           UNION ALL
+           SELECT 1 FROM portfolio_items i JOIN notes n ON n.id = i.note_id, json_each(n.blocks) b
+           WHERE i.public = 1 AND json_extract(b.value, '$.fileId') = ?`,
         )
-        .get(fileId);
+        .get(fileId, fileId);
     },
     // The notes under it, at any depth (nearest first).
     noteDescendants(id: number): number[] {

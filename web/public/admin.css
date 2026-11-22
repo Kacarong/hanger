@@ -436,7 +436,7 @@ dialog .foot .grow { flex: 1; }
 .notify-device > div { flex: 1; min-width: 0; }
 .notify-device p { margin: 2px 0 0; font-size: 13px; }
 dialog .input.sm-time { width: 120px; height: 34px; margin-left: auto; }
-dialog p.small { margin: 0; font-size: 12px; line-height: 1.5; }
+dialog .small { margin: 0; font-size: 12px; font-weight: 400; line-height: 1.5; }
 #event-open { display: inline-flex; align-items: center; text-decoration: none; }
 .cal-item.exam .dot { background: var(--orange); }
 @media (max-width: 860px) {

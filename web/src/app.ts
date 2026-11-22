@@ -2,7 +2,8 @@ import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypt
 import { mkdirSync, existsSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { cleanBlocks, editRuns, richOrNone } from "./blocks";
-import { ATTACH_TARGETS, CATEGORIES, EXAM_COLORS, TASK_CATEGORIES, TASK_KINDS, type AttachedFile, type Block, type Db, type ExamFields, type FileRow, type PortfolioFields, type PortfolioItem, type StudyFields, type TaskFields } from "./db";
+import { noteHtml } from "./note-html";
+import { ATTACH_TARGETS, CATEGORIES, EXAM_COLORS, SECTION_LAYOUTS, TASK_CATEGORIES, TASK_KINDS, type AttachedFile, type Block, type Db, type ExamFields, type FileRow, type PortfolioFields, type PortfolioItem, type StudyFields, type TaskFields } from "./db";
 import { createCalendarPush, eventWhen } from "./gcal";
 import { GoogleError, type CalendarEvent, type EventBody, type Google } from "./google";
 import { createNotifier } from "./notify";
@@ -245,6 +246,10 @@ export function createApp(cfg: AppConfig, db: Db, google: Google) {
       if (out.link && !/^https?:\/\//i.test(out.link)) return "링크는 http:// 나 https:// 로 시작해야 합니다";
     }
     if ("public" in b) out.public = b.public === true ? 1 : 0;
+    if ("note_id" in b) {
+      if (b.note_id !== null && !db.getNote(Number(b.note_id))) return "노트를 찾을 수 없습니다";
+      out.note_id = b.note_id === null ? null : Number(b.note_id);
+    }
     return out;
   }
 
@@ -354,6 +359,12 @@ export function createApp(cfg: AppConfig, db: Db, google: Google) {
         .map((t) => `<span class="chip">${escapeHtml(t)}</span>`)
         .join("");
     let n = 0;
+    // A linked note, folded under the item. Its pictures are served like the item's files (see isPublicFile).
+    const more = (it: PortfolioItem) => {
+      const note = it.note_id ? db.getNote(it.note_id) : null;
+      const html = note ? noteHtml(note.blocks, (id) => `/portfolio/file/${id}`) : "";
+      return html.trim() ? `<details class="work-more"><summary>자세히 보기</summary><div class="note-body">${html}</div></details>` : "";
+    };
     // The first attached file is the cover: the image itself, or Drive's preview of a video or PDF.
     const item = (it: PortfolioItem) => {
       const files = db.listAttachments("portfolio", it.id);
@@ -374,26 +385,37 @@ export function createApp(cfg: AppConfig, db: Db, google: Google) {
 <div class="chips">${chips(it)}</div>
 ${it.summary ? `<p class="work-summary">${escapeHtml(it.summary)}</p>` : ""}
 ${it.body ? `<p class="work-note">${escapeHtml(it.body)}</p>` : ""}${extras}
-${it.link ? `<a class="work-link" href="${escapeHtml(it.link)}" target="_blank" rel="noopener">LINK ↗</a>` : ""}`;
-      if (!cover) return { cover: false, html: `<li class="reveal"><div>${info}</div></li>` };
+${it.link ? `<a class="work-link" href="${escapeHtml(it.link)}" target="_blank" rel="noopener">LINK ↗</a>` : ""}${more(it)}`;
+      const entry = `<li class="reveal"><div>${info}</div></li>`;
+      if (!cover) return { cover: false, entry, card: entry, tile: `<article class="tile reveal"><div class="tile-media no-thumb"><span class="work-media-label">${escapeHtml(it.title)}</span></div>${info}</article>` };
       const src = RASTER.test(cover.mime) ? fileUrl(cover) : `/thumb/${cover.id}`;
+      const media = (cls: string) =>
+        `<a class="${cls}" href="${escapeHtml(it.link || fileUrl(cover))}" target="_blank" rel="noopener"><img src="${src}" alt="" loading="lazy"><span class="work-media-label">${escapeHtml(it.title)}</span></a>`;
       return {
         cover: true,
-        html: `<article class="work reveal">
-<a class="work-media" href="${escapeHtml(it.link || fileUrl(cover))}" target="_blank" rel="noopener"><img src="${src}" alt="" loading="lazy"><span class="work-media-label">${escapeHtml(it.title)}</span></a>
+        entry,
+        card: `<article class="work reveal">
+${media("work-media")}
 <div class="work-info">${info}</div>
 </article>`,
+        tile: `<article class="tile reveal">${media("tile-media")}${info}</article>`,
       };
     };
+    // Each section in its layout: big cards (items without a picture as rows under them), small cards side by side, or rows only.
     const body = sections
       .map((s) => {
         n = 0; // numbers start over in each section
         const rendered = s.items.map(item);
-        const works = rendered.filter((r) => r.cover).map((r) => r.html).join("\n");
-        const entries = rendered.filter((r) => !r.cover).map((r) => r.html).join("\n");
-        return `<section class="works" id="s${s.id}">
+        let inner: string;
+        if (s.layout === "grid") inner = `<div class="tiles">${rendered.map((r) => r.tile).join("\n")}</div>`;
+        else if (s.layout === "list") inner = `<ul class="entries">${rendered.map((r) => r.entry).join("\n")}</ul>`;
+        else {
+          const entries = rendered.filter((r) => !r.cover).map((r) => r.entry).join("\n");
+          inner = rendered.filter((r) => r.cover).map((r) => r.card).join("\n") + (entries ? `<ul class="entries">${entries}</ul>` : "");
+        }
+        return `<section class="works layout-${escapeHtml(s.layout)}" id="s${s.id}">
 <h2 class="section-title reveal">${escapeHtml(s.title)} <sup>${s.items.length}</sup></h2>
-${works}${entries ? `<ul class="entries">${entries}</ul>` : ""}
+${inner}
 </section>`;
       })
       .join("\n");
@@ -1068,9 +1090,15 @@ ${body || `<section class="works"><p class="empty reveal">${mine ? "아직 포�
       if (!sm[3] && method === "PATCH") {
         const b = await body(req);
         if (kind === "section") {
-          const title = str(b.title, 100);
-          if (!title) return json({ error: "섹션 이름을 넣어 주세요" }, 400);
-          db.renameSection(id, title);
+          if ("layout" in b) {
+            if (!SECTION_LAYOUTS.includes(b.layout as string)) return json({ error: "보기 방식이 올바르지 않습니다" }, 400);
+            db.setSectionLayout(id, b.layout as string);
+          }
+          if ("title" in b) {
+            const title = str(b.title, 100);
+            if (!title) return json({ error: "섹션 이름을 넣어 주세요" }, 400);
+            db.renameSection(id, title);
+          }
           return json(db.getSection(id));
         }
         const f = itemFields(b);

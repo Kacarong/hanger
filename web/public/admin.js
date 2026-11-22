@@ -489,6 +489,7 @@ async function refreshSections() {
           el("h2", { textContent: s.title }),
           el("span", { className: "muted", textContent: `${s.items.length}개 · 공개 ${pub}` }),
           el("span", { className: "grow" }),
+          layoutSelect(s, act),
           iconBtn("섹션 위로", "up", () => act(`/api/portfolio/sections/${s.id}/move`, "POST", { dir: -1 }), si ? "" : "invisible"),
           iconBtn("섹션 아래로", "down", () => act(`/api/portfolio/sections/${s.id}/move`, "POST", { dir: 1 }), si < pf.sections.length - 1 ? "" : "invisible"),
           iconBtn("섹션 이름 바꾸기", "edit", () => {
@@ -503,6 +504,19 @@ async function refreshSections() {
     }),
     pf.sections.length ? "" : el("p", { className: "notice", textContent: "섹션이 없습니다." }),
   );
+}
+
+// 섹션을 포트폴리오 페이지에 어떻게 보일지: 큰 카드 / 격자 / 목록.
+function layoutSelect(s, act) {
+  const sel = el(
+    "select",
+    { className: "input sm", title: "포트폴리오 페이지에서 이 섹션을 보이는 방식", onchange() { act(`/api/portfolio/sections/${s.id}`, "PATCH", { layout: this.value }); } },
+    el("option", { value: "cards", textContent: "큰 카드" }),
+    el("option", { value: "grid", textContent: "격자" }),
+    el("option", { value: "list", textContent: "목록" }),
+  );
+  sel.value = s.layout || "cards";
+  return sel;
 }
 
 function newSection() {
@@ -522,6 +536,14 @@ function openItemDialog(it = null, sectionId = null) {
   $("item-link").value = it?.link ?? "";
   $("item-summary").value = it?.summary ?? "";
   $("item-body").value = it?.body ?? "";
+  $("item-note").replaceChildren(el("option", { value: "", textContent: "붙이지 않음" }));
+  $("item-note").value = "";
+  call("/api/notes")
+    .then((notes) => {
+      $("item-note").append(...notes.map((n) => el("option", { value: String(n.id), textContent: n.title || "(제목 없음)" })));
+      $("item-note").value = it?.note_id && notes.some((n) => n.id === it.note_id) ? String(it.note_id) : ""; // a deleted note: none
+    })
+    .catch(showError);
   $("item-msg").textContent = "";
   itemFiles.show(it?.id ?? null, () => "포트폴리오");
   $("item-dialog").showModal();
@@ -1785,6 +1807,7 @@ async function init() {
       link: $("item-link").value,
       summary: $("item-summary").value,
       body: $("item-body").value,
+      note_id: $("item-note").value ? Number($("item-note").value) : null,
     };
     try {
       if (editingItem) await call(`/api/portfolio/items/${editingItem.id}`, { method: "PATCH", body });
