@@ -706,8 +706,9 @@ function nextPayDay(day, today) {
 
 function syncExpenseKind() {
   const monthly = $("expense-kind").value === "정기";
-  $("expense-day-box").hidden = !monthly;
-  $("expense-date-box").hidden = monthly;
+  // The unused one is also disabled, so a leftover value (day 32, …) can't block the form's validation.
+  $("expense-day-box").hidden = $("expense-day").disabled = !monthly;
+  $("expense-date-box").hidden = $("expense-date").disabled = monthly;
 }
 
 function openExpenseDialog(x = null, kind = "정기") {
@@ -1867,8 +1868,8 @@ async function init() {
     ev.preventDefault();
     const amount = Number($("expense-amount").value.replace(/[,\s원]/g, ""));
     if (!Number.isSafeInteger(amount) || amount < 0) return ($("expense-msg").textContent = "금액은 숫자로 적어 주세요(예: 55000)");
-    const day = $("expense-day").value;
-    const body = { kind: $("expense-kind").value, title: $("expense-title").value, amount, day: day ? Number(day) : null, date: $("expense-date").value, note: $("expense-note").value };
+    const kind = $("expense-kind").value, day = $("expense-day").value;
+    const body = { kind, title: $("expense-title").value, amount, day: kind === "정기" && day ? Number(day) : null, date: kind === "예정" ? $("expense-date").value : "", note: $("expense-note").value };
     try {
       if (editingExpense) await call(`/api/expenses/${editingExpense.id}`, { method: "PATCH", body });
       else await call("/api/expenses", { method: "POST", body });
