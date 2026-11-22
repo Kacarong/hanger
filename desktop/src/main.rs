@@ -10,12 +10,28 @@
 use tauri::webview::NewWindowResponse;
 use tauri::{Manager, Url, WebviewUrl, WebviewWindowBuilder};
 
-const HOME: &str = "https://kacarong.kr/admin";
+/// 여는 주소. 시험 빌드만 `KACARONG_HOME=http://.../admin cargo build` 로 다른 서버를 가리킨다.
+const HOME: &str = match option_env!("KACARONG_HOME") {
+    Some(h) => h,
+    None => "https://kacarong.kr/admin",
+};
+
+fn home() -> Url {
+    HOME.parse().unwrap()
+}
+
+/// 이 사이트(HOME 과 같은 출처)의 주소인지.
+fn same_site(url: &Url) -> bool {
+    url.origin() == home().origin()
+}
 
 /// 창 안에 머무는 주소: 이 사이트와 구글 로그인(accounts.google.com 등 *.google.com).
 fn stays_inside(url: &Url) -> bool {
+    if same_site(url) {
+        return true;
+    }
     match (url.scheme(), url.host_str()) {
-        ("https", Some(h)) => h == "kacarong.kr" || h == "google.com" || h.ends_with(".google.com"),
+        ("https", Some(h)) => h == "google.com" || h.ends_with(".google.com"),
         ("about" | "blob" | "data", _) => true,
         _ => false,
     }
@@ -38,7 +54,7 @@ fn main() {
             }
         }))
         .setup(|app| {
-            WebviewWindowBuilder::new(app, "main", WebviewUrl::External(HOME.parse().unwrap()))
+            WebviewWindowBuilder::new(app, "main", WebviewUrl::External(home()))
                 .title("kacarong 작업공간")
                 .inner_size(1280.0, 860.0)
                 .min_inner_size(360.0, 480.0)
@@ -51,7 +67,7 @@ fn main() {
                     false
                 })
                 .on_new_window(|url, _| {
-                    if url.host_str() == Some("kacarong.kr") {
+                    if same_site(&url) {
                         return NewWindowResponse::Allow;
                     }
                     open_in_browser(&url);

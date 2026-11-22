@@ -1,6 +1,6 @@
 [package]
 name = "kacarong-desktop"
-version = "1.0.0"
+version = "1.0.1"
 edition = "2021"
 description = "kacarong 작업공간 PC 프로그램: https://kacarong.kr/admin 을 그대로 띄우는 창"
 publish = false

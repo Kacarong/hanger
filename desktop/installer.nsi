@@ -10,7 +10,11 @@ SetCompressor /SOLID lzma
 
 !define APP "kacarong 작업공간"
 !define UNINST_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\kacarong-workspace"
-!define WEBVIEW2_KEY "SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"
+; WebView2 런타임 설치 확인 위치(마이크로소프트 배포 문서): 컴퓨터 전체 설치는 HKLM 의 WOW6432Node, 사용자별 설치는 HKCU.
+!ifndef WEBVIEW2_HKLM  ; 시험 빌드는 다른 키를 줘서 런타임 없는 PC처럼 만든다
+!define WEBVIEW2_HKLM "SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"
+!define WEBVIEW2_HKCU "Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"
+!endif
 
 Name "${APP}"
 OutFile "${OUT}"
@@ -53,27 +57,57 @@ FunctionEnd
   ${Loop}
 !macroend
 
-; 창에 필요한 WebView2 런타임(Windows 11 에는 있다, 오래된 Windows 10 에는 없을 수 있다).
-Function EnsureWebView2
-  ReadRegStr $0 HKLM "${WEBVIEW2_KEY}" "pv"
-  ReadRegStr $1 HKCU "${WEBVIEW2_KEY}" "pv"
+; 창에 필요한 WebView2 런타임(Windows 11 에는 있다, 오래된 Windows 10 에는 없을 수 있다). 결과: 1 = 있음.
+Function WebView2Present
+  ReadRegStr $0 HKLM "${WEBVIEW2_HKLM}" "pv"
+  ReadRegStr $1 HKCU "${WEBVIEW2_HKCU}" "pv"
+  StrCpy $2 0
   ${If} $0 != ""
   ${AndIf} $0 != "0.0.0.0"
-    Return
+    StrCpy $2 1
   ${EndIf}
   ${If} $1 != ""
   ${AndIf} $1 != "0.0.0.0"
+    StrCpy $2 1
+  ${EndIf}
+  Push $2
+FunctionEnd
+
+; 없으면 부트스트래퍼로 받아 설치하고 다시 확인한다. 끝내 없으면 아무것도 설치하지 않고 멈춘다.
+Function EnsureWebView2
+  Call WebView2Present
+  Pop $2
+  ${If} $2 == 1
     Return
   ${EndIf}
   SetOutPath "$PLUGINSDIR"
   File "/oname=webview2.exe" "${WEBVIEW2}"
-  DetailPrint "WebView2 런타임 설치"
-  ExecWait '"$PLUGINSDIR\webview2.exe" /silent /install'
+  ${Do}
+    DetailPrint "WebView2 런타임 설치"
+    ClearErrors
+    ExecWait '"$PLUGINSDIR\webview2.exe" /silent /install' $0
+    ${If} ${Errors}
+      StrCpy $0 "실행 실패"
+    ${EndIf}
+    Call WebView2Present
+    Pop $2
+    ${If} $2 == 1
+      Return
+    ${EndIf}
+    DetailPrint "WebView2 런타임을 설치하지 못했습니다 (결과 $0)"
+    ${If} ${Silent}
+      SetErrorLevel 3
+      Abort "WebView2 런타임을 설치하지 못했습니다."
+    ${EndIf}
+    MessageBox MB_RETRYCANCEL|MB_ICONEXCLAMATION "창에 필요한 WebView2 런타임을 설치하지 못했습니다 (결과 $0). 인터넷 연결을 확인하고 다시 시도해 주세요." IDRETRY +3
+    SetErrorLevel 3
+    Abort "WebView2 런타임이 없어 설치하지 않았습니다."
+  ${Loop}
 FunctionEnd
 
 Section
-  !insertmacro WaitClosed
   Call EnsureWebView2
+  !insertmacro WaitClosed
   SetOutPath "$INSTDIR"
   File "${SRC}/kacarong.exe"
   File "${SRC}/WebView2Loader.dll"

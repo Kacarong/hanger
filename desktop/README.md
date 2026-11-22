@@ -20,9 +20,14 @@ NSISDIR=$HOME/.local/nsis/usr/share/nsis PATH=$HOME/.local/nsis/usr/bin:$PATH ./
 
 필요한 것: Rust `x86_64-pc-windows-gnu` 타깃, mingw-w64, makensis 3, curl.
 
+시험용으로 다른 서버를 띄우려면 `KACARONG_HOME=http://127.0.0.1:2993/admin cargo build ...` (컴파일 때만 읽는다,
+그 서버와 같은 출처가 "이 사이트"가 된다). `NSIS_EXTRA='-DWEBVIEW2_HKLM=... -DWEBVIEW2_HKCU=...'` 로 런타임
+확인 키를 바꾸면 런타임이 없는 PC의 설치 흐름을 시험할 수 있다.
+
 ## 설치 파일
 
 - 관리자 권한 없이 이 사용자 계정에만 설치한다: `%LOCALAPPDATA%\Programs\kacarong`, 시작 메뉴·바탕 화면 바로 가기.
 - 새 버전은 같은 설치 파일을 다시 실행하면 덮어쓴다(`Cargo.toml` 의 `version` 을 올린다). `/S` 는 조용한 설치.
-- WebView2 런타임이 없는 PC(오래된 Windows 10)에서는 설치 중에 마이크로소프트 부트스트래퍼로 런타임을 받는다.
+- WebView2 런타임(HKLM WOW6432Node 또는 HKCU 의 EdgeUpdate 키)이 없는 PC(오래된 Windows 10)에서는 설치 중에
+  마이크로소프트 부트스트래퍼로 런타임을 받는다. 그래도 없으면 아무것도 설치하지 않고 멈춘다(다시 시도 / 취소, `/S` 면 종료 코드 3).
 - 제거: Windows 설정 → 앱 → "kacarong 작업공간".
