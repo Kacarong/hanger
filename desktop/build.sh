@@ -12,6 +12,6 @@ rel="$target/x86_64-pc-windows-gnu/release"
 wv2="$target/MicrosoftEdgeWebview2Setup.exe"
 [ -s "$wv2" ] || curl -fsSL -o "$wv2" "https://go.microsoft.com/fwlink/p/?LinkId=2124703"
 setup="$out/kacarong-Setup-$version.exe"
-makensis -V2 ${NSIS_EXTRA:-} -DVERSION="$version" -DSRC="$rel" -DOUT="$setup" -DICON="$here/icons/icon.ico" -DWEBVIEW2="$wv2" "$here/installer.nsi"
+makensis -V2 ${NSIS_EXTRA:-} -DVERSION="$version" -DSRC="$rel" -DOUT="$setup" -DICON="$here/icons/icon.ico" -DICONPNG="$here/icons/icon.png" -DWEBVIEW2="$wv2" "$here/installer.nsi"
 (cd "$out" && sha256sum "kacarong-Setup-$version.exe" > "kacarong-Setup-$version.exe.sha256")
 echo "$setup"

@@ -1,0 +1,8 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "site",
+  "description": "사이트(kacarong.kr)가 윈도우 알림을 띄울 수 있게 한다. 그 밖의 주소(구글 로그인 등)는 아무 기능도 못 쓴다.",
+  "windows": ["main"],
+  "remote": { "urls": ["https://kacarong.kr/*"] },
+  "permissions": ["notification:default"]
+}

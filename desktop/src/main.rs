@@ -4,6 +4,8 @@
 //! - 이 사이트의 새 창 링크(파일 열기, 공개 페이지)는 같은 로그인으로 새 창에 연다.
 //! - 파일을 창에 끌어다 놓으면 사이트가 받는다(Tauri 의 끌어놓기 가로채기를 끈다).
 //! - 다시 실행하면 새로 뜨지 않고 열려 있는 창을 앞으로 가져온다.
+//! - 사이트가 window.__TAURI__.notification 으로 윈도우 알림을 띄운다(WebView2 는 웹 알림을 막는다).
+//!   이 사이트 주소만 그 기능을 쓸 수 있다(capabilities/site.json).
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
@@ -65,6 +67,7 @@ fn open_in_browser(url: &Url) {
 
 fn main() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_single_instance::init(|app, _, _| {
             if let Some(w) = app.get_webview_window("main") {
                 let _ = w.unminimize();

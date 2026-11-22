@@ -21,8 +21,8 @@ android {
         applicationId = "kr.kacarong.workspace"
         minSdk = 24
         targetSdk = 36
-        versionCode = 1
-        versionName = "1.0.0"
+        versionCode = 2
+        versionName = "1.1.0"
         manifestPlaceholders["siteHost"] = siteHost
         manifestPlaceholders["siteUrl"] = "https://$siteHost/admin"
         // 이 앱이 사이트의 주인임을 선언한다. 사이트 쪽 assetlinks.json 과 짝이 맞아야

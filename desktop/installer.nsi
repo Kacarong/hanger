@@ -10,6 +10,7 @@ SetCompressor /SOLID lzma
 
 !define APP "kacarong 작업공간"
 !define UNINST_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\kacarong-workspace"
+!define AUMID_KEY "Software\Classes\AppUserModelId\kr.kacarong.workspace"
 ; WebView2 런타임 설치 확인 위치(마이크로소프트 배포 문서): 컴퓨터 전체 설치는 HKLM 의 WOW6432Node, 사용자별 설치는 HKCU.
 !ifndef WEBVIEW2_HKLM  ; 시험 빌드는 다른 키를 줘서 런타임 없는 PC처럼 만든다
 !define WEBVIEW2_HKLM "SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"
@@ -111,6 +112,7 @@ Section
   SetOutPath "$INSTDIR"
   File "${SRC}/kacarong.exe"
   File "${SRC}/WebView2Loader.dll"
+  File "/oname=icon.png" "${ICONPNG}"
   WriteUninstaller "$INSTDIR\uninstall.exe"
   CreateShortCut "$SMPROGRAMS\${APP}.lnk" "$INSTDIR\kacarong.exe"
   CreateShortCut "$DESKTOP\${APP}.lnk" "$INSTDIR\kacarong.exe"
@@ -122,16 +124,22 @@ Section
   WriteRegStr HKCU "${UNINST_KEY}" "UninstallString" '"$INSTDIR\uninstall.exe"'
   WriteRegDWORD HKCU "${UNINST_KEY}" "NoModify" 1
   WriteRegDWORD HKCU "${UNINST_KEY}" "NoRepair" 1
+  ; 윈도우 알림(토스트)의 보낸 이: 프로그램 식별자(tauri.conf.json identifier)를 이름·아이콘과 함께 등록한다.
+  ; 등록이 없으면 설치형이 아닌 프로그램의 알림을 윈도우가 띄우지 않는다.
+  WriteRegStr HKCU "${AUMID_KEY}" "DisplayName" "${APP}"
+  WriteRegStr HKCU "${AUMID_KEY}" "IconUri" "$INSTDIR\icon.png"
 SectionEnd
 
 Section "Uninstall"
   !insertmacro WaitClosed
   Delete "$INSTDIR\WebView2Loader.dll"
+  Delete "$INSTDIR\icon.png"
   Delete "$INSTDIR\uninstall.exe"
   RMDir "$INSTDIR"
   Delete "$SMPROGRAMS\${APP}.lnk"
   Delete "$DESKTOP\${APP}.lnk"
   DeleteRegKey HKCU "${UNINST_KEY}"
+  DeleteRegKey HKCU "${AUMID_KEY}"
   ; 창의 브라우저 데이터(로그인·캐시)
   RMDir /r "$LOCALAPPDATA\kr.kacarong.workspace"
 SectionEnd

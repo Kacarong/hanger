@@ -8,6 +8,10 @@ Tauri 2 + Windows 내장 WebView2). 화면·기능은 전부 사이트에 있으
 - 이 사이트의 새 창 링크(파일 열기, 공개 페이지, 포트폴리오 미리 보기)는 같은 로그인으로 새 창에 연다.
 - 파일을 창에 끌어다 놓으면 사이트가 받는다.
 - 다시 실행하면 열려 있는 창을 앞으로 가져온다.
+- (1.1.0) 사이트의 알림을 윈도우 알림으로 띄운다: WebView2 는 웹 알림을 막으므로 사이트가 `window.__TAURI__.notification`
+  (tauri-plugin-notification)을 부른다. 그 기능은 kacarong.kr 페이지만 쓸 수 있다(`capabilities/site.json`).
+  설치 파일이 `HKCU\Software\Classes\AppUserModelId\kr.kacarong.workspace` 에 이름·아이콘을 등록해야 알림이 뜬다(제거 때 지움).
+  프로그램이 켜져 있는 동안(최소화 포함)만 받는다. 시험 빌드(KACARONG_HOME)에서 알림을 보려면 capability 의 urls 에 그 주소도 잠깐 넣는다.
 - 로그인·캐시는 `%LOCALAPPDATA%\kr.kacarong.workspace` 에 남는다(제거하면 같이 지운다).
 
 ## 빌드 (리눅스에서)

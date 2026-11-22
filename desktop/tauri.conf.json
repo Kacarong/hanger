@@ -6,7 +6,8 @@
     "frontendDist": "https://kacarong.kr/admin"
   },
   "app": {
-    "windows": []
+    "windows": [],
+    "withGlobalTauri": true
   },
   "bundle": {
     "active": false,
