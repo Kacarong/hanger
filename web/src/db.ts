@@ -64,9 +64,11 @@ export type ExamRow = {
   place: string;
   scope: string; // 시험 범위
   note: string;
+  color: string; // card color, one of EXAM_COLORS ('' = none)
   created_at: string;
 };
-export type ExamFields = Pick<ExamRow, "title" | "course" | "date" | "time" | "place" | "scope" | "note">;
+export type ExamFields = Pick<ExamRow, "title" | "course" | "date" | "time" | "place" | "scope" | "note" | "color">;
+export const EXAM_COLORS = ["", "red", "orange", "amber", "green", "blue", "purple", "pink"];
 
 // A day's study on the 공부 tab. Kept apart from tasks so it never shows up on the calendar (or the today screen).
 export type StudyRow = { id: number; date: string; course: string; title: string; done: number; created_at: string };
@@ -228,6 +230,8 @@ export function openDb(path: string) {
   db.exec("CREATE INDEX IF NOT EXISTS tasks_note ON tasks (note_id)");
   if (!taskCols.includes("exam_id")) db.exec("ALTER TABLE tasks ADD COLUMN exam_id INTEGER");
   if (!taskCols.includes("category")) db.exec("ALTER TABLE tasks ADD COLUMN category TEXT NOT NULL DEFAULT ''");
+  const examCols = (db.query("PRAGMA table_info(exams)").all() as { name: string }[]).map((c) => c.name);
+  if (!examCols.includes("color")) db.exec("ALTER TABLE exams ADD COLUMN color TEXT NOT NULL DEFAULT ''");
   db.exec(`
     CREATE INDEX IF NOT EXISTS tasks_exam ON tasks (exam_id);
     -- An exam takes its study plan with it.
@@ -483,7 +487,7 @@ export function openDb(path: string) {
       return db.query("SELECT * FROM exams WHERE id = ?").get(id) as ExamRow | null;
     },
     insertExam(e: ExamFields): ExamRow {
-      return db.query("INSERT INTO exams (title, course, date, time, place, scope, note) VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING *").get(e.title, e.course, e.date, e.time, e.place, e.scope, e.note) as ExamRow;
+      return db.query("INSERT INTO exams (title, course, date, time, place, scope, note, color) VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING *").get(e.title, e.course, e.date, e.time, e.place, e.scope, e.note, e.color) as ExamRow;
     },
     // The study plan follows the exam's course.
     updateExam: db.transaction((id: number, patch: Partial<ExamFields>) => {

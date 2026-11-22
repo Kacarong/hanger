@@ -1157,6 +1157,12 @@ test("시험: 일정 → 날짜별 공부 계획(오늘·캘린더·할 일에�
     expect(db.getTask(day2.id)).toMatchObject({ course: "토질역학1" });
     expect((await req(`/api/exams/${mid.id}`, "PATCH", { title: " " })).status).toBe(400);
     expect((await req("/api/exams/9999", "PATCH", { title: "x" })).status).toBe(404);
+    // Card color: starts with none, takes one of the fixed colors, nothing else.
+    expect(mid.color).toBe("");
+    expect((await req(`/api/exams/${mid.id}`, "PATCH", { color: "purple" })).body).toMatchObject({ color: "purple", title: "토질역학 중간고사" });
+    expect((await req(`/api/exams/${mid.id}`, "PATCH", { color: "#ff0000" })).status).toBe(400);
+    expect((await req("/api/exams", "POST", { title: "x", color: "gold" })).status).toBe(400);
+    expect((await req(`/api/exams/${mid.id}`, "PATCH", { color: "" })).body).toMatchObject({ color: "" });
 
     expect((await req(`/api/exams/${mid.id}`, "DELETE")).status).toBe(200);
     expect([db.getTask(day1.id), db.getTask(day2.id)]).toEqual([null, null]);
@@ -1205,6 +1211,15 @@ test("공부: 날짜별로 공부·과목을 적고 체크·수정·삭제, 캘�
     expect((await req(`/api/studies/${a.id}`, "DELETE")).status).toBe(200);
     list = (await req("/api/studies", "GET")).body;
     expect(list.studies.map((s: any) => s.title)).toEqual(["영단어 50개", "미적분 문제"]);
+
+    // The period the tab lays out day cards for: none until set, kept once set.
+    expect(list.range).toBeNull();
+    expect((await req("/api/studies/range", "PUT", { from: "2026-11-23", to: "2026-12-17" })).body).toEqual({ from: "2026-11-23", to: "2026-12-17" });
+    expect((await req("/api/studies", "GET")).body.range).toEqual({ from: "2026-11-23", to: "2026-12-17" });
+    expect((await req("/api/studies/range", "PUT", { from: "2026-12-17", to: "2026-11-23" })).status).toBe(400);
+    expect((await req("/api/studies/range", "PUT", { from: "2026-11-23", to: "" })).status).toBe(400);
+    expect((await req("/api/studies/range", "PUT", { from: "2026-11-23", to: "2027-11-23" })).status).toBe(400);
+    expect((await req("/api/studies", "GET")).body.range).toEqual({ from: "2026-11-23", to: "2026-12-17" });
   } finally {
     cleanup();
   }

@@ -2,7 +2,7 @@ import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypt
 import { mkdirSync, existsSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { cleanBlocks, editRuns, richOrNone } from "./blocks";
-import { ATTACH_TARGETS, CATEGORIES, TASK_CATEGORIES, TASK_KINDS, type AttachedFile, type Block, type Db, type ExamFields, type FileRow, type PortfolioFields, type PortfolioItem, type StudyFields, type TaskFields } from "./db";
+import { ATTACH_TARGETS, CATEGORIES, EXAM_COLORS, TASK_CATEGORIES, TASK_KINDS, type AttachedFile, type Block, type Db, type ExamFields, type FileRow, type PortfolioFields, type PortfolioItem, type StudyFields, type TaskFields } from "./db";
 import { GoogleError, type CalendarEvent, type Google } from "./google";
 import { createNotionSync, NotionError } from "./notion";
 import { passwordProblem } from "./password";
@@ -12,6 +12,7 @@ const SESSION_DAYS = 30;
 const CALENDAR_MAX_DAYS = 62; // longest range /api/calendar serves (a 6-week month grid is 42)
 const UPCOMING_DAYS = 3; // 과제 due within this many days show up on the today screen
 const EXAM_DAYS = 14; // exams within this many days show up on the today screen
+const STUDY_RANGE_DAYS = 120; // longest 공부 period (one card per day)
 const LOGIN_FAIL_LIMIT = 5; // password failures allowed per LOGIN_FAIL_WINDOW
 const LOGIN_FAIL_WINDOW = 15 * 60_000;
 const PUBLIC_DIR = join(import.meta.dir, "..", "public");
@@ -262,6 +263,10 @@ export function createApp(cfg: AppConfig, db: Db, google: Google) {
     if ("place" in b) out.place = str(b.place, 200);
     if ("scope" in b) out.scope = str(b.scope, 5000);
     if ("note" in b) out.note = str(b.note, 5000);
+    if ("color" in b) {
+      out.color = str(b.color, 10);
+      if (!EXAM_COLORS.includes(out.color)) return "색이 올바르지 않습니다";
+    }
     if ("date" in b) {
       const v = str(b.date, 10);
       if (v && !isDate(v)) return "날짜가 올바르지 않습니다";
@@ -524,7 +529,7 @@ ${body || `<section class="works"><p class="empty reveal">${mine ? "아직 포�
       const f = examFields(await body(req));
       if (typeof f === "string") return json({ error: f }, 400);
       if (!f.title) return json({ error: "시험 이름을 입력해 주세요" }, 400);
-      return json(db.insertExam({ course: "", date: null, time: null, place: "", scope: "", note: "", ...f, title: f.title }), 201);
+      return json(db.insertExam({ course: "", date: null, time: null, place: "", scope: "", note: "", color: "", ...f, title: f.title }), 201);
     }
 
     const em = path.match(/^\/api\/exams\/(\d+)$/);
@@ -544,7 +549,19 @@ ${body || `<section class="works"><p class="empty reveal">${mine ? "아직 포�
     }
 
     // 공부: what to study day by day. Not tasks, so the calendar and the today screen never see it.
-    if (path === "/api/studies" && method === "GET") return json({ date: today(), studies: db.listStudies() });
+    // range: the days the 공부 tab lays out as cards ready to write in, even with nothing on them yet.
+    if (path === "/api/studies" && method === "GET") return json({ date: today(), range: JSON.parse(db.getSetting("study_range") ?? "null"), studies: db.listStudies() });
+
+    if (path === "/api/studies/range" && method === "PUT") {
+      const b = await body(req);
+      const from = str(b.from, 10);
+      const to = str(b.to, 10);
+      if (!isDate(from) || !isDate(to)) return json({ error: "기간을 골라 주세요" }, 400);
+      if (from > to) return json({ error: "끝 날짜가 시작 날짜보다 앞입니다" }, 400);
+      if (to > addDays(from, STUDY_RANGE_DAYS - 1)) return json({ error: `기간은 ${STUDY_RANGE_DAYS}일까지 정할 수 있습니다` }, 400);
+      db.setSetting("study_range", JSON.stringify({ from, to }));
+      return json({ from, to });
+    }
 
     if (path === "/api/studies" && method === "POST") {
       const f = studyFields(await body(req));

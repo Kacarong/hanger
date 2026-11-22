@@ -85,12 +85,12 @@
 
       <div id="tab-studies" hidden>
         <div class="stats" id="study-stats"></div>
-        <form class="plan-add study-add" id="study-add">
-          <input class="input" type="date" id="study-date" aria-label="공부할 날짜" required>
-          <input class="input course" id="study-course" list="study-courses" placeholder="과목" maxlength="100">
-          <input class="input" id="study-title" placeholder="공부할 내용" maxlength="200">
-          <button class="btn primary" type="submit"><span data-icon="plus"></span>추가</button>
-        </form>
+        <div class="study-range">
+          <span class="muted">기간</span>
+          <input class="input" type="date" id="study-from" aria-label="공부 시작 날짜">
+          <span class="muted">~</span>
+          <input class="input" type="date" id="study-to" aria-label="공부 끝 날짜">
+        </div>
         <datalist id="study-courses"></datalist>
         <div id="study-list"></div>
       </div>
@@ -172,8 +172,8 @@
   <form method="dialog" id="exam-form">
     <h2 id="exam-dialog-title">새 시험</h2>
     <div class="row">
-      <label>시험 이름<input class="input" id="exam-title" maxlength="200" required></label>
       <label>과목<input class="input" id="exam-course" maxlength="100"></label>
+      <label>시험 이름<input class="input" id="exam-title" maxlength="200" placeholder="중간고사, 기말고사 …" required></label>
     </div>
     <div class="row">
       <label>날짜<input class="input" type="date" id="exam-date"></label>
@@ -182,6 +182,17 @@
     <label>장소<input class="input" id="exam-place" maxlength="200"></label>
     <label>시험 범위<textarea class="input" id="exam-scope" maxlength="5000" rows="3"></textarea></label>
     <label>메모<textarea class="input" id="exam-note" maxlength="5000" rows="2"></textarea></label>
+    <fieldset class="colors" id="exam-colors">
+      <legend>카드 색</legend>
+      <label title="없음"><input type="radio" name="exam-color" value="" aria-label="없음"><span class="swatch none"></span></label>
+      <label title="빨강"><input type="radio" name="exam-color" value="red" aria-label="빨강"><span class="swatch c-red"></span></label>
+      <label title="주황"><input type="radio" name="exam-color" value="orange" aria-label="주황"><span class="swatch c-orange"></span></label>
+      <label title="노랑"><input type="radio" name="exam-color" value="amber" aria-label="노랑"><span class="swatch c-amber"></span></label>
+      <label title="초록"><input type="radio" name="exam-color" value="green" aria-label="초록"><span class="swatch c-green"></span></label>
+      <label title="파랑"><input type="radio" name="exam-color" value="blue" aria-label="파랑"><span class="swatch c-blue"></span></label>
+      <label title="보라"><input type="radio" name="exam-color" value="purple" aria-label="보라"><span class="swatch c-purple"></span></label>
+      <label title="분홍"><input type="radio" name="exam-color" value="pink" aria-label="분홍"><span class="swatch c-pink"></span></label>
+    </fieldset>
     <span class="error" id="exam-msg"></span>
     <div class="foot"><button class="btn" type="button" data-close>취소</button><button class="btn primary" value="ok">저장</button></div>
   </form>

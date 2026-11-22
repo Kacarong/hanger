@@ -382,38 +382,44 @@ span.note-fold { cursor: default; }
 .exam-head .pill { margin-top: 1px; }
 .exam-text { display: grid; grid-template-columns: 34px 1fr; gap: 8px; font-size: 13px; }
 .exam-text p { margin: 0; white-space: pre-wrap; color: var(--fg-2); }
-.exam-progress { display: flex; align-items: center; gap: 10px; font-size: 12px; color: var(--muted); }
-.exam-progress .bar-track { flex: 1; max-width: 280px; height: 4px; border-radius: 2px; background: var(--line); overflow: hidden; }
-.exam-progress .bar-fill { height: 100%; background: var(--green); }
+/* Exam card colors: a stripe on the left and a faint tint (the swatches in the exam dialog use the same --c). */
+.c-red { --c: #f07070; } .c-orange { --c: var(--orange); } .c-amber { --c: var(--amber); } .c-green { --c: var(--green); }
+.c-blue { --c: var(--blue); } .c-purple { --c: #b58cf5; } .c-pink { --c: #f08cc4; }
+.exam[class*=" c-"] { border-left: 4px solid var(--c); background: linear-gradient(90deg, color-mix(in srgb, var(--c) 10%, transparent), transparent 70%), var(--panel-2); }
+.exam[class*=" c-"] .exam-head h2 { color: var(--c); }
+.colors { display: flex; flex-wrap: wrap; gap: 8px; margin: 0; padding: 0; border: 0; }
+.colors legend { margin-bottom: 7px; padding: 0; color: var(--fg-2); font-size: 14px; font-weight: 500; }
+.colors label { display: block; cursor: pointer; }
+.colors input { position: absolute; opacity: 0; pointer-events: none; }
+.swatch { display: block; width: 28px; height: 28px; border-radius: 50%; background: var(--c); box-shadow: inset 0 0 0 1px rgba(255,255,255,.12); }
+.swatch.none { background: var(--panel-2); box-shadow: inset 0 0 0 1.5px var(--line-2); }
+.colors input:checked + .swatch { outline: 2px solid var(--fg); outline-offset: 2px; }
+.colors input:focus-visible + .swatch { outline: 2px solid var(--blue); outline-offset: 2px; }
 .plan { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--line); }
 .plan li { display: flex; align-items: center; gap: 10px; min-height: 36px; padding: 2px 0; border-bottom: 1px solid var(--line); }
-.plan .plan-date { flex: none; width: 92px; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
 .plan .plan-title { flex: 1; min-width: 0; overflow-wrap: anywhere; }
 .plan li.done .plan-title { color: var(--muted); text-decoration: line-through; }
-.plan li.today .plan-date { color: var(--blue); }
-.plan li.late .plan-date { color: var(--orange); }
 .plan li .btn { opacity: .35; }
 .plan li:hover .btn { opacity: 1; }
 .plan-add { display: flex; gap: 8px; }
-.plan-add input[type="date"] { width: 150px; flex: none; }
 .plan-add input:not([type]) { flex: 1; min-width: 0; }
 .exam-past { margin: 8px 0 24px; }
 .exam-past summary { display: flex; align-items: center; gap: 6px; padding: 8px 16px; color: var(--muted); cursor: pointer; list-style: none; }
 .exam-past summary::-webkit-details-marker { display: none; }
 .exam-past summary svg { stroke-width: 2.4; transition: transform .12s; }
 .exam-past[open] summary svg { transform: rotate(90deg); }
-.study-add { margin: 16px; }
-.study-add input.course { flex: 0 0 160px; }
+.study-range { display: flex; align-items: center; gap: 8px; margin: 16px; }
+.study-range input { width: 150px; color-scheme: dark; }
+.study-add input.course { flex: 0 0 140px; }
 .study-day .plan .pill { flex: none; }
 .exam-mark { display: inline-grid; place-items: center; width: 15px; color: var(--orange); }
 .cal-item.exam { color: var(--orange); font-weight: 500; }
 .cal-item.exam .dot { background: var(--orange); }
 @media (max-width: 860px) {
   .exam { margin: 12px; padding: 12px; }
-  .plan .plan-date { width: 78px; }
   .plan li .btn { opacity: 1; }
   .plan-add { flex-wrap: wrap; }
-  .plan-add input[type="date"] { width: 100%; }
-  .study-add { margin: 12px; }
+  .study-range { margin: 12px; }
+  .study-range input { flex: 1; min-width: 0; width: auto; }
   .study-add input.course { flex: 1 1 100%; }
 }
