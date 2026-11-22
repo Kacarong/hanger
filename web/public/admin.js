@@ -1603,11 +1603,22 @@ async function init() {
   showTab();
   // 화면을 열어 둔 채 0시가 지나면 날짜가 걸린 화면을 다시 불러온다: 그날 공부가 할 일·과제의 오늘 할 일에 들어가고
   // (서버가 이 조회 때 넣는다) "오늘"·"지난 일"도 새 날짜로 바뀐다.
+  // 불러오기에 실패하면(절전에서 막 깨어나 연결이 아직 없을 때 등) 날짜를 그대로 두어 다음 주기에 다시 한다.
   let shownDay = seoulToday();
-  setInterval(() => {
-    if (seoulToday() === shownDay) return;
-    shownDay = seoulToday();
-    if (["today", "tasks", "studies", "calendar"].includes(currentTab())) tabs[currentTab()].load().catch(showError);
+  let dayLoading = false;
+  setInterval(async () => {
+    const day = seoulToday();
+    if (day === shownDay || dayLoading) return;
+    if (!["today", "tasks", "studies", "calendar"].includes(currentTab())) return void (shownDay = day); // 탭을 옮기면 showTab이 불러온다
+    dayLoading = true;
+    try {
+      await tabs[currentTab()].load();
+      shownDay = day;
+    } catch (err) {
+      showError(err);
+    } finally {
+      dayLoading = false;
+    }
   }, 30_000);
 }
 
