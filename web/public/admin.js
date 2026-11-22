@@ -613,6 +613,7 @@ async function loadToday() {
     stat("오늘", String(t.today.length), ""),
     stat("다가오는 과제", String(t.upcoming.length), "3일 안"),
     stat("오늘 끝낸 일", String(t.doneToday.length), ""),
+    ...(t.exams.length ? [stat("다음 시험", dday(t.date, t.exams[0].date), examName(t.exams[0]), daysBetween(t.date, t.exams[0].date) <= 3)] : []),
   );
   const q = searchText();
   const row = (x) => taskRow(x, t.date, reload, false);
@@ -793,28 +794,49 @@ function examTodayRow(e, today) {
   );
 }
 
+// 과목별 공부량: 공부 탭에 그 과목으로 적은 공부 중 끝낸 것/전체와 밀린 것. until이 있으면 그날까지 것만(시험 날까지).
+function studyCount(studies, course, today, until = null) {
+  const list = studies.filter((s) => s.course === course && (!until || s.date <= until));
+  return { total: list.length, done: list.filter((s) => s.done).length, late: list.filter((s) => !s.done && s.date < today).length };
+}
+const meter = (c) =>
+  el(
+    "div",
+    { className: "meter" },
+    el("div", { className: "meter-track" }, el("div", { className: "meter-fill", style: `width:${c.total ? Math.round((c.done / c.total) * 100) : 0}%` })),
+    el("span", { className: "meter-text", textContent: `${c.done}/${c.total}` + (c.late ? ` · 밀린 ${c.late}` : "") }),
+  );
+// Stat cards for the next exams: the course (or name) with a big D-N.
+const examStats = (ahead, today, studies) =>
+  ahead.slice(0, 4).map((e) => {
+    const c = e.course ? studyCount(studies, e.course, today, e.date) : null;
+    return stat(examName(e), dday(today, e.date), [dayLabel(e.date), c && c.total ? `공부 ${c.done}/${c.total}` : ""].filter(Boolean).join(" · "), daysBetween(today, e.date) <= 3);
+  });
+
 async function loadExams() {
-  const { date: today, exams } = await call("/api/exams");
+  const [{ date: today, exams }, { studies }] = await Promise.all([call("/api/exams"), call("/api/studies")]);
   const reload = () => loadExams().catch(showError);
   const q = searchText();
   const shown = exams.filter((e) => !q || [e.title, e.course, e.place, e.scope, e.note].join("\n").toLowerCase().includes(q));
   const ahead = exams.filter((e) => e.date && e.date >= today);
-  $("exam-stats").replaceChildren(stat("다가오는 시험", String(ahead.length), ahead.length ? `${dday(today, ahead[0].date)} · ${examName(ahead[0])}` : ""));
+  $("exam-stats").replaceChildren(...(ahead.length ? examStats(ahead, today, studies) : [stat("다가오는 시험", "0", "")]));
   const upcoming = shown.filter((e) => !e.date || e.date >= today);
   const past = shown.filter((e) => e.date && e.date < today).reverse(); // the latest first
-  const out = upcoming.map((e) => examCard(e, today, reload));
+  const card = (e) => examCard(e, today, reload, studies);
+  const out = upcoming.map(card);
   if (past.length) {
-    const fold = el("details", { className: "exam-past", open: pastOpen || !!q, ontoggle() { if (!q) pastOpen = this.open; } }, el("summary", {}, icon("right"), `지난 시험 · ${past.length}`), ...past.map((e) => examCard(e, today, reload)));
+    const fold = el("details", { className: "exam-past", open: pastOpen || !!q, ontoggle() { if (!q) pastOpen = this.open; } }, el("summary", {}, icon("right"), `지난 시험 · ${past.length}`), ...past.map(card));
     out.push(fold);
   }
   if (!shown.length) out.push(el("p", { className: "notice", textContent: q ? "검색 결과가 없습니다." : "아직 시험이 없습니다." }));
   $("exam-list").replaceChildren(...out);
 }
 
-function examCard(e, today, reload) {
+function examCard(e, today, reload, studies) {
   const n = e.date ? daysBetween(today, e.date) : null;
   const badge = n === null ? pill("날짜 미정", "gray") : n < 0 ? pill("끝남", "gray") : pill(dday(today, e.date), n <= 3 ? "orange" : n <= 7 ? "amber" : "blue");
   const when = e.date ? dayLabel(e.date) + (e.time ? " " + e.time : "") : "날짜 미정";
+  const count = e.course ? studyCount(studies, e.course, today, e.date) : null; // what was written on the 공부 tab for it
   const remove = () => confirm(`"${[e.course, e.title].filter(Boolean).join(" ")}" 시험을 지울까요?`) && call(`/api/exams/${e.id}`, { method: "DELETE" }).then(reload, showError);
   return el(
     "section",
@@ -829,6 +851,7 @@ function examCard(e, today, reload) {
     ),
     e.scope ? el("div", { className: "exam-text" }, el("span", { className: "muted", textContent: "범위" }), el("p", { textContent: e.scope })) : null,
     e.note ? el("div", { className: "exam-text" }, el("span", { className: "muted", textContent: "메모" }), el("p", { textContent: e.note })) : null,
+    count?.total ? el("div", { className: "exam-text" }, el("a", { className: "muted", href: "#studies", textContent: "공부" }), meter(count)) : null,
   );
 }
 
@@ -841,7 +864,7 @@ const studyDrafts = new Map(); // date → { course, title } typed into that day
 let studyFocus = null; // the day whose card gets the focus back after the list is redrawn
 
 async function loadStudies() {
-  const { date: today, range, studies } = await call("/api/studies");
+  const [{ date: today, range, studies }, { exams }] = await Promise.all([call("/api/studies"), call("/api/exams")]);
   const reload = () => loadStudies().catch(showError);
   if (document.activeElement !== $("study-from") && document.activeElement !== $("study-to")) {
     $("study-from").value = range?.from ?? "";
@@ -855,6 +878,22 @@ async function loadStudies() {
     stat("오늘 공부", `${todays.filter((s) => s.done).length}/${todays.length}`, ""),
     stat("앞으로 할 공부", String(ahead.length), ""),
     stat("밀린 공부", String(late.length), "", late.length > 0),
+    ...examStats(exams.filter((e) => e.date && e.date >= today), today, studies).slice(0, 1),
+  );
+  // 과목별: every course written on the 공부 tab, with how much of it is done and its next exam.
+  const courses = [...new Set(studies.map((s) => s.course).filter(Boolean))].sort((a, b) => a.localeCompare(b, "ko"));
+  $("study-courses-box").hidden = !courses.length;
+  $("study-by-course").replaceChildren(
+    ...courses.map((c) => {
+      const next = exams.find((e) => e.course === c && e.date && e.date >= today);
+      return el(
+        "li",
+        {},
+        el("span", { className: "course-name", textContent: c }),
+        meter(studyCount(studies, c, today)),
+        next ? pill(`시험 ${dday(today, next.date)}`, daysBetween(today, next.date) <= 3 ? "orange" : "amber") : el("span"),
+      );
+    }),
   );
   const q = searchText();
   const shown = studies.filter((s) => !q || [s.title, s.course].join("\n").toLowerCase().includes(q));
@@ -866,7 +905,13 @@ async function loadStudies() {
     el(
       "section",
       { className: "exam study-day" + (d < today ? " past" : "") },
-      el("div", { className: "exam-head" }, el("div", { className: "grow" }, el("h2", { textContent: dayLabel(d) })), d === today ? pill("오늘", "blue") : null),
+      el(
+        "div",
+        { className: "exam-head" },
+        el("div", { className: "grow" }, el("h2", { textContent: dayLabel(d) })),
+        ...exams.filter((e) => e.date === d).map((e) => pill(`시험 · ${examName(e)}`, "orange")),
+        d === today ? pill("오늘", "blue") : null,
+      ),
       list.length ? el("ul", { className: "plan" }, ...list.map((s) => studyRow(s, today, reload))) : null,
       studyAdd(d),
     );

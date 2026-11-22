@@ -412,6 +412,16 @@ span.note-fold { cursor: default; }
 .study-range input { width: 150px; color-scheme: dark; }
 .study-add input.course { flex: 0 0 140px; }
 .study-day .plan .pill { flex: none; }
+.meter { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.meter-track { flex: 1; height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; }
+.meter-fill { height: 100%; background: var(--green); }
+.meter-text { flex: none; color: var(--fg-2); font-size: 12px; font-variant-numeric: tabular-nums; }
+.study-courses-box { margin: 16px; padding: 10px 16px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel-2); }
+.study-courses-box summary { cursor: pointer; color: var(--fg-2); font-size: 13px; font-weight: 500; }
+.by-course { list-style: none; margin: 8px 0 2px; padding: 0; display: grid; gap: 8px; }
+.by-course li { display: grid; grid-template-columns: 120px 1fr 80px; align-items: center; gap: 12px; font-size: 13px; }
+.by-course .course-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.by-course .pill { justify-self: end; }
 .exam-mark { display: inline-grid; place-items: center; width: 15px; color: var(--orange); }
 .cal-item.exam { color: var(--orange); font-weight: 500; }
 .cal-item.exam .dot { background: var(--orange); }
@@ -420,6 +430,8 @@ span.note-fold { cursor: default; }
   .plan li .btn { opacity: 1; }
   .plan-add { flex-wrap: wrap; }
   .study-range { margin: 12px; }
+  .study-courses-box { margin: 12px; padding: 10px 12px; }
+  .by-course li { grid-template-columns: 84px 1fr auto; gap: 8px; }
   .study-range input { flex: 1; min-width: 0; width: auto; }
   .study-add input.course { flex: 1 1 100%; }
 }
