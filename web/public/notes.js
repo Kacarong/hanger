@@ -301,7 +301,7 @@ export function createEditor(root, onChange, opts = {}) {
   function richField(obj, { textKey = "text", richKey = "rich", placeholder = "", field = null, cls = "", onText, onKey, sync } = {}) {
     const wrap = el("div", { className: `blk-field ${cls}` });
     const back = el("div", { className: "blk-rich", ariaHidden: "true" });
-    const ta = el("textarea", { className: "blk-text", rows: 1, value: obj[textKey] ?? "", placeholder, readOnly, spellcheck: true });
+    const ta = el("textarea", { className: "blk-text", rows: 1, value: obj[textKey] ?? "", placeholder, readOnly, spellcheck: false });
     if (field) ta.dataset.field = field;
     const paint = () => {
       const has = !!obj[richKey];
