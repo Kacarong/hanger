@@ -1,5 +1,6 @@
 import { Database } from "bun:sqlite";
 import { afterAll, beforeAll, expect, test } from "bun:test";
+import { createDecipheriv, createECDH, createHmac, createPublicKey, randomBytes, verify } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -25,6 +26,8 @@ let calendarFails = false;
 let grantRevoked = false; // the refresh token was revoked or expired at Google
 const eventQueries: URLSearchParams[] = [];
 let nextId = 1;
+// A stand-in push service: what each POST /push/<name> brought (name "gone" answers 410 like an expired subscription).
+const pushes: { name: string; headers: Headers; body: Buffer }[] = [];
 let fake: ReturnType<typeof Bun.serve>;
 
 function idToken(email: string) {
@@ -56,6 +59,11 @@ beforeAll(() => {
         if (form.get("grant_type") === "refresh_token" && grantRevoked) return Response.json({ error: "invalid_grant" }, { status: 400 });
         const refresh = form.get("grant_type") === "authorization_code" && lastPrompt === "consent" ? { refresh_token: "rt" } : {};
         return Response.json({ access_token: "at", expires_in: 3600, ...refresh, id_token: idToken(loginEmail), scope: grantedScope });
+      }
+      if (p.startsWith("/push/") && req.method === "POST") {
+        const name = p.slice(6);
+        pushes.push({ name, headers: req.headers, body: Buffer.from(await req.arrayBuffer()) });
+        return new Response(null, { status: name === "gone" ? 410 : 201 });
       }
       if (p.startsWith("/thumbs/")) {
         if (req.headers.get("Authorization") !== "Bearer at") return new Response("no", { status: 403 });
@@ -183,7 +191,7 @@ beforeAll(() => {
 
 afterAll(() => fake.stop(true));
 
-function makeApp(opts: { googleEnabled?: boolean; now?: () => Date; notionApi?: string } = {}) {
+function makeApp(opts: { googleEnabled?: boolean; now?: () => Date; notionApi?: string; baseUrl?: string } = {}) {
   const dataDir = mkdtempSync(join(tmpdir(), "folio-test-"));
   const db = openDb(join(dataDir, "t.db"));
   const google = createGoogle(
@@ -198,7 +206,7 @@ function makeApp(opts: { googleEnabled?: boolean; now?: () => Date; notionApi?: 
     db,
   );
   const fetch = createApp(
-    { baseUrl: "https://kacarong.kr", adminEmail: "owner@example.com", dataDir, googleEnabled: opts.googleEnabled ?? true, now: opts.now, notionApi: opts.notionApi, notionDebounceMs: 0, gcalDebounceMs: 0 },
+    { baseUrl: opts.baseUrl ?? "https://kacarong.kr", adminEmail: "owner@example.com", dataDir, googleEnabled: opts.googleEnabled ?? true, now: opts.now, notionApi: opts.notionApi, notionDebounceMs: 0, gcalDebounceMs: 0 },
     db,
     google,
   );
@@ -207,7 +215,7 @@ function makeApp(opts: { googleEnabled?: boolean; now?: () => Date; notionApi?: 
     if (init.cookie) headers.set("Cookie", init.cookie);
     return fetch(new Request("https://kacarong.kr" + path, { ...init, headers }));
   };
-  return { call, db, notion: fetch.notion, gcal: fetch.gcal, moveNotionCopies: fetch.moveNotionCopies, cleanup: () => rmSync(dataDir, { recursive: true, force: true }) };
+  return { call, db, notion: fetch.notion, gcal: fetch.gcal, notifier: fetch.notifier, moveNotionCopies: fetch.moveNotionCopies, cleanup: () => rmSync(dataDir, { recursive: true, force: true }) };
 }
 
 async function login(call: ReturnType<typeof makeApp>["call"], code = "good-code") {
@@ -755,6 +763,116 @@ test("구글 캘린더 쓰기: 일정 만들기·고치기·지우기, 할 일·
   } finally {
     grantedScope = FULL_SCOPE;
     madeEvents.clear();
+    cleanup();
+  }
+});
+
+// The receiving browser's side of RFC 8291, to check what the push service got.
+function decryptPush(body: Buffer, ua: ReturnType<typeof createECDH>, auth: Buffer): unknown {
+  const hmac = (k: Buffer, d: Buffer) => createHmac("sha256", k).update(d).digest();
+  const salt = body.subarray(0, 16);
+  const idlen = body[20]!;
+  const asPublic = body.subarray(21, 21 + idlen);
+  const ikm = hmac(hmac(auth, ua.computeSecret(asPublic)), Buffer.concat([Buffer.from("WebPush: info\0"), ua.getPublicKey(), asPublic, Buffer.from([1])]));
+  const prk = hmac(salt, ikm);
+  const decipher = createDecipheriv("aes-128-gcm", hmac(prk, Buffer.from("Content-Encoding: aes128gcm\0\x01")).subarray(0, 16), hmac(prk, Buffer.from("Content-Encoding: nonce\0\x01")).subarray(0, 12));
+  const rest = body.subarray(21 + idlen);
+  decipher.setAuthTag(rest.subarray(rest.length - 16));
+  const plain = Buffer.concat([decipher.update(rest.subarray(0, rest.length - 16)), decipher.final()]);
+  expect(plain[plain.length - 1]).toBe(2); // last-record padding delimiter
+  return JSON.parse(plain.subarray(0, -1).toString());
+}
+
+test("알림: 기기 구독 → 아침 요약·과제 마감 전·시험 전날을 제때 한 번씩, 웹 푸시는 VAPID 서명 + 암호화", async () => {
+  let clock = new Date("2026-11-22T07:59:00+09:00");
+  const { call, db, notifier, cleanup } = makeApp({ now: () => clock, googleEnabled: false });
+  pushes.length = 0;
+  try {
+    db.setSetting("password_hash", await Bun.password.hash("correct horse battery"));
+    const { cookie } = await passwordLogin(call, "correct horse battery");
+    const req = (path: string, method = "GET", b?: object) => call(path, { method, cookie, headers: JSON_ORIGIN, body: b ? JSON.stringify(b) : undefined });
+    const info = (await (await req("/api/notify")).json()) as { settings: object; publicKey: string; devices: number };
+    expect(info).toMatchObject({ settings: { morning: "08:00", homework: true, exam: true }, devices: 0 });
+    expect(Buffer.from(info.publicKey, "base64url")).toHaveLength(65);
+
+    // A browser subscribes (its own key pair and auth secret).
+    const ua = createECDH("prime256v1");
+    ua.generateKeys();
+    const auth = randomBytes(16);
+    const sub = { endpoint: `${fake.url}push/phone`, keys: { p256dh: ua.getPublicKey().toString("base64url"), auth: auth.toString("base64url") } };
+    expect((await req("/api/push/subscribe", "POST", { ...sub, endpoint: "http://insecure.example/x" })).status).toBe(400);
+    expect((await req("/api/push/subscribe", "POST", { ...sub, keys: { ...sub.keys, auth: "short" } })).status).toBe(400);
+    expect((await req("/api/push/subscribe", "POST", sub)).status).toBe(201);
+    expect((await req("/api/push/subscribe", "POST", { endpoint: `${fake.url}push/gone`, keys: sub.keys })).status).toBe(201);
+
+    await req("/api/tasks", "POST", { title: "운동", due_date: "2026-11-22" });
+    await req("/api/tasks", "POST", { kind: "과제", course: "수리학", title: "레포트", due_date: "2026-11-23", due_time: "23:00" });
+    await req("/api/tasks", "POST", { title: "지난 일", due_date: "2026-11-20" });
+    await req("/api/exams", "POST", { title: "중간고사", course: "토질역학", date: "2026-11-23", time: "10:00", place: "301호" });
+
+    await notifier.tick();
+    expect(pushes).toHaveLength(0); // 07:59: nothing yet
+    clock = new Date("2026-11-22T08:00:30+09:00");
+    await notifier.tick();
+    await notifier.tick(); // only once
+    expect(pushes.map((p) => p.name).sort()).toEqual(["gone", "phone"]);
+    expect(db.pushSubs().map((s) => s.endpoint)).toEqual([sub.endpoint]); // the 410 one is dropped
+    const phone = pushes.find((p) => p.name === "phone")!;
+    expect(phone.headers.get("Content-Encoding")).toBe("aes128gcm");
+    expect(Number(phone.headers.get("TTL"))).toBeGreaterThan(0);
+    const morning = decryptPush(phone.body, ua, auth) as { id: number; title: string; body: string; url: string };
+    expect(morning).toMatchObject({ title: "오늘 할 일 1개 · 지난 일 1개", url: "/admin#today" });
+    expect(morning.body).toContain("· 운동");
+    expect(morning.body).toContain("시험 D-1 · 토질역학");
+    expect(morning.body).toContain("내일 마감 과제 1개");
+    // VAPID: a JWT for the push service's origin, signed with the key the browser subscribed with.
+    const m = phone.headers.get("Authorization")!.match(/^vapid t=([^,]+), k=(.+)$/)!;
+    expect(m[2]).toBe(info.publicKey);
+    const [h, pl, sig] = m[1]!.split(".");
+    expect(JSON.parse(Buffer.from(pl!, "base64url").toString())).toMatchObject({ aud: new URL(fake.url).origin, sub: "https://kacarong.kr" });
+    const pub = Buffer.from(info.publicKey, "base64url");
+    const key = createPublicKey({ key: { kty: "EC", crv: "P-256", x: pub.subarray(1, 33).toString("base64url"), y: pub.subarray(33).toString("base64url") }, format: "jwk" });
+    expect(verify("sha256", Buffer.from(`${h}.${pl}`), { key, dsaEncoding: "ieee-p1363" }, Buffer.from(sig!, "base64url"))).toBe(true);
+
+    // Pages that show notifications themselves read the same list.
+    expect(((await (await req("/api/notifications")).json()) as { id: number }[]).map((n) => n.id)).toEqual([morning.id]);
+    expect(await (await req(`/api/notifications?after=${morning.id - 1}`)).json()).toMatchObject([{ title: morning.title }]);
+    expect(await (await req(`/api/notifications?after=${morning.id}`)).json()).toEqual([]);
+
+    // 20:00 the evening before: the 과제 due tomorrow and tomorrow's exam.
+    pushes.length = 0;
+    clock = new Date("2026-11-22T20:01:00+09:00");
+    await notifier.tick();
+    const evening = pushes.map((p) => decryptPush(p.body, ua, auth) as { title: string; body: string });
+    expect(evening.map((n) => n.title).sort()).toEqual(["내일 마감 과제 1개", "내일 시험 · 토질역학"]);
+    expect(evening.find((n) => n.title.startsWith("내일 시험"))!.body).toContain("토질역학 중간고사 · 10:00 · 301호");
+    // An hour before a deadline with a time.
+    pushes.length = 0;
+    clock = new Date("2026-11-23T22:00:00+09:00");
+    await notifier.tick();
+    expect(pushes.map((p) => (decryptPush(p.body, ua, auth) as { body: string }).body)).toEqual(["[수리학] 레포트 · 23:00까지"]);
+    // Long past its time (server was down): skipped.
+    pushes.length = 0;
+    clock = new Date("2026-11-24T10:30:00+09:00");
+    await notifier.tick();
+    expect(pushes).toHaveLength(0);
+
+    // Turned off: nothing; the test button still goes out.
+    expect((await req("/api/notify", "PUT", { morning: "25:00" })).status).toBe(400);
+    expect(await (await req("/api/notify", "PUT", { morning: "", homework: false, exam: false })).json()).toEqual({ morning: "", homework: false, exam: false });
+    clock = new Date("2026-11-25T08:00:00+09:00");
+    await notifier.tick();
+    expect(pushes).toHaveLength(0);
+    await req("/api/notify/test", "POST");
+    expect(pushes).toHaveLength(1);
+    await req("/api/push/unsubscribe", "POST", { endpoint: sub.endpoint });
+    expect(db.pushSubs()).toEqual([]);
+
+    const sw = await call("/sw.js");
+    expect(sw.headers.get("Content-Type")).toContain("javascript");
+    expect(await sw.text()).toContain("showNotification");
+  } finally {
+    pushes.length = 0;
     cleanup();
   }
 });

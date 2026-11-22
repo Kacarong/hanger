@@ -34,6 +34,7 @@ const ICONS = {
   down: '<path stroke-width="2.4" d="m6 9 6 6 6-6"/>',
   exam: '<rect x="5" y="4" width="14" height="17" rx="2"/><path d="M9 4V2.5h6V4M9 10h6M9 14h6M9 18h3"/>',
   book: '<path d="M4 4.5A1.5 1.5 0 0 1 5.5 3H20v15H5.5A1.5 1.5 0 0 0 4 19.5z"/><path d="M4 19.5A1.5 1.5 0 0 0 5.5 21H20v-3"/>',
+  bell: '<path d="M6 16V11a6 6 0 0 1 12 0v5l1.5 2h-15z"/><path d="M10 20.5a2 2 0 0 0 4 0"/>',
   eye: '<path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/>',
 };
 const icon = (name) => {
@@ -1043,6 +1044,110 @@ function updateOverdueBadge(n) {
   $("nav-overdue").textContent = n;
 }
 
+// 알림: 서버가 정한 때(아침 요약, 과제 마감 전, 시험 전날)에 보내는 알림을 이 기기에서 받는다.
+// 웹 푸시가 되면(휴대폰 앱·브라우저) 서비스 워커가 받아 창이 닫혀 있어도 뜨고, 안 되면(PC 프로그램) 이 화면이 1분마다
+// 새 알림을 물어 직접 띄운다(notifyMode "page", 창이 열려 있는 동안만).
+// PC 프로그램(Tauri) 안이면 프로그램이 윈도우 알림을 띄운다(WebView2 는 웹 알림을 막는다).
+const tauriNotify = window.__TAURI__?.notification ?? null;
+const pushSupported = () => !tauriNotify && "serviceWorker" in navigator && "PushManager" in window && "Notification" in window;
+const notifyMode = () => storage(() => localStorage.getItem("notifyMode")) || "";
+let notifyPoll = null;
+
+async function pushSubscription() {
+  const reg = await navigator.serviceWorker.getRegistration("/");
+  return reg ? reg.pushManager.getSubscription() : null;
+}
+
+// 이 기기의 알림 상태 글.
+async function notifyStateText() {
+  if (tauriNotify) return notifyMode() === "page" ? "켜짐 · 프로그램이 켜져 있는 동안(최소화해도) 받습니다." : "꺼짐";
+  if (!("Notification" in window)) return "이 기기(브라우저)는 알림을 지원하지 않습니다.";
+  if (Notification.permission === "denied") return "알림이 차단돼 있습니다. 브라우저·앱 설정에서 이 사이트 알림을 허용해 주세요.";
+  if (notifyMode() === "page" && Notification.permission === "granted") return "켜짐 · 이 화면이 열려 있는 동안 받습니다.";
+  if (notifyMode() === "push" && pushSupported() && (await pushSubscription().catch(() => null))) return "켜짐 · 앱·브라우저가 닫혀 있어도 받습니다.";
+  return "꺼짐";
+}
+
+async function openNotify() {
+  const { settings } = await call("/api/notify");
+  $("notify-morning-on").checked = !!settings.morning;
+  $("notify-morning").value = settings.morning || "08:00";
+  $("notify-homework").checked = settings.homework;
+  $("notify-exam").checked = settings.exam;
+  $("notify-msg").textContent = "";
+  await showNotifyState();
+  $("notify-dialog").showModal();
+}
+
+async function showNotifyState() {
+  const text = await notifyStateText();
+  $("notify-state").textContent = text;
+  $("notify-toggle").textContent = text.startsWith("켜짐") ? "이 기기 알림 끄기" : "이 기기에서 알림 받기";
+  $("notify-toggle").hidden = !tauriNotify && !("Notification" in window);
+}
+
+async function notifyOn() {
+  if (tauriNotify) {
+    if (!(await tauriNotify.isPermissionGranted()) && (await tauriNotify.requestPermission()) !== "granted") throw new Error("윈도우 설정에서 알림이 꺼져 있습니다.");
+    storage(() => localStorage.setItem("notifyMode", "page"));
+    return startNotifyPoll();
+  }
+  if ((await Notification.requestPermission()) !== "granted") throw new Error("알림을 허용하지 않아 켤 수 없습니다.");
+  if (pushSupported()) {
+    try {
+      const { publicKey } = await call("/api/notify");
+      const reg = await navigator.serviceWorker.register("/sw.js", { scope: "/" });
+      await navigator.serviceWorker.ready;
+      const sub = (await reg.pushManager.getSubscription()) ?? (await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: publicKey }));
+      await call("/api/push/subscribe", { method: "POST", body: sub.toJSON() });
+      storage(() => localStorage.setItem("notifyMode", "push"));
+      return;
+    } catch (e) {
+      console.warn("웹 푸시를 쓸 수 없어 화면이 직접 알림을 띄웁니다:", e);
+    }
+  }
+  storage(() => localStorage.setItem("notifyMode", "page"));
+  startNotifyPoll();
+}
+
+async function notifyOff() {
+  if (pushSupported()) {
+    const sub = await pushSubscription().catch(() => null);
+    if (sub) {
+      await call("/api/push/unsubscribe", { method: "POST", body: { endpoint: sub.endpoint } });
+      await sub.unsubscribe();
+    }
+  }
+  storage(() => localStorage.removeItem("notifyMode"));
+  clearInterval(notifyPoll);
+  notifyPoll = null;
+}
+
+// notifyMode "page": 1분마다 새 알림을 물어 직접 띄운다. 처음에는 지금까지의 마지막 번호만 기억한다.
+async function startNotifyPoll() {
+  if (notifyPoll) return;
+  let last = null;
+  const check = async () => {
+    if (!tauriNotify && Notification.permission !== "granted") return;
+    const list = await call(`/api/notifications?after=${last ?? -1}`);
+    if (last === null) return void (last = list[0]?.id ?? 0);
+    for (const n of list) {
+      last = n.id;
+      if (tauriNotify) {
+        tauriNotify.sendNotification({ title: n.title, body: n.body });
+        continue;
+      }
+      const shown = new Notification(n.title, { body: n.body, icon: "/static/icon-192.png", tag: `n${n.id}` });
+      shown.onclick = () => {
+        window.focus();
+        location.hash = new URL(n.url, location.origin).hash;
+      };
+    }
+  };
+  notifyPoll = setInterval(() => check().catch(() => {}), 60_000);
+  await check().catch(() => {});
+}
+
 // 노트: 고치면 잠깐 뒤 저장한다. 화면을 옮기거나 창을 닫을 때도 남은 것을 저장한다.
 // 저장하지 못한 초안은 버리지 않는다: 저장이 실패하면 다른 노트를 열지 않는다. 다른 곳(노션, 다른 탭, 오늘 화면)에서
 // 노트가 바뀌었으면(409) 블록마다 합쳐서(같은 블록을 둘 다 고쳤으면 이 화면 쪽) 다시 저장한다.
@@ -1727,6 +1832,38 @@ async function init() {
     loadCalendar().catch(showError);
   };
   $("menu-btn").onclick = () => $("main").classList.toggle("nav-open");
+  $("notify-btn").onclick = () => openNotify().catch(showError);
+  $("notify-toggle").onclick = async () => {
+    $("notify-msg").textContent = "";
+    $("notify-toggle").disabled = true;
+    try {
+      if ((await notifyStateText()).startsWith("켜짐")) await notifyOff();
+      else await notifyOn();
+    } catch (e) {
+      $("notify-msg").textContent = e.message;
+    } finally {
+      $("notify-toggle").disabled = false;
+      await showNotifyState();
+    }
+  };
+  const saveNotify = () =>
+    call("/api/notify", { method: "PUT", body: { morning: $("notify-morning-on").checked ? $("notify-morning").value : "", homework: $("notify-homework").checked, exam: $("notify-exam").checked } }).catch(
+      (e) => ($("notify-msg").textContent = e.message),
+    );
+  for (const id of ["notify-morning-on", "notify-morning", "notify-homework", "notify-exam"]) $(id).onchange = saveNotify;
+  $("notify-test").onclick = () =>
+    call("/api/notify/test", { method: "POST" }).then(
+      () => ($("notify-msg").textContent = "보냈습니다. 잠시 뒤 알림이 뜨지 않으면 이 기기 알림이 꺼져 있는 것입니다."),
+      (e) => ($("notify-msg").textContent = e.message),
+    );
+  // 이 기기가 알림을 켜 둔 상태면 이어서 받는다: 화면이 직접 띄우는 방식은 다시 묻기 시작하고,
+  // 웹 푸시는 구독을 서버에 다시 알려 둔다(서버가 지웠어도 되살아나게).
+  if (notifyMode() === "page") startNotifyPoll();
+  else if (notifyMode() === "push" && pushSupported() && Notification.permission === "granted") {
+    pushSubscription()
+      .then((sub) => sub && call("/api/push/subscribe", { method: "POST", body: sub.toJSON() }))
+      .catch(() => {});
+  }
   $("change-password").onclick = () => {
     $("pw-current-row").hidden = me.loginMethod !== "password"; // a Google login already proved who you are
     $("pw-current").required = me.loginMethod === "password";

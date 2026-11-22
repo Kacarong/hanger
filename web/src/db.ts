@@ -74,6 +74,8 @@ export const EXAM_COLORS = ["", "red", "orange", "amber", "green", "blue", "purp
 // A day's study on the 공부 tab. Kept apart from tasks so it never shows up on the calendar. When its day comes it
 // is also put in 할 일·과제 as a 오늘 할 일 task (tasks.study_id, queued = done so), checked off together with it.
 export type StudyRow = { id: number; date: string; course: string; title: string; done: number; queued: number; created_at: string };
+export type PushSubRow = { endpoint: string; p256dh: string; auth: string };
+export type NotificationRow = { id: number; title: string; body: string; url: string; created_at: string };
 export type GcalLink = { key: string; calendar_id: string; event_id: string; hash: string };
 export type StudyFields = Pick<StudyRow, "date" | "course" | "title">;
 
@@ -305,6 +307,13 @@ export function openDb(path: string) {
   // Tasks and exams this site put in the owner's Google Calendar (key "task:<id>" / "exam:<id>").
   // hash: the event body last sent, so only changed items are sent again.
   db.exec("CREATE TABLE IF NOT EXISTS gcal_links (key TEXT PRIMARY KEY, calendar_id TEXT NOT NULL, event_id TEXT NOT NULL, hash TEXT NOT NULL)");
+  // Notifications: the devices that get Web Push, what was sent (also read by pages that show notifications themselves,
+  // like the PC program), and which scheduled ones went out already.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS push_subs (endpoint TEXT PRIMARY KEY, p256dh TEXT NOT NULL, auth TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT (datetime('now')));
+    CREATE TABLE IF NOT EXISTS notifications (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, body TEXT NOT NULL, url TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT (datetime('now')));
+    CREATE TABLE IF NOT EXISTS notify_sent (key TEXT PRIMARY KEY, at TEXT NOT NULL DEFAULT (datetime('now')));
+  `);
   // A new portfolio starts with the usual sections, once; the owner may rename or delete them.
   if (!(db.query("SELECT 1 FROM settings WHERE key = 'portfolio_seeded'").get())) {
     db.transaction(() => {
@@ -349,6 +358,29 @@ export function openDb(path: string) {
 
   return {
     raw: db,
+    pushSubs(): PushSubRow[] {
+      return db.query("SELECT endpoint, p256dh, auth FROM push_subs").all() as PushSubRow[];
+    },
+    addPushSub(s: PushSubRow) {
+      db.query("INSERT OR REPLACE INTO push_subs (endpoint, p256dh, auth) VALUES (?, ?, ?)").run(s.endpoint, s.p256dh, s.auth);
+    },
+    deletePushSub(endpoint: string) {
+      db.query("DELETE FROM push_subs WHERE endpoint = ?").run(endpoint);
+    },
+    addNotification(n: { title: string; body: string; url: string }): NotificationRow {
+      db.query("DELETE FROM notifications WHERE created_at < datetime('now', '-7 days')").run();
+      return db.query("INSERT INTO notifications (title, body, url) VALUES (?, ?, ?) RETURNING *").get(n.title, n.body, n.url) as NotificationRow;
+    },
+    // Notifications after the given id from the last day (after = -1: just the newest id, nothing to show).
+    notificationsAfter(after: number): NotificationRow[] {
+      if (after < 0) return db.query("SELECT * FROM notifications ORDER BY id DESC LIMIT 1").all() as NotificationRow[];
+      return db.query("SELECT * FROM notifications WHERE id > ? AND created_at >= datetime('now', '-1 day') ORDER BY id LIMIT 20").all(after) as NotificationRow[];
+    },
+    // Marks a scheduled notification as sent; false when it already was.
+    markNotified(key: string): boolean {
+      db.query("DELETE FROM notify_sent WHERE at < datetime('now', '-30 days')").run();
+      return db.query("INSERT OR IGNORE INTO notify_sent (key) VALUES (?)").run(key).changes > 0;
+    },
     gcalLinks(): GcalLink[] {
       return db.query("SELECT * FROM gcal_links").all() as GcalLink[];
     },

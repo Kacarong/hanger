@@ -45,6 +45,7 @@
     <a class="nav-item" href="/" target="_blank"><span data-icon="globe"></span>공개 페이지</a>
 
     <div class="side-foot">
+      <button class="nav-item btn ghost" id="notify-btn" style="border:0;justify-content:flex-start"><span data-icon="bell"></span>알림 설정</button>
       <button class="nav-item btn ghost" id="change-password" style="border:0;justify-content:flex-start"><span data-icon="key"></span>비밀번호 바꾸기</button>
       <button class="nav-item btn ghost" id="logout" style="border:0;justify-content:flex-start"><span data-icon="logout"></span>로그아웃</button>
       <div class="me"><span class="avatar">KC</span><div>kacarong<small>관리자</small></div></div>
@@ -251,6 +252,23 @@
     <label>공부할 내용<input class="input" id="study-edit-title" maxlength="200" required></label>
     <span class="error" id="study-msg"></span>
     <div class="foot"><button class="btn" type="button" data-close>취소</button><button class="btn primary" value="ok">저장</button></div>
+  </form>
+</dialog>
+
+<dialog id="notify-dialog">
+  <form method="dialog" id="notify-form">
+    <h2>알림 설정</h2>
+    <div class="notify-device">
+      <div><strong>이 기기</strong><p class="muted" id="notify-state"></p></div>
+      <button class="btn" type="button" id="notify-toggle"></button>
+    </div>
+    <label class="check"><input type="checkbox" id="notify-morning-on"> 아침에 오늘 할 일 요약
+      <input class="input sm-time" type="time" id="notify-morning" aria-label="요약 받을 시간"></label>
+    <label class="check"><input type="checkbox" id="notify-homework"> 과제 마감 전날 저녁 8시 · 마감 1시간 전</label>
+    <label class="check"><input type="checkbox" id="notify-exam"> 시험 전날 저녁 8시</label>
+    <p class="muted small">알림은 알림을 켠 기기 모두에 갑니다. PC 프로그램은 프로그램이 켜져 있는 동안(최소화해도 됨) 알림을 띄웁니다.</p>
+    <span class="error" id="notify-msg"></span>
+    <div class="foot"><button class="btn" type="button" id="notify-test">테스트 알림 보내기</button><span class="grow"></span><button class="btn primary" type="button" data-close>닫기</button></div>
   </form>
 </dialog>
 

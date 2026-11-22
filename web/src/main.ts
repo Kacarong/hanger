@@ -35,6 +35,7 @@ const fetch = createApp({ baseUrl, adminEmail, dataDir, googleEnabled }, db, goo
 
 fetch.moveNotionCopies().catch((e) => console.error("노션 사본 옮기기 실패(다음 시작 때 다시):", e));
 fetch.notion.start(60_000); // look for edits in Notion every minute (and a full pass every half hour)
+fetch.notifier.start(60_000); // 알림: look every minute for notifications that are due
 fetch.gcal.start(5 * 60_000); // keep tasks/exams in Google Calendar in step (also catches note and Notion changes)
 
 const server = Bun.serve({

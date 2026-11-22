@@ -5,6 +5,7 @@ import { cleanBlocks, editRuns, richOrNone } from "./blocks";
 import { ATTACH_TARGETS, CATEGORIES, EXAM_COLORS, TASK_CATEGORIES, TASK_KINDS, type AttachedFile, type Block, type Db, type ExamFields, type FileRow, type PortfolioFields, type PortfolioItem, type StudyFields, type TaskFields } from "./db";
 import { createCalendarPush, eventWhen } from "./gcal";
 import { GoogleError, type CalendarEvent, type EventBody, type Google } from "./google";
+import { createNotifier } from "./notify";
 import { createNotionSync, NotionError } from "./notion";
 import { passwordProblem } from "./password";
 
@@ -195,6 +196,7 @@ export function createApp(cfg: AppConfig, db: Db, google: Google) {
     today,
     debounceMs: cfg.notionDebounceMs,
   });
+  const notifier = createNotifier({ db, subject: origin, now });
   const gcal = createCalendarPush({ db, google, today, enabled: cfg.googleEnabled, debounceMs: cfg.gcalDebounceMs });
 
   async function body(req: Request): Promise<Record<string, unknown>> {
@@ -548,6 +550,45 @@ ${body || `<section class="works"><p class="empty reveal">${mine ? "아직 포�
         if (!(e instanceof GoogleError)) throw e;
         return json({ tasks, exams, events: [], google: "error", error: e.message, write, calendars: [], push });
       }
+    }
+
+    // 알림: what to be told about, the devices that get Web Push, and the notifications pages show themselves.
+    if (path === "/api/notify" && method === "GET") {
+      return json({ settings: notifier.settings(), publicKey: notifier.publicKey(), devices: db.pushSubs().length });
+    }
+    if (path === "/api/notify" && method === "PUT") {
+      const b = await body(req);
+      const morning = str(b.morning, 5);
+      if (morning && !isTime(morning)) return json({ error: "시간이 올바르지 않습니다" }, 400);
+      notifier.setSettings({ morning, homework: b.homework === true, exam: b.exam === true });
+      return json(notifier.settings());
+    }
+    if (path === "/api/notify/test" && method === "POST") {
+      await notifier.deliver({ title: "kacarong 알림 테스트", body: "이 기기에서 알림을 받을 수 있습니다.", url: "/admin" });
+      return json({ ok: true });
+    }
+    if (path === "/api/push/subscribe" && method === "POST") {
+      const b = await body(req);
+      const endpoint = str(b.endpoint, 1000);
+      const keys = (b.keys ?? {}) as Record<string, unknown>;
+      const p256dh = str(keys.p256dh, 200);
+      const auth = str(keys.auth, 100);
+      // Push services are https; plain http only on this machine (tests).
+      const ep = URL.canParse(endpoint) ? new URL(endpoint) : null;
+      if (!ep || !(ep.protocol === "https:" || (ep.protocol === "http:" && ["localhost", "127.0.0.1"].includes(ep.hostname))) || Buffer.from(p256dh, "base64url").length !== 65 || Buffer.from(auth, "base64url").length !== 16) {
+        return json({ error: "알림 구독 정보가 올바르지 않습니다" }, 400);
+      }
+      db.addPushSub({ endpoint, p256dh, auth });
+      return json({ ok: true }, 201);
+    }
+    if (path === "/api/push/unsubscribe" && method === "POST") {
+      db.deletePushSub(str((await body(req)).endpoint, 1000));
+      return json({ ok: true });
+    }
+    // Pages that show notifications themselves (the PC program) ask for the ones after the last they saw.
+    if (path === "/api/notifications" && method === "GET") {
+      const after = Number(url.searchParams.get("after") ?? "-1");
+      return json(db.notificationsAfter(Number.isInteger(after) ? after : -1));
     }
 
     // Making, changing and deleting Google Calendar events from the calendar screen.
@@ -1079,6 +1120,8 @@ ${body || `<section class="works"><p class="empty reveal">${mine ? "아직 포�
     }
     if (path === "/admin" && req.method === "GET") return new Response(adminHtml, { headers: { "Content-Type": "text/html; charset=utf-8" } });
     if (path === "/privacy" && req.method === "GET") return new Response(Bun.file(join(PUBLIC_DIR, "privacy.html")));
+    // The service worker that shows Web Push notifications. It must sit at the top to cover /admin, and never be cached long.
+    if (path === "/sw.js" && req.method === "GET") return new Response(Bun.file(join(PUBLIC_DIR, "sw.js")), { headers: { "Content-Type": "text/javascript; charset=utf-8", "Cache-Control": "no-cache" } });
     // The Android app (android/) opens full screen only if this lists its signing key.
     if (path === "/.well-known/assetlinks.json" && req.method === "GET") return new Response(Bun.file(join(PUBLIC_DIR, "assetlinks.json")));
 
@@ -1200,5 +1243,5 @@ ${body || `<section class="works"><p class="empty reveal">${mine ? "아직 포�
       console.error(e);
       return withSecurityHeaders(json({ error: "서버 오류" }, 500), path);
     }
-  }, { notion, moveNotionCopies, gcal });
+  }, { notion, moveNotionCopies, gcal, notifier });
 }
