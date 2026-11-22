@@ -1601,6 +1601,14 @@ async function init() {
 
   window.onhashchange = showTab;
   showTab();
+  // 화면을 열어 둔 채 0시가 지나면 날짜가 걸린 화면을 다시 불러온다: 그날 공부가 할 일·과제의 오늘 할 일에 들어가고
+  // (서버가 이 조회 때 넣는다) "오늘"·"지난 일"도 새 날짜로 바뀐다.
+  let shownDay = seoulToday();
+  setInterval(() => {
+    if (seoulToday() === shownDay) return;
+    shownDay = seoulToday();
+    if (["today", "tasks", "studies", "calendar"].includes(currentTab())) tabs[currentTab()].load().catch(showError);
+  }, 30_000);
 }
 
 init().catch(showError);
