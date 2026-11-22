@@ -44,8 +44,24 @@ export function vapidJwt(v: Vapid, endpoint: string, subject: string, nowSec = M
   return `${unsigned}.${sign("sha256", Buffer.from(unsigned), { key, dsaEncoding: "ieee-p1363" }).toString("base64url")}`;
 }
 
+// A push message must fit one 4096-byte record: 3993 bytes of plaintext at most (RFC 8291). Keep a margin.
+export const MAX_PAYLOAD_BYTES = 3800;
+
+// Shortens title and body (by characters, ending in "…") until the JSON fits in MAX_PAYLOAD_BYTES as UTF-8.
+export function fitPayload<T extends { title: string; body: string; [k: string]: unknown }>(p: T): T {
+  const size = (x: T) => Buffer.byteLength(JSON.stringify(x));
+  let out = { ...p, title: [...p.title].slice(0, 200).join("") };
+  if (out.title.length < p.title.length) out.title += "…";
+  let chars = [...out.body];
+  while (size(out) > MAX_PAYLOAD_BYTES && chars.length) {
+    chars = chars.slice(0, Math.max(0, chars.length - Math.ceil((size(out) - MAX_PAYLOAD_BYTES) / 3) - 1));
+    out = { ...out, body: chars.join("") + "…" };
+  }
+  return out;
+}
+
 // Sends one message. Returns the push service's status: 201 = taken, 404/410 = the subscription is gone.
-export async function sendPush(v: Vapid, sub: PushSub, payload: object, subject: string): Promise<number> {
+export async function sendPush(v: Vapid, sub: PushSub, payload: { title: string; body: string; [k: string]: unknown }, subject: string): Promise<number> {
   const res = await fetch(sub.endpoint, {
     method: "POST",
     headers: {
@@ -55,7 +71,7 @@ export async function sendPush(v: Vapid, sub: PushSub, payload: object, subject:
       TTL: String(24 * 3600),
       Urgency: "high",
     },
-    body: new Uint8Array(encrypt(sub, Buffer.from(JSON.stringify(payload)))),
+    body: new Uint8Array(encrypt(sub, Buffer.from(JSON.stringify(fitPayload(payload))))),
     signal: AbortSignal.timeout(15_000),
   });
   await res.arrayBuffer().catch(() => {});

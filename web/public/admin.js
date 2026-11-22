@@ -524,6 +524,7 @@ function newSection() {
   if (title?.trim()) call("/api/portfolio/sections", { method: "POST", body: { title } }).then(() => refreshSections(), showError).catch(showError);
 }
 
+let itemNoteSeq = 0; // 가장 최근에 연 항목 창만 노트 목록을 채운다
 function openItemDialog(it = null, sectionId = null) {
   if (!pf?.sections.length) return showError("먼저 섹션을 만들어 주세요.");
   editingItem = it;
@@ -536,12 +537,19 @@ function openItemDialog(it = null, sectionId = null) {
   $("item-link").value = it?.link ?? "";
   $("item-summary").value = it?.summary ?? "";
   $("item-body").value = it?.body ?? "";
-  $("item-note").replaceChildren(el("option", { value: "", textContent: "붙이지 않음" }));
-  $("item-note").value = "";
+  // 노트 목록이 오기 전(또는 못 받았을 때) 저장해도 붙어 있던 노트가 그대로 가도록 그 노트를 먼저 골라 둔다.
+  const seq = ++itemNoteSeq;
+  $("item-note").replaceChildren(
+    el("option", { value: "", textContent: "붙이지 않음" }),
+    ...(it?.note_id ? [el("option", { value: String(it.note_id), textContent: "(붙인 노트)" })] : []),
+  );
+  $("item-note").value = it?.note_id ? String(it.note_id) : "";
   call("/api/notes")
     .then((notes) => {
-      $("item-note").append(...notes.map((n) => el("option", { value: String(n.id), textContent: n.title || "(제목 없음)" })));
-      $("item-note").value = it?.note_id && notes.some((n) => n.id === it.note_id) ? String(it.note_id) : ""; // a deleted note: none
+      if (seq !== itemNoteSeq) return; // 그사이 다른 항목 창을 열었다
+      const picked = $("item-note").value; // 기다리는 동안 고른 것도 지킨다
+      $("item-note").replaceChildren(el("option", { value: "", textContent: "붙이지 않음" }), ...notes.map((n) => el("option", { value: String(n.id), textContent: n.title || "(제목 없음)" })));
+      $("item-note").value = notes.some((n) => String(n.id) === picked) ? picked : ""; // 지운 노트면 붙이지 않음
     })
     .catch(showError);
   $("item-msg").textContent = "";

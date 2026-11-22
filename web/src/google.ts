@@ -259,6 +259,20 @@ export function createGoogle(cfg: GoogleConfig, db: Db) {
       return lists.flat();
     },
 
+    // Ids of the events still in a calendar from timeMin on (deleted ones are not listed), every page.
+    async eventIds(calendarId: string, timeMin: string): Promise<Set<string>> {
+      const ids = new Set<string>();
+      let pageToken = "";
+      for (let page = 0; page < 50; page++) {
+        const q = new URLSearchParams({ timeMin, maxResults: "2500", fields: "items(id),nextPageToken", ...(pageToken ? { pageToken } : {}) });
+        const r = (await (await api(`${eventPath(calendarId)}?${q}`, {}, "캘린더 일정 조회")).json()) as { items?: { id: string }[]; nextPageToken?: string };
+        for (const e of r.items ?? []) ids.add(e.id);
+        if (!r.nextPageToken) break;
+        pageToken = r.nextPageToken;
+      }
+      return ids;
+    },
+
     async insertEvent(calendarId: string, body: EventBody): Promise<string> {
       const res = await api(`${eventPath(calendarId)}?fields=id`, { method: "POST", headers: { "Content-Type": "application/json" }, body: withoutNulls(body) }, "구글 일정 만들기");
       return ((await res.json()) as { id: string }).id;

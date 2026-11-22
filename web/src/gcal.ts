@@ -83,12 +83,15 @@ export function createCalendarPush(opts: { db: Db; google: Google; today: () => 
     }
     const from = addDays(opts.today(), -PUSH_BACK_DAYS);
     const { tasks, exams } = db.calendarPushItems(from);
+    // What is still there: an event deleted in Google is made again while its item is here.
+    const present = await google.eventIds(target, `${from}T00:00:00+09:00`);
     const want = new Map<string, EventBody>([...tasks.map((t) => [`task:${t.id}`, taskEvent(t)] as const), ...exams.map((e) => [`exam:${e.id}`, examEvent(e)] as const)]);
     for (const [key, body] of want) {
       const hash = createHash("sha256").update(JSON.stringify(body)).digest("hex");
       const l = links.get(key);
-      if (l && l.calendar_id === target && l.hash === hash) continue;
-      if (l && l.calendar_id === target) {
+      const there = !!l && l.calendar_id === target && present.has(l.event_id);
+      if (there && l!.hash === hash) continue;
+      if (there) {
         try {
           await google.patchEvent(target, l.event_id, body);
           db.setGcalLink({ ...l, hash });
@@ -96,7 +99,7 @@ export function createCalendarPush(opts: { db: Db; google: Google; today: () => 
         } catch (e) {
           if (!gone(e)) throw e; // deleted in Google: made again below, since it is still here
         }
-      } else if (l) {
+      } else if (l && l.calendar_id !== target) {
         await drop(key, l.calendar_id, l.event_id); // the owner picked another calendar
       }
       db.setGcalLink({ key, calendar_id: target, event_id: await google.insertEvent(target, body), hash });

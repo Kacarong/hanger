@@ -704,6 +704,14 @@ test("구글 캘린더 쓰기: 일정 만들기·고치기·지우기, 할 일·
     expect(timed).toMatchObject({ summary: "면담(옮김)", start: { date: "2026-11-27" }, end: { date: "2026-11-28" } });
     expect(timed.start.dateTime).toBeUndefined();
     expect(timed.start.timeZone).toBeUndefined();
+    // A long description (made in Google) stays whole when only the date is changed here; too long is refused, not cut.
+    const long = "  메모 " + "가".repeat(6000) + "  ";
+    res = await post("/api/calendar/events", { calendarId: "me@example.com", title: "긴 메모", date: "2026-11-24", description: long });
+    const longEv = calEvents("me@example.com").get(((await res.json()) as { id: string }).id)!;
+    expect(longEv.description).toBe(long);
+    await post(`/api/calendar/events/${longEv.id}?calendar=me%40example.com`, { title: "긴 메모", date: "2026-11-25", description: long }, "PATCH");
+    expect(longEv).toMatchObject({ description: long, start: { date: "2026-11-25" } });
+    expect((await post("/api/calendar/events", { calendarId: "me@example.com", title: "x", date: "2026-11-24", description: "가".repeat(8193) })).status).toBe(400);
     for (const bad of [{ title: "", date: "2026-11-24" }, { title: "x", date: "2026-11-31" }, { title: "x", date: "2026-11-24", endDate: "2026-11-23" }, { title: "x", date: "2026-11-24", time: "10:00", endTime: "09:00" }]) {
       expect((await post("/api/calendar/events", { calendarId: "me@example.com", ...bad })).status).toBe(400);
     }
@@ -740,6 +748,12 @@ test("구글 캘린더 쓰기: 일정 만들기·고치기·지우기, 할 일·
     await gcal.sync();
     expect(hw.summary).toBe("✓ [수리학] 레포트");
     expect(calEvents("me@example.com").size).toBe(2);
+    // Deleted in Google with nothing changed here: the next pass notices and makes it again.
+    calEvents("me@example.com").delete(hw.id);
+    await gcal.sync();
+    const hwAgain = sent().find((e) => e.extendedProperties?.private.kacarong === `task:${task.id}`)!;
+    expect(hwAgain.summary).toBe("✓ [수리학] 레포트");
+    expect(hwAgain.id).not.toBe(hw.id);
     // Deleted in Google but still here: made again.
     calEvents("me@example.com").delete(ex.id);
     await post(`/api/exams/${exam.id}`, { time: "10:00" }, "PATCH");
@@ -856,6 +870,21 @@ test("알림: 기기 구독 → 아침 요약·과제 마감 전·시험 전날�
     clock = new Date("2026-11-24T10:30:00+09:00");
     await notifier.tick();
     expect(pushes).toHaveLength(0);
+
+    // A long one is shortened to fit one push record (3993 bytes of plaintext at most); the site keeps it whole.
+    await req("/api/push/subscribe", "POST", sub);
+    for (let i = 0; i < 7; i++) await req("/api/tasks", "POST", { kind: "과제", title: `${i}번 ` + "긴".repeat(198), due_date: "2026-11-25" });
+    pushes.length = 0;
+    clock = new Date("2026-11-24T20:00:00+09:00");
+    await notifier.tick();
+    expect(pushes).toHaveLength(1);
+    const big = decryptPush(pushes[0]!.body, ua, auth) as { id: number; title: string; body: string };
+    expect(big.title).toBe("내일 마감 과제 7개");
+    expect(big.body.endsWith("…")).toBe(true);
+    expect(Buffer.byteLength(JSON.stringify(big))).toBeLessThanOrEqual(3800);
+    const kept = ((await (await req(`/api/notifications?after=${big.id - 1}`)).json()) as { body: string }[])[0]!;
+    expect(Buffer.byteLength(kept.body)).toBeGreaterThan(4000);
+    pushes.length = 0;
 
     // Turned off: nothing; the test button still goes out.
     expect((await req("/api/notify", "PUT", { morning: "25:00" })).status).toBe(400);

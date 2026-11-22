@@ -286,8 +286,15 @@ export function createApp(cfg: AppConfig, db: Db, google: Google) {
 
   // A Google Calendar event from the event dialog. No start time = all day.
   function eventFields(b: Record<string, unknown>): EventBody | string {
-    const summary = str(b.title, 300);
+    // Not cut short like other fields: an event made in Google may be long, and editing its date here must keep its text.
+    // Too long is refused instead (Google keeps descriptions up to 8192 characters).
+    const raw = (v: unknown) => (typeof v === "string" ? v : "");
+    const summary = raw(b.title).trim();
+    const location = raw(b.location);
+    const description = raw(b.description);
     if (!summary) return "제목을 입력해 주세요";
+    if (summary.length > 1024 || location.length > 1024) return "제목이나 장소가 너무 깁니다(1024자까지)";
+    if (description.length > 8192) return "메모가 너무 깁니다(8192자까지)";
     const date = str(b.date, 10);
     const endDate = str(b.endDate, 10) || date;
     if (!isDate(date) || !isDate(endDate)) return "날짜가 올바르지 않습니다";
@@ -296,7 +303,7 @@ export function createApp(cfg: AppConfig, db: Db, google: Google) {
     const endTime = (time && str(b.endTime, 5)) || null;
     if ((time && !isTime(time)) || (endTime && !isTime(endTime))) return "시간이 올바르지 않습니다";
     if (time && endTime && `${endDate}T${endTime}` <= `${date}T${time}`) return "끝나는 때가 시작보다 앞입니다";
-    return { summary, location: str(b.location, 500), description: str(b.description, 5000), ...eventWhen(date, time, endDate, endTime, 60) };
+    return { summary, location, description, ...eventWhen(date, time, endDate, endTime, 60) };
   }
 
   // Validates exam fields from a request body. Only keys present in the body are returned.

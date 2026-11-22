@@ -190,7 +190,7 @@
   <form method="dialog" id="event-form">
     <h2 id="event-dialog-title">새 구글 일정</h2>
     <label id="event-calendar-box">캘린더<select class="input" id="event-calendar"></select></label>
-    <label>제목<input class="input" id="event-title" maxlength="300" required></label>
+    <label>제목<input class="input" id="event-title" maxlength="1024" required></label>
     <label class="check"><input type="checkbox" id="event-allday"> 하루 종일</label>
     <div class="row">
       <label>시작 날짜<input class="input" type="date" id="event-date" required></label>
@@ -200,8 +200,8 @@
       <label>끝 날짜<input class="input" type="date" id="event-end-date"></label>
       <label class="event-time">끝 시간<input class="input" type="time" id="event-end-time"></label>
     </div>
-    <label>장소<input class="input" id="event-location" maxlength="500"></label>
-    <label>메모<textarea class="input" id="event-description" maxlength="5000" rows="3"></textarea></label>
+    <label>장소<input class="input" id="event-location" maxlength="1024"></label>
+    <label>메모<textarea class="input" id="event-description" maxlength="8192" rows="3"></textarea></label>
     <span class="error" id="event-msg"></span>
     <div class="foot">
       <button class="btn danger" type="button" id="event-delete">삭제</button>
