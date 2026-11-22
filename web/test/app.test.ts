@@ -13,6 +13,7 @@ type FakeFile = { id: string; name: string; mimeType: string; parents: string[];
 const drive = new Map<string, FakeFile>();
 const uploads = new Map<string, { name: string; mimeType: string; parents: string[]; size: number; received: number; origin: string | null; fileId?: string; parts: Buffer[] }>();
 let foldersCreated = 0;
+let driveDeleteFails = false;
 let loginEmail = "owner@example.com";
 const READ_SCOPE = "openid email https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/calendar.readonly";
 const FULL_SCOPE = `${READ_SCOPE} https://www.googleapis.com/auth/calendar.events`;
@@ -180,6 +181,7 @@ beforeAll(() => {
       const f = m && drive.get(m[1]!);
       if (!f) return new Response("not found", { status: 404 });
       if (req.method === "DELETE") {
+        if (driveDeleteFails) return new Response("backend error", { status: 500 });
         drive.delete(f.id);
         return new Response(null, { status: 204 });
       }
@@ -2342,14 +2344,28 @@ test("백업: 하루 한 번(새벽 2~7시 빼고) folio.db 사본을 드라이�
 
     // A file of the user's own in the folder is left alone.
     drive.set("mine", { id: "mine", name: "메모.txt", mimeType: "text/plain", parents: [folder.id], trashed: false, bytes: 1 });
-    for (let day = 25; day <= 38; day++) {
+    for (let day = 25; day <= 37; day++) {
       clock = new Date(new Date("2026-11-01T12:00:00+09:00").getTime() + (day - 1) * 86400_000);
       await backup.tick();
     }
+    expect(backups()).toHaveLength(15); // 14 days + the user's file
+    expect(backups()).not.toContain("folio-2026-11-23.db");
+
+    // A day whose prune fails: the copy is up, the oldest stays, and the next hour prunes without a second upload.
+    clock = new Date("2026-12-08T12:00:00+09:00");
+    driveDeleteFails = true;
+    await backup.tick();
+    driveDeleteFails = false;
+    expect(backups()).toHaveLength(16);
+    expect(backups()).toContain("folio-2026-12-08.db");
+    clock = new Date("2026-12-08T13:00:00+09:00");
+    await backup.tick();
     const left = backups();
+    expect(left.filter((n) => n === "folio-2026-12-08.db")).toHaveLength(1);
     expect(left).toHaveLength(15);
     expect(left).toContain("메모.txt");
     expect(left.filter((n) => n.startsWith("folio-"))[0]).toBe("folio-2026-11-25.db"); // the 23rd and 24th went
+    expect(left.filter((n) => n.startsWith("folio-"))).toHaveLength(14);
     expect(left).toContain("folio-2026-12-08.db");
   } finally {
     cleanup();
