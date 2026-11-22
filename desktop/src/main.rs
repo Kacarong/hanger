@@ -25,13 +25,32 @@ fn same_site(url: &Url) -> bool {
     url.origin() == home().origin()
 }
 
-/// 창 안에 머무는 주소: 이 사이트와 구글 로그인(accounts.google.com 등 *.google.com).
+/// 구글 로그인이 거치는 주소인지: google.com·나라별 google.co.kr 등과 그 하위 주소, accounts.youtube.com.
+/// 로그인 마지막에 구글이 accounts.youtube.com, accounts.google.co.kr 을 차례로 거치며 로그인을 심는다.
+/// 이걸 창 밖으로 보내면 로그인이 끝나지 않고 기본 브라우저에 구글 400 화면이 뜬다.
+fn google_sign_in_host(h: &str) -> bool {
+    if h == "accounts.youtube.com" {
+        return true;
+    }
+    let labels: Vec<&str> = h.split('.').collect();
+    let Some(i) = labels.iter().rposition(|l| *l == "google") else {
+        return false;
+    };
+    match &labels[i + 1..] {
+        ["com"] => true,
+        [cc] => cc.len() == 2,
+        ["co" | "com", cc] => cc.len() == 2,
+        _ => false,
+    }
+}
+
+/// 창 안에 머무는 주소: 이 사이트와 구글 로그인.
 fn stays_inside(url: &Url) -> bool {
     if same_site(url) {
         return true;
     }
     match (url.scheme(), url.host_str()) {
-        ("https", Some(h)) => h == "google.com" || h.ends_with(".google.com"),
+        ("https", Some(h)) => google_sign_in_host(h),
         ("about" | "blob" | "data", _) => true,
         _ => false,
     }
@@ -78,4 +97,19 @@ fn main() {
         })
         .run(tauri::generate_context!())
         .expect("창을 띄우지 못했습니다");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::google_sign_in_host as g;
+
+    #[test]
+    fn google_sign_in_hosts() {
+        for h in ["google.com", "accounts.google.com", "accounts.google.co.kr", "www.google.co.kr", "accounts.google.de", "accounts.google.com.au", "accounts.youtube.com"] {
+            assert!(g(h), "{h}");
+        }
+        for h in ["notion.so", "youtube.com", "www.youtube.com", "google.evil.com", "accounts.google.com.evil.kr", "evilgoogle.com", "google.co.evil"] {
+            assert!(!g(h), "{h}");
+        }
+    }
 }
