@@ -178,6 +178,8 @@ export function createGoogle(cfg: GoogleConfig, db: Db) {
   const rootFolder = () => ownFolder("root_folder_id", "kacarong.kr 파일함");
   // Copies of files in Notion pages, kept apart so the cloud's folder holds only what was uploaded to the cloud.
   const notionFolder = () => ownFolder("notion_folder_id", "kacarong.kr 노션 파일");
+  // Daily copies of the site's database (backup.ts).
+  const backupFolder = () => ownFolder("backup_folder_id", "kacarong.kr 백업");
 
   async function getFile(id: string): Promise<DriveFile> {
     const res = await api(`/drive/v3/files/${encodeURIComponent(id)}?fields=${FILE_FIELDS}`, {}, "파일 조회");
@@ -202,6 +204,7 @@ export function createGoogle(cfg: GoogleConfig, db: Db) {
     saveTokens,
     rootFolder,
     notionFolder,
+    backupFolder,
     createFolder,
     getFile,
     calendarGranted,
@@ -329,6 +332,17 @@ export function createGoogle(cfg: GoogleConfig, db: Db) {
       const location = await this.startUpload({ name, mimeType, size: bytes.size, origin, parent });
       const res = await check(await fetch(location, { method: "PUT", headers: { "Content-Type": mimeType }, body: bytes }), "업로드");
       return (await res.json()) as DriveFile;
+    },
+
+    // Files in a folder this app made (drive.file only sees those), not in the trash.
+    async list(folder: string): Promise<{ id: string; name: string }[]> {
+      const q = new URLSearchParams({ q: `'${folder}' in parents and trashed = false`, fields: "files(id,name)", pageSize: "1000" });
+      const res = await api(`/drive/v3/files?${q}`, {}, "드라이브 목록 조회");
+      return ((await res.json()) as { files?: { id: string; name: string }[] }).files ?? [];
+    },
+    // Deletes for good (no trash).
+    async remove(id: string) {
+      await api(`/drive/v3/files/${encodeURIComponent(id)}`, { method: "DELETE" }, "드라이브에서 지우기");
     },
 
     async trash(id: string) {

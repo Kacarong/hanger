@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { cleanBlocks, editRuns, richOrNone } from "./blocks";
 import { noteHtml } from "./note-html";
 import { ATTACH_TARGETS, CATEGORIES, EXAM_COLORS, SECTION_LAYOUTS, TASK_CATEGORIES, TASK_KINDS, type AttachedFile, type Block, type Db, type ExamFields, type FileRow, type PortfolioFields, type PortfolioItem, type StudyFields, type TaskFields } from "./db";
+import { createBackup } from "./backup";
 import { createCalendarPush, eventWhen } from "./gcal";
 import { GoogleError, type CalendarEvent, type EventBody, type Google } from "./google";
 import { createNotifier } from "./notify";
@@ -199,6 +200,7 @@ export function createApp(cfg: AppConfig, db: Db, google: Google) {
   });
   const notifier = createNotifier({ db, subject: origin, now });
   const gcal = createCalendarPush({ db, google, today, enabled: cfg.googleEnabled, debounceMs: cfg.gcalDebounceMs });
+  const backup = createBackup({ db, google, enabled: cfg.googleEnabled, origin, now });
 
   async function body(req: Request): Promise<Record<string, unknown>> {
     try {
@@ -1278,5 +1280,5 @@ ${body || `<section class="works"><p class="empty reveal">${mine ? "아직 포�
       console.error(e);
       return withSecurityHeaders(json({ error: "서버 오류" }, 500), path);
     }
-  }, { notion, moveNotionCopies, gcal, notifier });
+  }, { notion, moveNotionCopies, gcal, notifier, backup });
 }

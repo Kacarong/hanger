@@ -1,7 +1,7 @@
 import { Database } from "bun:sqlite";
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { createDecipheriv, createECDH, createHmac, createPublicKey, randomBytes, verify } from "node:crypto";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createApp } from "../src/app";
@@ -9,9 +9,9 @@ import { openDb } from "../src/db";
 import { createGoogle } from "../src/google";
 
 // A small stand-in for the Google OAuth + Drive endpoints the app uses.
-type FakeFile = { id: string; name: string; mimeType: string; parents: string[]; trashed: boolean; bytes: number; content?: string };
+type FakeFile = { id: string; name: string; mimeType: string; parents: string[]; trashed: boolean; bytes: number; content?: string; raw?: Buffer };
 const drive = new Map<string, FakeFile>();
-const uploads = new Map<string, { name: string; mimeType: string; parents: string[]; size: number; received: number; origin: string | null; fileId?: string }>();
+const uploads = new Map<string, { name: string; mimeType: string; parents: string[]; size: number; received: number; origin: string | null; fileId?: string; parts: Buffer[] }>();
 let foldersCreated = 0;
 let loginEmail = "owner@example.com";
 const READ_SCOPE = "openid email https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/calendar.readonly";
@@ -75,13 +75,15 @@ beforeAll(() => {
       // Upload session URI, same shape as Google's: /upload/drive/v3/files?uploadType=resumable&upload_id=...
       if (p === "/upload/drive/v3/files" && req.method === "PUT") {
         const u = uploads.get(url.searchParams.get("upload_id")!)!;
-        u.received += (await req.arrayBuffer()).byteLength;
+        const part = Buffer.from(await req.arrayBuffer());
+        u.parts.push(part);
+        u.received += part.byteLength;
         if (u.received < u.size) {
           // Google omits Range when it has no bytes yet.
           return new Response(null, { status: 308, headers: u.received ? { Range: `bytes=0-${u.received - 1}` } : {} });
         }
         if (!u.fileId) {
-          const f: FakeFile = { id: `f${nextId++}`, name: u.name, mimeType: u.mimeType, parents: u.parents, trashed: false, bytes: u.size };
+          const f: FakeFile = { id: `f${nextId++}`, name: u.name, mimeType: u.mimeType, parents: u.parents, trashed: false, bytes: u.size, raw: Buffer.concat(u.parts) };
           drive.set(f.id, f);
           u.fileId = f.id;
         }
@@ -99,6 +101,7 @@ beforeAll(() => {
           size: Number(req.headers.get("X-Upload-Content-Length")),
           received: 0,
           origin: req.headers.get("Origin"),
+          parts: [],
         });
         return new Response(null, { headers: { Location: `${fake.url}upload/drive/v3/files?uploadType=resumable&upload_id=${sid}` } });
       }
@@ -167,11 +170,19 @@ beforeAll(() => {
         const made = [...calEvents(id).values()].filter((e) => e.status !== "cancelled" && (!timeMin || eventEnd(e) > new Date(timeMin).getTime()));
         return Response.json({ items: [...items, ...made] });
       }
+      if (p === "/drive/v3/files" && req.method === "GET") {
+        const parent = url.searchParams.get("q")!.match(/^'([^']+)' in parents and trashed = false$/)![1];
+        return Response.json({ files: [...drive.values()].filter((f) => f.parents.includes(parent!) && !f.trashed).map((f) => ({ id: f.id, name: f.name })) });
+      }
       if (p === "/drive/v3/about") return Response.json({ storageQuota: { limit: String(400 * 1024 ** 3), usage: "1024", usageInDriveTrash: "0" } });
 
       const m = p.match(/^\/drive\/v3\/files\/([^/]+)$/);
       const f = m && drive.get(m[1]!);
       if (!f) return new Response("not found", { status: 404 });
+      if (req.method === "DELETE") {
+        drive.delete(f.id);
+        return new Response(null, { status: 204 });
+      }
       if (req.method === "PATCH") {
         Object.assign(f, await req.json());
         const add = url.searchParams.get("addParents");
@@ -222,7 +233,7 @@ function makeApp(opts: { googleEnabled?: boolean; now?: () => Date; notionApi?: 
     if (init.cookie) headers.set("Cookie", init.cookie);
     return fetch(new Request("https://kacarong.kr" + path, { ...init, headers }));
   };
-  return { call, db, notion: fetch.notion, gcal: fetch.gcal, notifier: fetch.notifier, moveNotionCopies: fetch.moveNotionCopies, cleanup: () => rmSync(dataDir, { recursive: true, force: true }) };
+  return { call, db, notion: fetch.notion, gcal: fetch.gcal, notifier: fetch.notifier, backup: fetch.backup, moveNotionCopies: fetch.moveNotionCopies, cleanup: () => rmSync(dataDir, { recursive: true, force: true }) };
 }
 
 async function login(call: ReturnType<typeof makeApp>["call"], code = "good-code") {
@@ -2284,5 +2295,63 @@ test("노션 연동: 새 사본의 하위 블록을 만들다 실패하면 옛 �
     expect(new Set(after.blocks.map((x) => x.id)).size).toBe(5);
   } finally {
     t.done();
+  }
+});
+
+test("백업: 하루 한 번(새벽 2~7시 빼고) folio.db 사본을 드라이브 'kacarong.kr 백업'에, 최근 14일 치만 남김", async () => {
+  loginEmail = "owner@example.com";
+  let clock = new Date("2026-11-23T01:30:00+09:00");
+  const { call, db, backup, cleanup } = makeApp({ now: () => clock });
+  const backups = () => {
+    const folder = db.getSetting("backup_folder_id");
+    return [...drive.values()].filter((f) => folder && f.parents.includes(folder)).map((f) => f.name).sort();
+  };
+  try {
+    await backup.tick(); // Drive not connected yet: nothing to do
+    expect(db.getSetting("backup_folder_id")).toBeNull();
+
+    const { cookie } = await login(call);
+    const made = await call("/api/tasks", { method: "POST", cookie, headers: JSON_ORIGIN, body: JSON.stringify({ kind: "과제", title: "백업될 과제", due_date: "2026-11-30" }) });
+    expect(made.status).toBe(201);
+    await backup.tick();
+    const folder = drive.get(db.getSetting("backup_folder_id")!)!;
+    expect(folder.name).toBe("kacarong.kr 백업");
+    expect(backups()).toEqual(["folio-2026-11-23.db"]);
+    // The copy is a whole database, with what was just saved (still in the WAL) in it: put back as folio.db it opens as is.
+    const file = [...drive.values()].find((f) => f.name === "folio-2026-11-23.db")!;
+    const restoreDir = mkdtempSync(join(tmpdir(), "folio-restore-"));
+    try {
+      writeFileSync(join(restoreDir, "folio.db"), file.raw!);
+      const copy = openDb(join(restoreDir, "folio.db"));
+      expect(copy.listTasks({}).map((t) => t.title)).toContain("백업될 과제");
+      expect(copy.getSetting("refresh_token")).toBe("rt");
+      copy.raw.close();
+    } finally {
+      rmSync(restoreDir, { recursive: true, force: true });
+    }
+
+    await backup.tick(); // same day: no second copy
+    expect(backups()).toEqual(["folio-2026-11-23.db"]);
+
+    clock = new Date("2026-11-24T03:00:00+09:00"); // quiet hours
+    await backup.tick();
+    expect(backups()).toHaveLength(1);
+    clock = new Date("2026-11-24T07:00:00+09:00");
+    await backup.tick();
+    expect(backups()).toEqual(["folio-2026-11-23.db", "folio-2026-11-24.db"]);
+
+    // A file of the user's own in the folder is left alone.
+    drive.set("mine", { id: "mine", name: "메모.txt", mimeType: "text/plain", parents: [folder.id], trashed: false, bytes: 1 });
+    for (let day = 25; day <= 38; day++) {
+      clock = new Date(new Date("2026-11-01T12:00:00+09:00").getTime() + (day - 1) * 86400_000);
+      await backup.tick();
+    }
+    const left = backups();
+    expect(left).toHaveLength(15);
+    expect(left).toContain("메모.txt");
+    expect(left.filter((n) => n.startsWith("folio-"))[0]).toBe("folio-2026-11-25.db"); // the 23rd and 24th went
+    expect(left).toContain("folio-2026-12-08.db");
+  } finally {
+    cleanup();
   }
 });
