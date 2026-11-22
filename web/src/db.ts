@@ -74,6 +74,7 @@ export const EXAM_COLORS = ["", "red", "orange", "amber", "green", "blue", "purp
 // A day's study on the 공부 tab. Kept apart from tasks so it never shows up on the calendar. When its day comes it
 // is also put in 할 일·과제 as a 오늘 할 일 task (tasks.study_id, queued = done so), checked off together with it.
 export type StudyRow = { id: number; date: string; course: string; title: string; done: number; queued: number; created_at: string };
+export type GcalLink = { key: string; calendar_id: string; event_id: string; hash: string };
 export type StudyFields = Pick<StudyRow, "date" | "course" | "title">;
 
 // A note is a list of blocks (src/blocks.ts). A "todo" block with a date is also a task (tasks.note_id/block_id),
@@ -301,6 +302,9 @@ export function openDb(path: string) {
       DELETE FROM attachments WHERE target = 'portfolio' AND target_id = old.id;
     END;
   `);
+  // Tasks and exams this site put in the owner's Google Calendar (key "task:<id>" / "exam:<id>").
+  // hash: the event body last sent, so only changed items are sent again.
+  db.exec("CREATE TABLE IF NOT EXISTS gcal_links (key TEXT PRIMARY KEY, calendar_id TEXT NOT NULL, event_id TEXT NOT NULL, hash TEXT NOT NULL)");
   // A new portfolio starts with the usual sections, once; the owner may rename or delete them.
   if (!(db.query("SELECT 1 FROM settings WHERE key = 'portfolio_seeded'").get())) {
     db.transaction(() => {
@@ -345,6 +349,22 @@ export function openDb(path: string) {
 
   return {
     raw: db,
+    gcalLinks(): GcalLink[] {
+      return db.query("SELECT * FROM gcal_links").all() as GcalLink[];
+    },
+    setGcalLink(l: GcalLink) {
+      db.query("INSERT OR REPLACE INTO gcal_links (key, calendar_id, event_id, hash) VALUES (?, ?, ?, ?)").run(l.key, l.calendar_id, l.event_id, l.hash);
+    },
+    deleteGcalLink(key: string) {
+      db.query("DELETE FROM gcal_links WHERE key = ?").run(key);
+    },
+    // What goes to Google Calendar: dated tasks (not 공부 tab ones, which stay off the calendar) and dated exams, from `from` on.
+    calendarPushItems(from: string): { tasks: TaskRow[]; exams: ExamRow[] } {
+      return {
+        tasks: db.query("SELECT * FROM tasks WHERE due_date >= ? AND study_id IS NULL").all(from) as TaskRow[],
+        exams: db.query("SELECT * FROM exams WHERE date >= ?").all(from) as ExamRow[],
+      };
+    },
     getSetting(key: string): string | null {
       const row = db.query("SELECT value FROM settings WHERE key = ?").get(key) as { value: string } | null;
       return row?.value ?? null;

@@ -665,6 +665,9 @@ const seoulToday = () => new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Seou
 const isoDay = (d) => d.toISOString().slice(0, 10);
 const plusDays = (date, n) => isoDay(new Date(Date.parse(date + "T00:00:00Z") + n * DAY));
 let calMonth = seoulToday().slice(0, 7); // YYYY-MM
+let calWrite = false; // 구글 일정을 여기서 만들고 고칠 수 있다(쓰기 권한)
+let calendars = []; // 일정을 넣을 수 있는 구글 캘린더
+let editingEvent = null;
 
 function moveMonth(n) {
   const d = new Date(calMonth + "-01T00:00:00Z");
@@ -692,7 +695,24 @@ async function loadCalendar() {
       need_consent: ["구글 캘린더 권한이 없습니다. ", el("a", { href: "/auth/login", className: "date-main", textContent: "구글로 다시 로그인" })],
       error: ["구글 캘린더를 불러오지 못했습니다: " + data.error],
     }[data.google] ?? []),
+    data.google === "ok" && !data.write ? el("span", {}, " · ", el("a", { href: "/auth/login", className: "date-main", textContent: "일정 쓰기 권한 받기" })) : "",
   );
+  calWrite = !!data.write;
+  calendars = data.calendars ?? [];
+  // 구글로 보내기: 고른 캘린더에 날짜 있는 할 일·과제·시험을 넣는다.
+  $("cal-push-box").hidden = !calWrite || !calendars.length;
+  if (calWrite) {
+    const sel = $("cal-push");
+    const known = calendars.some((c) => c.id === data.push.calendarId);
+    sel.replaceChildren(
+      el("option", { value: "", textContent: "보내지 않음" }),
+      ...calendars.map((c) => el("option", { value: c.id, textContent: c.name })),
+      ...(data.push.calendarId && !known ? [el("option", { value: data.push.calendarId, textContent: "(보이지 않는 캘린더)" })] : []),
+    );
+    sel.value = data.push.calendarId;
+  }
+  $("cal-push-error").hidden = !data.push?.error;
+  $("cal-push-error").textContent = data.push?.error ? "구글로 보내기 실패: " + data.push.error : "";
 
   const q = searchText();
   const byDay = new Map();
@@ -715,7 +735,7 @@ async function loadCalendar() {
     days.push(
       el(
         "div",
-        { className: cls, title: `${md(d)}에 할 일 추가`, onclick: (ev) => ev.target === ev.currentTarget || ev.target.classList.contains("cal-num") ? openTaskDialog(null, d) : null },
+        { className: cls, title: `${md(d)}에 추가`, onclick: (ev) => (ev.target === ev.currentTarget || ev.target.classList.contains("cal-num") ? addOnDay(d) : null) },
         el("span", { className: "cal-num", textContent: Number(d.slice(8)) }),
         ...items.map((x) => x.node()),
       ),
@@ -724,12 +744,59 @@ async function loadCalendar() {
   $("cal-grid").replaceChildren(...heads, ...days);
 }
 
-// 구글 일정은 눌러서 구글 캘린더에서 연다. 여러 날 일정의 시간은 첫날에만 쓴다.
+// 빈 칸을 누르면 그날에 할 일, 쓰기 권한이 있으면 할 일과 구글 일정 중에서 고른다.
+function addOnDay(d) {
+  if (!calWrite) return openTaskDialog(null, d);
+  $("day-dialog-title").textContent = `${dayLabel(d)}에 추가`;
+  $("day-task").onclick = () => {
+    $("day-dialog").close();
+    openTaskDialog(null, d);
+  };
+  $("day-event").onclick = () => {
+    $("day-dialog").close();
+    openEventDialog(null, d);
+  };
+  $("day-dialog").showModal();
+}
+
+// 구글 일정 창. e = 고칠 일정(없으면 새 일정, date 날짜로).
+function openEventDialog(e = null, date = seoulToday()) {
+  editingEvent = e;
+  $("event-dialog-title").textContent = e ? "구글 일정 수정" : "새 구글 일정";
+  $("event-calendar-box").hidden = !!e;
+  const primary = calendars.find((c) => c.primary) ?? calendars[0];
+  $("event-calendar").replaceChildren(...calendars.map((c) => el("option", { value: c.id, textContent: c.name })));
+  if (primary) $("event-calendar").value = primary.id;
+  $("event-title").value = e?.title ?? "";
+  $("event-allday").checked = e ? !e.time : true;
+  $("event-date").value = e?.startDate ?? date;
+  $("event-time").value = e?.time ?? "";
+  $("event-end-date").value = e?.end ?? date;
+  $("event-end-time").value = e?.endTime ?? "";
+  $("event-location").value = e?.location ?? "";
+  $("event-description").value = e?.description ?? "";
+  $("event-delete").hidden = !e;
+  $("event-open").hidden = !e?.link;
+  $("event-open").href = e?.link || "https://calendar.google.com/";
+  $("event-msg").textContent = "";
+  syncEventTime();
+  $("event-dialog").showModal();
+}
+const syncEventTime = () => {
+  const allDay = $("event-allday").checked;
+  document.querySelectorAll("#event-dialog .event-time").forEach((x) => (x.hidden = allDay));
+  if (!allDay && !$("event-time").value) $("event-time").value = "09:00";
+};
+
+// 구글 일정: 바꿀 수 있는 캘린더의 일정은 눌러서 여기서 고치고, 아니면 구글 캘린더에서 연다. 여러 날 일정의 시간은 첫날에만 쓴다.
 function eventItem(e, day) {
   const time = e.time && day === e.startDate ? e.time : "";
+  const props = e.editable && calWrite
+    ? { type: "button", onclick: () => openEventDialog(e) }
+    : { href: e.link || "https://calendar.google.com/", target: "_blank", rel: "noopener" };
   return el(
-    "a",
-    { className: "cal-item", href: e.link || "https://calendar.google.com/", target: "_blank", rel: "noopener", title: `${e.title}${time ? " · " + time : ""}${e.calendar ? " · " + e.calendar : ""}` },
+    e.editable && calWrite ? "button" : "a",
+    { className: "cal-item", ...props, title: `${e.title}${time ? " · " + time : ""}${e.calendar ? " · " + e.calendar : ""}` },
     el("i", { className: "dot", style: e.color ? `background:${e.color}` : "" }),
     time ? el("span", { className: "t", textContent: time }) : null,
     el("span", { textContent: e.title }),
@@ -1260,7 +1327,14 @@ const matches = (t, q) => !q || [t.title, t.course, t.note].some((v) => (v ?? ""
 const tabs = {
   today: { title: "오늘", load: () => loadToday(), actions: () => [newTaskBtn()] },
   tasks: { title: "할 일·과제", load: () => loadTasks(), actions: () => [newTaskBtn()] },
-  calendar: { title: "캘린더", load: () => loadCalendar(), actions: () => [newTaskBtn()] },
+  calendar: {
+    title: "캘린더",
+    load: () => loadCalendar(),
+    actions: () => [
+      ...(me?.calendarWrite ? [el("button", { className: "btn", type: "button", onclick: () => openEventDialog() }, icon("calendar"), "새 구글 일정")] : []),
+      newTaskBtn(),
+    ],
+  },
   exams: { title: "시험", load: () => loadExams(), actions: () => [el("button", { className: "btn primary", type: "button", onclick: () => openExamDialog() }, icon("plus"), "새 시험", el("kbd", { textContent: "N" }))] },
   studies: { title: "공부", load: () => loadStudies(), actions: () => [] },
   notes: {
@@ -1502,6 +1576,55 @@ async function init() {
       await loadList();
     } catch (e) {
       $("folder-msg").textContent = e.message;
+    }
+  };
+  $("event-allday").onchange = syncEventTime;
+  $("event-date").onchange = () => {
+    if ($("event-end-date").value < $("event-date").value) $("event-end-date").value = $("event-date").value;
+  };
+  $("event-form").onsubmit = async (ev) => {
+    ev.preventDefault();
+    const allDay = $("event-allday").checked;
+    const body = {
+      title: $("event-title").value,
+      date: $("event-date").value,
+      endDate: $("event-end-date").value || $("event-date").value,
+      time: allDay ? "" : $("event-time").value,
+      endTime: allDay ? "" : $("event-end-time").value,
+      location: $("event-location").value,
+      description: $("event-description").value,
+    };
+    try {
+      if (editingEvent) await call(`/api/calendar/events/${encodeURIComponent(editingEvent.id)}?calendar=${encodeURIComponent(editingEvent.calendarId)}`, { method: "PATCH", body });
+      else await call("/api/calendar/events", { method: "POST", body: { ...body, calendarId: $("event-calendar").value } });
+      $("event-dialog").close();
+      loadCalendar().catch(showError);
+    } catch (e) {
+      $("event-msg").textContent = e.message;
+    }
+  };
+  $("event-delete").onclick = async () => {
+    if (!editingEvent || !confirm(`"${editingEvent.title}" 일정을 구글 캘린더에서 지울까요?`)) return;
+    try {
+      await call(`/api/calendar/events/${encodeURIComponent(editingEvent.id)}?calendar=${encodeURIComponent(editingEvent.calendarId)}`, { method: "DELETE" });
+      $("event-dialog").close();
+      loadCalendar().catch(showError);
+    } catch (e) {
+      $("event-msg").textContent = e.message;
+    }
+  };
+  $("cal-push").onchange = async () => {
+    const sel = $("cal-push");
+    const calendarId = sel.value;
+    if (!calendarId && !confirm("구글로 보내기를 끄면 지금까지 보낸 할 일·시험 일정을 구글 캘린더에서 지웁니다. 끌까요?")) return loadCalendar().catch(showError);
+    sel.disabled = true;
+    try {
+      await call("/api/calendar/push", { method: "PUT", body: { calendarId } });
+    } catch (e) {
+      showError(e);
+    } finally {
+      sel.disabled = false;
+      loadCalendar().catch(showError);
     }
   };
   $("exam-form").onsubmit = async (ev) => {

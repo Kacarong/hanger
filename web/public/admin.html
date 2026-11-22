@@ -107,7 +107,10 @@
           <button class="btn sm" type="button" id="cal-today">오늘</button>
           <span class="grow"></span>
           <span class="muted" id="cal-google"></span>
+          <label class="cal-push" id="cal-push-box" hidden title="날짜 있는 할 일·과제·시험을 이 구글 캘린더에도 넣고, 여기서 바꾸면 따라 바꿉니다">구글로 보내기
+            <select class="input sm" id="cal-push"></select></label>
         </div>
+        <p class="error cal-push-error" id="cal-push-error" hidden></p>
         <div class="cal" id="cal-grid"></div>
       </div>
 
@@ -169,6 +172,42 @@
     <label>메모<textarea class="input" id="task-note"></textarea></label>
     <div class="attach" id="task-files"></div>
     <div class="foot"><button class="btn" type="button" data-close>취소</button><button class="btn primary" value="ok">저장</button></div>
+  </form>
+</dialog>
+
+<dialog id="day-dialog" class="small">
+  <form method="dialog">
+    <h2 id="day-dialog-title"></h2>
+    <div class="choice">
+      <button class="btn" type="button" id="day-task"><span data-icon="check"></span>할 일</button>
+      <button class="btn" type="button" id="day-event"><span data-icon="calendar"></span>구글 일정</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="event-dialog">
+  <form method="dialog" id="event-form">
+    <h2 id="event-dialog-title">새 구글 일정</h2>
+    <label id="event-calendar-box">캘린더<select class="input" id="event-calendar"></select></label>
+    <label>제목<input class="input" id="event-title" maxlength="300" required></label>
+    <label class="check"><input type="checkbox" id="event-allday"> 하루 종일</label>
+    <div class="row">
+      <label>시작 날짜<input class="input" type="date" id="event-date" required></label>
+      <label class="event-time">시작 시간<input class="input" type="time" id="event-time"></label>
+    </div>
+    <div class="row">
+      <label>끝 날짜<input class="input" type="date" id="event-end-date"></label>
+      <label class="event-time">끝 시간<input class="input" type="time" id="event-end-time"></label>
+    </div>
+    <label>장소<input class="input" id="event-location" maxlength="500"></label>
+    <label>메모<textarea class="input" id="event-description" maxlength="5000" rows="3"></textarea></label>
+    <span class="error" id="event-msg"></span>
+    <div class="foot">
+      <button class="btn danger" type="button" id="event-delete">삭제</button>
+      <a class="btn" id="event-open" target="_blank" rel="noopener">구글 캘린더에서 열기</a>
+      <span class="grow"></span>
+      <button class="btn" type="button" data-close>취소</button><button class="btn primary" value="ok">저장</button>
+    </div>
   </form>
 </dialog>
 

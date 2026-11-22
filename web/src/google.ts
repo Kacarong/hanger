@@ -11,7 +11,9 @@ export type GoogleConfig = {
 };
 
 export const CALENDAR_SCOPE = "https://www.googleapis.com/auth/calendar.readonly";
-export const SCOPES = `openid email https://www.googleapis.com/auth/drive.file ${CALENDAR_SCOPE}`;
+// Making, changing and deleting events (calendar.readonly is still needed for the calendar list).
+export const CALENDAR_WRITE_SCOPE = "https://www.googleapis.com/auth/calendar.events";
+export const SCOPES = `openid email https://www.googleapis.com/auth/drive.file ${CALENDAR_SCOPE} ${CALENDAR_WRITE_SCOPE}`;
 // Just who is signing in. Asking for the calendar scope again on every sign-in makes Google show
 // its "unverified app" warning every time, even when the grant already exists.
 const LOGIN_SCOPES = "openid email";
@@ -28,15 +30,33 @@ export type DriveFile = {
 };
 
 // One event from the user's Google Calendar, tagged with the calendar it came from.
+// editable: the calendar lets the user change events (owner or writer).
+// pushed: the event is a task or exam this site put there (extendedProperties.private.kacarong).
 export type CalendarEvent = {
   id: string;
   summary?: string;
   htmlLink?: string;
+  location?: string;
+  description?: string;
   start: { date?: string; dateTime?: string };
   end: { date?: string; dateTime?: string };
   calendar: string;
+  calendarId: string;
   color: string;
+  editable: boolean;
+  pushed: boolean;
 };
+export type CalendarInfo = { id: string; summary?: string; backgroundColor?: string; selected?: boolean; primary?: boolean; accessRole?: string };
+// What this site sends for an event. start/end carry nulls for the unused keys so a PATCH can switch all-day ↔ timed.
+export type EventBody = {
+  summary: string;
+  location?: string;
+  description?: string;
+  start: { date: string | null; dateTime: string | null; timeZone: string | null };
+  end: { date: string | null; dateTime: string | null; timeZone: string | null };
+  extendedProperties?: { private: Record<string, string> };
+};
+const withoutNulls = (b: EventBody) => JSON.stringify(b, (_k, v) => (v === null ? undefined : v));
 
 export class GoogleError extends Error {
   constructor(message: string, readonly status: number) {
@@ -165,9 +185,15 @@ export function createGoogle(cfg: GoogleConfig, db: Db) {
   }
 
   // Tokens saved before the calendar scope was added have no granted_scopes, so they count as not granted.
-  function calendarGranted(): boolean {
-    return (db.getSetting("granted_scopes") ?? "").split(" ").includes(CALENDAR_SCOPE);
+  const granted = (scope: string) => (db.getSetting("granted_scopes") ?? "").split(" ").includes(scope);
+  const calendarGranted = () => granted(CALENDAR_SCOPE);
+  const calendarWriteGranted = () => granted(CALENDAR_WRITE_SCOPE);
+
+  async function calendarList(): Promise<CalendarInfo[]> {
+    const res = await api("/calendar/v3/users/me/calendarList?fields=items(id,summary,backgroundColor,selected,primary,accessRole)", {}, "캘린더 목록 조회");
+    return ((await res.json()) as { items?: CalendarInfo[] }).items ?? [];
   }
+  const eventPath = (calendarId: string, eventId = "") => `/calendar/v3/calendars/${encodeURIComponent(calendarId)}/events${eventId ? "/" + encodeURIComponent(eventId) : ""}`;
 
   return {
     apiOrigin: new URL(cfg.apiBase).origin, // where the browser sends upload bytes
@@ -179,6 +205,8 @@ export function createGoogle(cfg: GoogleConfig, db: Db) {
     createFolder,
     getFile,
     calendarGranted,
+    calendarWriteGranted,
+    calendarList,
 
     // Keeps the Drive copy laid out like the cloud: a rename or a move here is made there too.
     async rename(id: string, name: string) {
@@ -200,21 +228,46 @@ export function createGoogle(cfg: GoogleConfig, db: Db) {
     },
 
     // Events between two instants from every calendar the user has checked in Google Calendar.
-    async events(timeMin: string, timeMax: string): Promise<CalendarEvent[]> {
-      const res = await api("/calendar/v3/users/me/calendarList?fields=items(id,summary,backgroundColor,selected,primary)", {}, "캘린더 목록 조회");
-      type Cal = { id: string; summary?: string; backgroundColor?: string; selected?: boolean; primary?: boolean };
-      const cals = (((await res.json()) as { items?: Cal[] }).items ?? []).filter((c) => c.selected || c.primary);
+    // cals: the calendar list when the caller already has it.
+    async events(timeMin: string, timeMax: string, cals?: CalendarInfo[]): Promise<CalendarEvent[]> {
+      const shown = (cals ?? (await calendarList())).filter((c) => c.selected || c.primary);
       const q = new URLSearchParams({ timeMin, timeMax, singleEvents: "true", orderBy: "startTime", maxResults: "2500", timeZone: "Asia/Seoul" });
+      type Item = Pick<CalendarEvent, "id" | "summary" | "htmlLink" | "location" | "description" | "start" | "end"> & { status?: string; extendedProperties?: { private?: Record<string, string> } };
       const lists = await Promise.all(
-        cals.map(async (c) => {
-          const r = await api(`/calendar/v3/calendars/${encodeURIComponent(c.id)}/events?${q}`, {}, "캘린더 일정 조회");
-          const items = ((await r.json()) as { items?: (Omit<CalendarEvent, "calendar" | "color"> & { status?: string })[] }).items ?? [];
+        shown.map(async (c) => {
+          const r = await api(`${eventPath(c.id)}?${q}`, {}, "캘린더 일정 조회");
+          const items = ((await r.json()) as { items?: Item[] }).items ?? [];
+          const editable = c.accessRole === "owner" || c.accessRole === "writer";
           return items
             .filter((e) => e.status !== "cancelled" && e.start && e.end)
-            .map((e) => ({ id: e.id, summary: e.summary, htmlLink: e.htmlLink, start: e.start, end: e.end, calendar: c.summary ?? "", color: c.backgroundColor ?? "" }));
+            .map((e) => ({
+              id: e.id,
+              summary: e.summary,
+              htmlLink: e.htmlLink,
+              location: e.location,
+              description: e.description,
+              start: e.start,
+              end: e.end,
+              calendar: c.summary ?? "",
+              calendarId: c.id,
+              color: c.backgroundColor ?? "",
+              editable,
+              pushed: !!e.extendedProperties?.private?.kacarong,
+            }));
         }),
       );
       return lists.flat();
+    },
+
+    async insertEvent(calendarId: string, body: EventBody): Promise<string> {
+      const res = await api(`${eventPath(calendarId)}?fields=id`, { method: "POST", headers: { "Content-Type": "application/json" }, body: withoutNulls(body) }, "구글 일정 만들기");
+      return ((await res.json()) as { id: string }).id;
+    },
+    async patchEvent(calendarId: string, eventId: string, body: EventBody) {
+      await api(`${eventPath(calendarId, eventId)}?fields=id`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }, "구글 일정 고치기");
+    },
+    async deleteEvent(calendarId: string, eventId: string) {
+      await api(eventPath(calendarId, eventId), { method: "DELETE" }, "구글 일정 지우기");
     },
 
     // Starts a resumable upload session; the browser then PUTs the bytes straight to Google.

@@ -3,7 +3,8 @@ import { mkdirSync, existsSync, readdirSync, readFileSync, rmSync } from "node:f
 import { join } from "node:path";
 import { cleanBlocks, editRuns, richOrNone } from "./blocks";
 import { ATTACH_TARGETS, CATEGORIES, EXAM_COLORS, TASK_CATEGORIES, TASK_KINDS, type AttachedFile, type Block, type Db, type ExamFields, type FileRow, type PortfolioFields, type PortfolioItem, type StudyFields, type TaskFields } from "./db";
-import { GoogleError, type CalendarEvent, type Google } from "./google";
+import { createCalendarPush, eventWhen } from "./gcal";
+import { GoogleError, type CalendarEvent, type EventBody, type Google } from "./google";
 import { createNotionSync, NotionError } from "./notion";
 import { passwordProblem } from "./password";
 
@@ -24,6 +25,7 @@ export type AppConfig = {
   googleEnabled: boolean; // false until the OAuth client is configured
   notionApi?: string; // https://api.notion.com unless a test points elsewhere
   notionDebounceMs?: number; // how long after a save the note goes to Notion (tests: 0)
+  gcalDebounceMs?: number; // how long after a change tasks/exams go to Google Calendar (tests: 0)
   now?: () => Date; // for tests
 };
 
@@ -49,18 +51,40 @@ function isDate(v: string): boolean {
 function calendarItem(e: CalendarEvent) {
   const hm = (d: Date) => new Intl.DateTimeFormat("en-GB", { timeZone: "Asia/Seoul", hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(d);
   let startDate: string, endDate: string, time: string | null;
+  // end/endTime: where the event really ends, for the edit dialog (endDate is the last day it shows on).
+  let end: string, endTime: string | null;
   if (e.start.date) {
     startDate = e.start.date;
     endDate = e.end.date ? addDays(e.end.date, -1) : startDate; // Google's all-day end date is exclusive
     time = null;
+    end = endDate;
+    endTime = null;
   } else {
     const start = new Date(e.start.dateTime!);
+    const until = new Date(e.end.dateTime ?? e.start.dateTime!);
     startDate = seoulDate(start);
-    endDate = seoulDate(new Date(new Date(e.end.dateTime ?? e.start.dateTime!).getTime() - 1)); // ending at 00:00 doesn't touch that day
+    endDate = seoulDate(new Date(until.getTime() - 1)); // ending at 00:00 doesn't touch that day
     time = hm(start);
+    end = seoulDate(until);
+    endTime = hm(until);
   }
   if (endDate < startDate) endDate = startDate;
-  return { id: e.id, title: e.summary || "(제목 없음)", startDate, endDate, time, link: e.htmlLink ?? "", calendar: e.calendar, color: /^#[0-9a-f]{6}$/i.test(e.color) ? e.color : "" };
+  return {
+    id: e.id,
+    title: e.summary || "(제목 없음)",
+    startDate,
+    endDate,
+    time,
+    end,
+    endTime,
+    location: e.location ?? "",
+    description: e.description ?? "",
+    link: e.htmlLink ?? "",
+    calendar: e.calendar,
+    calendarId: e.calendarId,
+    editable: e.editable,
+    color: /^#[0-9a-f]{6}$/i.test(e.color) ? e.color : "",
+  };
 }
 
 function json(data: unknown, status = 200): Response {
@@ -171,6 +195,7 @@ export function createApp(cfg: AppConfig, db: Db, google: Google) {
     today,
     debounceMs: cfg.notionDebounceMs,
   });
+  const gcal = createCalendarPush({ db, google, today, enabled: cfg.googleEnabled, debounceMs: cfg.gcalDebounceMs });
 
   async function body(req: Request): Promise<Record<string, unknown>> {
     try {
@@ -251,6 +276,21 @@ export function createApp(cfg: AppConfig, db: Db, google: Google) {
     return out;
   }
 
+
+  // A Google Calendar event from the event dialog. No start time = all day.
+  function eventFields(b: Record<string, unknown>): EventBody | string {
+    const summary = str(b.title, 300);
+    if (!summary) return "제목을 입력해 주세요";
+    const date = str(b.date, 10);
+    const endDate = str(b.endDate, 10) || date;
+    if (!isDate(date) || !isDate(endDate)) return "날짜가 올바르지 않습니다";
+    if (endDate < date) return "끝 날짜가 시작 날짜보다 앞입니다";
+    const time = str(b.time, 5) || null;
+    const endTime = (time && str(b.endTime, 5)) || null;
+    if ((time && !isTime(time)) || (endTime && !isTime(endTime))) return "시간이 올바르지 않습니다";
+    if (time && endTime && `${endDate}T${endTime}` <= `${date}T${time}`) return "끝나는 때가 시작보다 앞입니다";
+    return { summary, location: str(b.location, 500), description: str(b.description, 5000), ...eventWhen(date, time, endDate, endTime, 60) };
+  }
 
   // Validates exam fields from a request body. Only keys present in the body are returned.
   function examFields(b: Record<string, unknown>): Partial<ExamFields> | string {
@@ -430,6 +470,7 @@ ${body || `<section class="works"><p class="empty reveal">${mine ? "아직 포�
         googleEnabled: cfg.googleEnabled,
         driveConnected: !!db.getSetting("refresh_token"),
         calendarConnected: !!db.getSetting("refresh_token") && google.calendarGranted(),
+        calendarWrite: !!db.getSetting("refresh_token") && google.calendarWriteGranted(),
         categories: CATEGORIES,
         taskKinds: TASK_KINDS,
         taskCategories: TASK_CATEGORIES,
@@ -490,13 +531,60 @@ ${body || `<section class="works"><p class="empty reveal">${mine ? "아직 포�
       const exams = db.listExams({ from, to });
       if (!cfg.googleEnabled || !db.getSetting("refresh_token")) return json({ tasks, exams, events: [], google: "off" });
       if (!google.calendarGranted()) return json({ tasks, exams, events: [], google: "need_consent" });
+      // write: events can be made here and tasks/exams sent to Google (push = the calendar they go to, '' = not sent).
+      const write = google.calendarWriteGranted();
+      const push = { calendarId: db.getSetting("gcal_push") ?? "", error: db.getSetting("gcal_push_error") ?? "" };
       try {
-        const events = await google.events(`${from}T00:00:00+09:00`, `${addDays(to, 1)}T00:00:00+09:00`);
-        return json({ tasks, exams, events: events.map(calendarItem).filter((e) => e.endDate >= from && e.startDate <= to), google: "ok" });
+        const cals = await google.calendarList();
+        const calendars = cals
+          .filter((c) => c.accessRole === "owner" || c.accessRole === "writer")
+          .map((c) => ({ id: c.id, name: c.summary ?? c.id, primary: !!c.primary }));
+        const events = (await google.events(`${from}T00:00:00+09:00`, `${addDays(to, 1)}T00:00:00+09:00`, cals))
+          .filter((e) => !e.pushed) // tasks and exams sent from here already show as themselves
+          .map(calendarItem)
+          .filter((e) => e.endDate >= from && e.startDate <= to);
+        return json({ tasks, exams, events, google: "ok", write, calendars, push });
       } catch (e) {
         if (!(e instanceof GoogleError)) throw e;
-        return json({ tasks, exams, events: [], google: "error", error: e.message });
+        return json({ tasks, exams, events: [], google: "error", error: e.message, write, calendars: [], push });
       }
+    }
+
+    // Making, changing and deleting Google Calendar events from the calendar screen.
+    if (path.startsWith("/api/calendar/") && !(cfg.googleEnabled && db.getSetting("refresh_token") && google.calendarWriteGranted())) {
+      return json({ error: "구글 캘린더 쓰기 권한이 없습니다. 캘린더 화면에서 권한을 받아 주세요." }, 403);
+    }
+    if (path === "/api/calendar/events" && method === "POST") {
+      const b = await body(req);
+      const f = eventFields(b);
+      if (typeof f === "string") return json({ error: f }, 400);
+      const calendarId = str(b.calendarId, 300);
+      if (!calendarId) return json({ error: "캘린더를 골라 주세요" }, 400);
+      return json({ id: await google.insertEvent(calendarId, f) }, 201);
+    }
+    const ev = path.match(/^\/api\/calendar\/events\/([^/]+)$/);
+    if (ev && (method === "PATCH" || method === "DELETE")) {
+      const calendarId = url.searchParams.get("calendar") ?? "";
+      if (!calendarId) return json({ error: "캘린더를 골라 주세요" }, 400);
+      const eventId = decodeURIComponent(ev[1]!);
+      if (method === "DELETE") {
+        await google.deleteEvent(calendarId, eventId);
+        return json({ ok: true });
+      }
+      const f = eventFields(await body(req));
+      if (typeof f === "string") return json({ error: f }, 400);
+      await google.patchEvent(calendarId, eventId, f);
+      return json({ ok: true });
+    }
+    // Which calendar tasks and exams go to ('' = stop; the events sent so far are deleted from Google).
+    if (path === "/api/calendar/push" && method === "PUT") {
+      const calendarId = str((await body(req)).calendarId, 300);
+      if (calendarId && !(await google.calendarList()).some((c) => c.id === calendarId && (c.accessRole === "owner" || c.accessRole === "writer"))) {
+        return json({ error: "쓸 수 있는 캘린더가 아닙니다" }, 400);
+      }
+      db.setSetting("gcal_push", calendarId);
+      await gcal.sync();
+      return json({ calendarId, error: db.getSetting("gcal_push_error") ?? "" });
     }
 
     if (path === "/api/tasks" && method === "GET") {
@@ -1038,7 +1126,7 @@ ${body || `<section class="works"><p class="empty reveal">${mine ? "아직 포�
         status: 302,
         headers: {
           // Ask for the full grant only when none is saved or it lacks a scope (e.g. calendar, added later).
-          Location: google.authRedirect(state, !db.getSetting("refresh_token") || !google.calendarGranted(), cfg.adminEmail),
+          Location: google.authRedirect(state, !db.getSetting("refresh_token") || !google.calendarGranted() || !google.calendarWriteGranted(), cfg.adminEmail),
           // One cookie per attempt, so two tabs signing in at once don't overwrite each other's state.
           "Set-Cookie": setCookie(`oauth_state_${state}`, "1", 600),
         },
@@ -1103,11 +1191,14 @@ ${body || `<section class="works"><p class="empty reveal">${mine ? "아직 포�
   return Object.assign(async function fetch(req: Request): Promise<Response> {
     const path = new URL(req.url).pathname;
     try {
-      return withSecurityHeaders(await handle(req), path);
+      const res = await handle(req);
+      // A change may touch a task or exam that is also in Google Calendar: send it a moment later.
+      if (path.startsWith("/api/") && req.method !== "GET" && res.ok) gcal.kick();
+      return withSecurityHeaders(res, path);
     } catch (e) {
       if (e instanceof GoogleError) return withSecurityHeaders(json({ error: e.message }, e.status === 401 || e.status === 400 ? e.status : 502), path);
       console.error(e);
       return withSecurityHeaders(json({ error: "서버 오류" }, 500), path);
     }
-  }, { notion, moveNotionCopies });
+  }, { notion, moveNotionCopies, gcal });
 }

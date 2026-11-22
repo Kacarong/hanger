@@ -423,7 +423,16 @@ span.note-fold { cursor: default; }
 .by-course .course-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .by-course .pill { justify-self: end; }
 .exam-mark { display: inline-grid; place-items: center; width: 15px; color: var(--orange); }
-.cal-item.exam { color: var(--orange); font-weight: 500; }
+.cal-item.exam { display: flex; gap: 5px; margin: 0; padding: 1px 5px; border: 0; border-radius: 4px; background: none; color: var(--orange); font-weight: 500; } /* not the .exam card */
+.cal-push { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12px; white-space: nowrap; }
+.cal-push select { width: auto; max-width: 160px; height: 30px; padding: 0 8px; font-size: 12px; }
+.cal-push-error { margin: 0 16px 8px; font-size: 12px; }
+dialog.small { width: min(360px, calc(100% - 32px)); }
+dialog .choice { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+dialog .choice .btn { height: 56px; justify-content: center; gap: 8px; font-size: 15px; }
+dialog label.check { display: flex; align-items: center; gap: 8px; }
+dialog .foot .grow { flex: 1; }
+#event-open { display: inline-flex; align-items: center; text-decoration: none; }
 .cal-item.exam .dot { background: var(--orange); }
 @media (max-width: 860px) {
   .exam { margin: 12px; padding: 12px; }
