@@ -33,6 +33,7 @@ const ICONS = {
   right: '<path d="m9 5 7 7-7 7"/>',
   down: '<path stroke-width="2.4" d="m6 9 6 6 6-6"/>',
   exam: '<rect x="5" y="4" width="14" height="17" rx="2"/><path d="M9 4V2.5h6V4M9 10h6M9 14h6M9 18h3"/>',
+  book: '<path d="M4 4.5A1.5 1.5 0 0 1 5.5 3H20v15H5.5A1.5 1.5 0 0 0 4 19.5z"/><path d="M4 19.5A1.5 1.5 0 0 0 5.5 21H20v-3"/>',
   eye: '<path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/>',
 };
 const icon = (name) => {
@@ -863,6 +864,66 @@ function examCard(e, today, reload) {
   );
 }
 
+// 공부: 날짜별로 공부할 것과 과목. 할 일이 아니라서 캘린더·오늘 화면에는 나오지 않는다.
+let editingStudy = null;
+let studyPastOpen = false;
+
+async function loadStudies() {
+  const { date: today, studies } = await call("/api/studies");
+  const reload = () => loadStudies().catch(showError);
+  if (!$("study-date").value) $("study-date").value = today;
+  $("study-courses").replaceChildren(...[...new Set(studies.map((s) => s.course).filter(Boolean))].map((c) => el("option", { value: c })));
+  const todays = studies.filter((s) => s.date === today);
+  const ahead = studies.filter((s) => s.date > today && !s.done);
+  const late = studies.filter((s) => s.date < today && !s.done);
+  $("study-stats").replaceChildren(
+    stat("오늘 공부", `${todays.filter((s) => s.done).length}/${todays.length}`, ""),
+    stat("앞으로 할 공부", String(ahead.length), ""),
+    stat("밀린 공부", String(late.length), "", late.length > 0),
+  );
+  const q = searchText();
+  const shown = studies.filter((s) => !q || [s.title, s.course].join("\n").toLowerCase().includes(q));
+  const days = new Map();
+  for (const s of shown) days.set(s.date, [...(days.get(s.date) ?? []), s]);
+  const card = ([d, list]) =>
+    el(
+      "section",
+      { className: "exam study-day" + (d < today ? " past" : "") },
+      el("div", { className: "exam-head" }, el("div", { className: "grow" }, el("h2", { textContent: dayLabel(d) })), d === today ? pill("오늘", "blue") : null),
+      el("ul", { className: "plan" }, ...list.map((s) => studyRow(s, today, reload))),
+    );
+  const all = [...days];
+  const out = all.filter(([d]) => d >= today).map(card);
+  const past = all.filter(([d]) => d < today).reverse(); // the latest first
+  if (past.length) out.push(el("details", { className: "exam-past", open: studyPastOpen || !!q, ontoggle() { if (!q) studyPastOpen = this.open; } }, el("summary", {}, icon("right"), `지난 공부 · ${past.length}일`), ...past.map(card)));
+  if (!shown.length) out.push(el("p", { className: "notice", textContent: q ? "검색 결과가 없습니다." : "아직 적은 공부가 없습니다." }));
+  $("study-list").replaceChildren(...out);
+}
+
+function studyRow(s, today, reload) {
+  const update = (patch) => call(`/api/studies/${s.id}`, { method: "PATCH", body: patch }).then(reload, showError);
+  const late = !s.done && s.date < today;
+  return el(
+    "li",
+    { className: s.done ? "done" : late ? "late" : "" },
+    el("input", { type: "checkbox", checked: !!s.done, title: "끝냄 표시", onchange() { update({ done: this.checked }); } }),
+    s.course ? pill(s.course, "amber") : null,
+    el("span", { className: "plan-title", textContent: s.title }),
+    late ? pill("밀림", "orange") : null,
+    iconBtn("수정", "edit", () => openStudyDialog(s)),
+    iconBtn("삭제", "trash", () => confirm(`"${s.title}" 을(를) 지울까요?`) && call(`/api/studies/${s.id}`, { method: "DELETE" }).then(reload, showError), "danger"),
+  );
+}
+
+function openStudyDialog(s) {
+  editingStudy = s;
+  $("study-edit-date").value = s.date;
+  $("study-edit-course").value = s.course;
+  $("study-edit-title").value = s.title;
+  $("study-msg").textContent = "";
+  $("study-dialog").showModal();
+}
+
 function planRow(t, today, reload) {
   const update = (patch) => call(`/api/tasks/${t.id}`, { method: "PATCH", body: patch }).then(reload, showError);
   const late = !t.done && t.due_date && t.due_date < today;
@@ -1169,6 +1230,7 @@ const tabs = {
   tasks: { title: "할 일·과제", load: () => loadTasks(), actions: () => [newTaskBtn()] },
   calendar: { title: "캘린더", load: () => loadCalendar(), actions: () => [newTaskBtn()] },
   exams: { title: "시험", load: () => loadExams(), actions: () => [el("button", { className: "btn primary", type: "button", onclick: () => openExamDialog() }, icon("plus"), "새 시험", el("kbd", { textContent: "N" }))] },
+  studies: { title: "공부", load: () => loadStudies(), actions: () => [] },
   notes: {
     title: "노트",
     load: () => loadNotes(),
@@ -1422,6 +1484,28 @@ async function init() {
       $("exam-msg").textContent = e.message;
     }
   };
+  $("study-add").onsubmit = async (ev) => {
+    ev.preventDefault();
+    if (!$("study-title").value.trim()) return $("study-title").focus();
+    try {
+      await call("/api/studies", { method: "POST", body: { date: $("study-date").value, course: $("study-course").value, title: $("study-title").value } });
+      $("study-title").value = ""; // date and course stay, so the next one of that day is one line away
+      await loadStudies();
+      $("study-title").focus();
+    } catch (e) {
+      showError(e);
+    }
+  };
+  $("study-form").onsubmit = async (ev) => {
+    ev.preventDefault();
+    try {
+      await call(`/api/studies/${editingStudy.id}`, { method: "PATCH", body: { date: $("study-edit-date").value, course: $("study-edit-course").value, title: $("study-edit-title").value } });
+      $("study-dialog").close();
+      await loadStudies();
+    } catch (e) {
+      $("study-msg").textContent = e.message;
+    }
+  };
   $("profile-form").onsubmit = async (ev) => {
     ev.preventDefault();
     try {
@@ -1477,6 +1561,7 @@ async function init() {
     else if (ev.key.toLowerCase() === "n" && currentTab() === "notes") (ev.preventDefault(), newNote().catch(showError));
     else if (ev.key.toLowerCase() === "n" && currentTab() === "portfolio") (ev.preventDefault(), openItemDialog());
     else if (ev.key.toLowerCase() === "n" && currentTab() === "exams") (ev.preventDefault(), openExamDialog());
+    else if (ev.key.toLowerCase() === "n" && currentTab() === "studies") (ev.preventDefault(), $("study-title").focus());
     else if (ev.key.toLowerCase() === "n" && currentTab() !== "files") (ev.preventDefault(), openTaskDialog());
     else if (ev.key.toLowerCase() === "u" && currentTab() === "files" && me.driveConnected) (ev.preventDefault(), openUpload());
   });

@@ -2,7 +2,7 @@ import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypt
 import { mkdirSync, existsSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { cleanBlocks, editRuns, richOrNone } from "./blocks";
-import { ATTACH_TARGETS, CATEGORIES, TASK_CATEGORIES, TASK_KINDS, type AttachedFile, type Block, type Db, type ExamFields, type FileRow, type PortfolioFields, type PortfolioItem, type TaskFields } from "./db";
+import { ATTACH_TARGETS, CATEGORIES, TASK_CATEGORIES, TASK_KINDS, type AttachedFile, type Block, type Db, type ExamFields, type FileRow, type PortfolioFields, type PortfolioItem, type StudyFields, type TaskFields } from "./db";
 import { GoogleError, type CalendarEvent, type Google } from "./google";
 import { createNotionSync, NotionError } from "./notion";
 import { passwordProblem } from "./password";
@@ -275,6 +275,22 @@ export function createApp(cfg: AppConfig, db: Db, google: Google) {
     return out;
   }
 
+  // Validates study fields from a request body. Only keys present in the body are returned.
+  function studyFields(b: Record<string, unknown>): Partial<StudyFields & { done: number }> | string {
+    const out: Partial<StudyFields & { done: number }> = {};
+    if ("date" in b) {
+      out.date = str(b.date, 10);
+      if (!isDate(out.date)) return "날짜를 골라 주세요";
+    }
+    if ("course" in b) out.course = str(b.course, 100);
+    if ("title" in b) {
+      out.title = str(b.title, 200);
+      if (!out.title) return "공부할 내용을 입력해 주세요";
+    }
+    if ("done" in b) out.done = b.done ? 1 : 0;
+    return out;
+  }
+
   // The portfolio page. mine = the owner's own view (/admin/portfolio): private items too, marked 개인용.
   function renderPortfolio(mine = false): Response {
     const profile = db.profile();
@@ -523,6 +539,33 @@ ${body || `<section class="works"><p class="empty reveal">${mine ? "아직 포�
       }
       if (method === "DELETE") {
         db.deleteExam(exam.id);
+        return json({ ok: true });
+      }
+    }
+
+    // 공부: what to study day by day. Not tasks, so the calendar and the today screen never see it.
+    if (path === "/api/studies" && method === "GET") return json({ date: today(), studies: db.listStudies() });
+
+    if (path === "/api/studies" && method === "POST") {
+      const f = studyFields(await body(req));
+      if (typeof f === "string") return json({ error: f }, 400);
+      if (!f.date) return json({ error: "날짜를 골라 주세요" }, 400);
+      if (!f.title) return json({ error: "공부할 내용을 입력해 주세요" }, 400);
+      return json(db.insertStudy({ course: "", ...f, date: f.date, title: f.title }), 201);
+    }
+
+    const stm = path.match(/^\/api\/studies\/(\d+)$/);
+    if (stm) {
+      const study = db.getStudy(Number(stm[1]));
+      if (!study) return json({ error: "공부를 찾을 수 없습니다" }, 404);
+      if (method === "PATCH") {
+        const f = studyFields(await body(req));
+        if (typeof f === "string") return json({ error: f }, 400);
+        db.updateStudy(study.id, f);
+        return json(db.getStudy(study.id));
+      }
+      if (method === "DELETE") {
+        db.deleteStudy(study.id);
         return json({ ok: true });
       }
     }

@@ -402,6 +402,9 @@ span.note-fold { cursor: default; }
 .exam-past summary::-webkit-details-marker { display: none; }
 .exam-past summary svg { stroke-width: 2.4; transition: transform .12s; }
 .exam-past[open] summary svg { transform: rotate(90deg); }
+.study-add { margin: 16px; }
+.study-add input.course { flex: 0 0 160px; }
+.study-day .plan .pill { flex: none; }
 .exam-mark { display: inline-grid; place-items: center; width: 15px; color: var(--orange); }
 .cal-item.exam { color: var(--orange); font-weight: 500; }
 .cal-item.exam .dot { background: var(--orange); }
@@ -411,4 +414,6 @@ span.note-fold { cursor: default; }
   .plan li .btn { opacity: 1; }
   .plan-add { flex-wrap: wrap; }
   .plan-add input[type="date"] { width: 100%; }
+  .study-add { margin: 12px; }
+  .study-add input.course { flex: 1 1 100%; }
 }

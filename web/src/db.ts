@@ -68,6 +68,10 @@ export type ExamRow = {
 };
 export type ExamFields = Pick<ExamRow, "title" | "course" | "date" | "time" | "place" | "scope" | "note">;
 
+// A day's study on the 공부 tab. Kept apart from tasks so it never shows up on the calendar (or the today screen).
+export type StudyRow = { id: number; date: string; course: string; title: string; done: number; created_at: string };
+export type StudyFields = Pick<StudyRow, "date" | "course" | "title">;
+
 // A note is a list of blocks (src/blocks.ts). A "todo" block with a date is also a task (tasks.note_id/block_id),
 // so it shows up on the today screen and the calendar.
 export { BLOCK_TYPES, NOTE_MAX_BLOCKS, NOTE_MAX_TEXT, blockTitle, type Block } from "./blocks";
@@ -186,6 +190,14 @@ export function openDb(path: string) {
       place TEXT NOT NULL DEFAULT '',
       scope TEXT NOT NULL DEFAULT '',
       note TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE TABLE IF NOT EXISTS studies (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      date TEXT NOT NULL,
+      course TEXT NOT NULL DEFAULT '',
+      title TEXT NOT NULL,
+      done INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
     CREATE TABLE IF NOT EXISTS portfolio_sections (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, sort INTEGER NOT NULL DEFAULT 0);
@@ -482,6 +494,22 @@ export function openDb(path: string) {
     }),
     deleteExam(id: number) {
       db.query("DELETE FROM exams WHERE id = ?").run(id); // its plan goes by trigger
+    },
+    listStudies(): StudyRow[] {
+      return db.query("SELECT * FROM studies ORDER BY date, id").all() as StudyRow[];
+    },
+    getStudy(id: number): StudyRow | null {
+      return db.query("SELECT * FROM studies WHERE id = ?").get(id) as StudyRow | null;
+    },
+    insertStudy(s: StudyFields): StudyRow {
+      return db.query("INSERT INTO studies (date, course, title) VALUES (?, ?, ?) RETURNING *").get(s.date, s.course, s.title) as StudyRow;
+    },
+    updateStudy(id: number, patch: Partial<StudyFields & { done: number }>) {
+      const keys = Object.keys(patch) as (keyof typeof patch)[];
+      if (keys.length) db.query(`UPDATE studies SET ${keys.map((k) => `${k} = ?`).join(", ")} WHERE id = ?`).run(...keys.map((k) => patch[k]!), id);
+    },
+    deleteStudy(id: number) {
+      db.query("DELETE FROM studies WHERE id = ?").run(id);
     },
     listNotes(q?: string): Pick<NoteRow, "id" | "title" | "parent_id" | "updated_at">[] {
       const like = `%${q ?? ""}%`;

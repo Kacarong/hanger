@@ -1167,6 +1167,49 @@ test("시험: 일정 → 날짜별 공부 계획(오늘·캘린더·할 일에�
   }
 });
 
+test("공부: 날짜별로 공부·과목을 적고 체크·수정·삭제, 캘린더·오늘 화면·할 일에는 안 나옴", async () => {
+  const { call, db, cleanup } = makeApp({ googleEnabled: false, now: () => new Date("2026-11-20T03:00:00Z") });
+  try {
+    db.setSetting("password_hash", await Bun.password.hash("correct horse battery"));
+    const { cookie } = await passwordLogin(call, "correct horse battery");
+    expect((await call("/api/studies")).status).toBe(401);
+    const req = async (path: string, method: string, b?: object) => {
+      const r = await call(path, { method, cookie, headers: JSON_ORIGIN, body: b ? JSON.stringify(b) : undefined });
+      return { status: r.status, body: (await r.json()) as any };
+    };
+
+    const a = (await req("/api/studies", "POST", { date: "2026-11-21", course: "토질역학", title: "3장 복습" })).body;
+    expect(a).toMatchObject({ date: "2026-11-21", course: "토질역학", title: "3장 복습", done: 0 });
+    await req("/api/studies", "POST", { date: "2026-11-20", title: "영단어 50개" });
+    await req("/api/studies", "POST", { date: "2026-11-20", course: "수학", title: "미적분 문제" });
+    expect((await req("/api/studies", "POST", { title: "날짜 없음" })).status).toBe(400);
+    expect((await req("/api/studies", "POST", { date: "2026-02-30", title: "x" })).status).toBe(400);
+    expect((await req("/api/studies", "POST", { date: "2026-11-20", title: " " })).status).toBe(400);
+
+    let list = (await req("/api/studies", "GET")).body;
+    expect(list.date).toBe("2026-11-20");
+    expect(list.studies.map((s: any) => [s.date, s.course, s.title])).toEqual([["2026-11-20", "", "영단어 50개"], ["2026-11-20", "수학", "미적분 문제"], ["2026-11-21", "토질역학", "3장 복습"]]);
+
+    // Not a task: the calendar, the today screen and the 할 일 list never see it.
+    expect((await req("/api/calendar?from=2026-11-01&to=2026-11-30", "GET")).body.tasks).toEqual([]);
+    const today = (await req("/api/today", "GET")).body;
+    expect([today.overdue, today.today, today.upcoming]).toEqual([[], [], []]);
+    expect((await req("/api/tasks", "GET")).body).toEqual([]);
+
+    expect((await req(`/api/studies/${a.id}`, "PATCH", { done: true })).body).toMatchObject({ done: 1 });
+    expect((await req(`/api/studies/${a.id}`, "PATCH", { date: "2026-11-22", course: "", title: "4장 복습" })).body).toMatchObject({ date: "2026-11-22", course: "", title: "4장 복습", done: 1 });
+    expect((await req(`/api/studies/${a.id}`, "PATCH", { title: "" })).status).toBe(400);
+    expect((await req(`/api/studies/${a.id}`, "PATCH", { date: "" })).status).toBe(400);
+    expect((await req("/api/studies/9999", "PATCH", { title: "x" })).status).toBe(404);
+
+    expect((await req(`/api/studies/${a.id}`, "DELETE")).status).toBe(200);
+    list = (await req("/api/studies", "GET")).body;
+    expect(list.studies.map((s: any) => s.title)).toEqual(["영단어 50개", "미적분 문제"]);
+  } finally {
+    cleanup();
+  }
+});
+
 test("origin 칸이 없던 DB: 예전 가져오기가 붙인 노션 사본만 노션 사본으로, 직접 올린 파일은 노션 태그여도 클라우드에", () => {
   const dir = mkdtempSync(join(tmpdir(), "folio-test-"));
   try {

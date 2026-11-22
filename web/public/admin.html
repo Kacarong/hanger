@@ -35,6 +35,7 @@
     <div class="nav-group">작업</div>
     <a class="nav-item" href="#tasks" data-tab="tasks"><span data-icon="check"></span>할 일·과제</a>
     <a class="nav-item" href="#exams" data-tab="exams"><span data-icon="exam"></span>시험</a>
+    <a class="nav-item" href="#studies" data-tab="studies"><span data-icon="book"></span>공부</a>
     <a class="nav-item" href="#calendar" data-tab="calendar"><span data-icon="calendar"></span>캘린더</a>
     <a class="nav-item" href="#notes" data-tab="notes"><span data-icon="note"></span>노트</a>
 
@@ -80,6 +81,18 @@
       <div id="tab-exams" hidden>
         <div class="stats" id="exam-stats"></div>
         <div id="exam-list"></div>
+      </div>
+
+      <div id="tab-studies" hidden>
+        <div class="stats" id="study-stats"></div>
+        <form class="plan-add study-add" id="study-add">
+          <input class="input" type="date" id="study-date" aria-label="공부할 날짜" required>
+          <input class="input course" id="study-course" list="study-courses" placeholder="과목" maxlength="100">
+          <input class="input" id="study-title" placeholder="공부할 내용" maxlength="200">
+          <button class="btn primary" type="submit"><span data-icon="plus"></span>추가</button>
+        </form>
+        <datalist id="study-courses"></datalist>
+        <div id="study-list"></div>
       </div>
 
       <div id="tab-calendar" hidden>
@@ -170,6 +183,19 @@
     <label>시험 범위<textarea class="input" id="exam-scope" maxlength="5000" rows="3"></textarea></label>
     <label>메모<textarea class="input" id="exam-note" maxlength="5000" rows="2"></textarea></label>
     <span class="error" id="exam-msg"></span>
+    <div class="foot"><button class="btn" type="button" data-close>취소</button><button class="btn primary" value="ok">저장</button></div>
+  </form>
+</dialog>
+
+<dialog id="study-dialog">
+  <form method="dialog" id="study-form">
+    <h2>공부 수정</h2>
+    <div class="row">
+      <label>날짜<input class="input" type="date" id="study-edit-date" required></label>
+      <label>과목<input class="input" id="study-edit-course" list="study-courses" maxlength="100"></label>
+    </div>
+    <label>공부할 내용<input class="input" id="study-edit-title" maxlength="200" required></label>
+    <span class="error" id="study-msg"></span>
     <div class="foot"><button class="btn" type="button" data-close>취소</button><button class="btn primary" value="ok">저장</button></div>
   </form>
 </dialog>
