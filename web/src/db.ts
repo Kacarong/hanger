@@ -43,6 +43,7 @@ export type TaskRow = {
   note_id: number | null; // set when the task is a dated checkbox inside a note
   block_id: string | null;
   exam_id: number | null; // set when the task is a day of an exam's study plan (kind 공부)
+  study_id: number | null; // set when the task is a 공부 tab entry whose day has come (see queueStudies)
   note_title?: string | null; // joined in by listTasks/getTask
   exam_title?: string | null; // joined in by listTasks/getTask
   files?: number; // how many cloud files are attached, joined in by listTasks/getTask
@@ -70,8 +71,9 @@ export type ExamRow = {
 export type ExamFields = Pick<ExamRow, "title" | "course" | "date" | "time" | "place" | "scope" | "note" | "color">;
 export const EXAM_COLORS = ["", "red", "orange", "amber", "green", "blue", "purple", "pink"];
 
-// A day's study on the 공부 tab. Kept apart from tasks so it never shows up on the calendar (or the today screen).
-export type StudyRow = { id: number; date: string; course: string; title: string; done: number; created_at: string };
+// A day's study on the 공부 tab. Kept apart from tasks so it never shows up on the calendar. When its day comes it
+// is also put in 할 일·과제 as a 오늘 할 일 task (tasks.study_id, queued = done so), checked off together with it.
+export type StudyRow = { id: number; date: string; course: string; title: string; done: number; queued: number; created_at: string };
 export type StudyFields = Pick<StudyRow, "date" | "course" | "title">;
 
 // A note is a list of blocks (src/blocks.ts). A "todo" block with a date is also a task (tasks.note_id/block_id),
@@ -232,11 +234,19 @@ export function openDb(path: string) {
   if (!taskCols.includes("category")) db.exec("ALTER TABLE tasks ADD COLUMN category TEXT NOT NULL DEFAULT ''");
   const examCols = (db.query("PRAGMA table_info(exams)").all() as { name: string }[]).map((c) => c.name);
   if (!examCols.includes("color")) db.exec("ALTER TABLE exams ADD COLUMN color TEXT NOT NULL DEFAULT ''");
+  if (!taskCols.includes("study_id")) db.exec("ALTER TABLE tasks ADD COLUMN study_id INTEGER");
+  const studyCols = (db.query("PRAGMA table_info(studies)").all() as { name: string }[]).map((c) => c.name);
+  // Days already gone when this came in are not put in 할 일·과제 afterwards.
+  if (!studyCols.includes("queued")) db.exec("ALTER TABLE studies ADD COLUMN queued INTEGER NOT NULL DEFAULT 0; UPDATE studies SET queued = 1 WHERE date < date('now', '+9 hours');");
   db.exec(`
     CREATE INDEX IF NOT EXISTS tasks_exam ON tasks (exam_id);
     -- An exam takes its study plan with it.
     CREATE TRIGGER IF NOT EXISTS tasks_exam_gone AFTER DELETE ON exams BEGIN
       DELETE FROM tasks WHERE exam_id = old.id;
+    END;
+    CREATE INDEX IF NOT EXISTS tasks_study ON tasks (study_id);
+    CREATE TRIGGER IF NOT EXISTS tasks_study_gone AFTER DELETE ON studies BEGIN
+      DELETE FROM tasks WHERE study_id = old.id;
     END;
   `);
   const noteCols = (db.query("PRAGMA table_info(notes)").all() as { name: string }[]).map((c) => c.name);
@@ -433,10 +443,11 @@ export function openDb(path: string) {
       return files;
     }),
     // from/to are inclusive YYYY-MM-DD bounds on due_date; a bound excludes undated tasks.
-    listTasks(opts: { done?: boolean; from?: string; to?: string; kind?: string; doneOn?: string; planned?: boolean }): TaskRow[] {
+    listTasks(opts: { done?: boolean; from?: string; to?: string; kind?: string; doneOn?: string; planned?: boolean; noStudies?: boolean }): TaskRow[] {
       const where: string[] = [];
       const args: (string | number)[] = [];
       if (opts.planned) where.push("exam_id IS NOT NULL");
+      if (opts.noStudies) where.push("study_id IS NULL");
       if (opts.done !== undefined) {
         where.push("done = ?");
         args.push(opts.done ? 1 : 0);
@@ -505,13 +516,31 @@ export function openDb(path: string) {
     getStudy(id: number): StudyRow | null {
       return db.query("SELECT * FROM studies WHERE id = ?").get(id) as StudyRow | null;
     },
-    insertStudy(s: StudyFields): StudyRow {
-      return db.query("INSERT INTO studies (date, course, title) VALUES (?, ?, ?) RETURNING *").get(s.date, s.course, s.title) as StudyRow;
+    // A day already gone is a record, not something to do: it doesn't go to 할 일·과제.
+    insertStudy(s: StudyFields, today: string): StudyRow {
+      return db.query("INSERT INTO studies (date, course, title, queued) VALUES (?, ?, ?, ?) RETURNING *").get(s.date, s.course, s.title, s.date < today ? 1 : 0) as StudyRow;
     },
-    updateStudy(id: number, patch: Partial<StudyFields & { done: number }>) {
+    // The 오늘 할 일 task follows. Moved to another day, it waits for that day again (a day already gone: not at all).
+    updateStudy: db.transaction((id: number, patch: Partial<StudyFields & { done: number }>, today: string) => {
+      const before = db.query("SELECT * FROM studies WHERE id = ?").get(id) as StudyRow;
       const keys = Object.keys(patch) as (keyof typeof patch)[];
       if (keys.length) db.query(`UPDATE studies SET ${keys.map((k) => `${k} = ?`).join(", ")} WHERE id = ?`).run(...keys.map((k) => patch[k]!), id);
-    },
+      if (patch.date !== undefined && patch.date !== before.date) {
+        db.query("DELETE FROM tasks WHERE study_id = ?").run(id);
+        db.query("UPDATE studies SET queued = ? WHERE id = ?").run(patch.date < today ? 1 : 0, id);
+        return;
+      }
+      if (patch.title !== undefined) db.query("UPDATE tasks SET title = ? WHERE study_id = ?").run(patch.title, id);
+      if (patch.course !== undefined) db.query("UPDATE tasks SET course = ? WHERE study_id = ?").run(patch.course, id);
+      if (patch.done !== undefined) db.query("UPDATE tasks SET done = ?, done_at = ? WHERE study_id = ? AND done != ?").run(patch.done, patch.done ? today : null, id, patch.done);
+    }),
+    // Each study whose day has come goes into 할 일·과제 as a 오늘 할 일 task, once: deleted there, it stays deleted.
+    queueStudies: db.transaction((today: string) => {
+      for (const s of db.query("SELECT * FROM studies WHERE queued = 0 AND date <= ?").all(today) as StudyRow[]) {
+        db.query("INSERT INTO tasks (kind, category, title, course, due_date, done, done_at, study_id) VALUES ('공부', '오늘 할 일', ?, ?, ?, ?, ?, ?)").run(s.title, s.course, s.date, s.done, s.done ? today : null, s.id);
+        db.query("UPDATE studies SET queued = 1 WHERE id = ?").run(s.id);
+      }
+    }),
     deleteStudy(id: number) {
       db.query("DELETE FROM studies WHERE id = ?").run(id);
     },

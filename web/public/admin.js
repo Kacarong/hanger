@@ -564,6 +564,7 @@ function taskRow(t, today, reload, withActions) {
       t.note ? el("span", { className: "sub", textContent: t.note }) : null,
       t.note_id ? el("span", { className: "sub" }, el("a", { href: `#notes/${t.note_id}`, textContent: `노트 · ${t.note_title || "제목 없음"}` })) : null,
       t.exam_id ? el("span", { className: "sub" }, el("a", { href: "#exams", textContent: `시험 · ${t.exam_title}` })) : null,
+      t.study_id ? el("span", { className: "sub" }, el("a", { href: "#studies", textContent: t.course ? `공부 · ${t.course}` : "공부" })) : null,
     ),
     el("td", { className: "hide-sm" }, pill(t.kind, t.kind === "과제" ? "blue" : t.kind === "공부" ? "amber" : "gray")),
     withActions ? null : el("td", { className: "hide-sm muted", textContent: t.course || "—" }), // 할 일·과제 탭에는 과목 칸이 없다
@@ -831,7 +832,8 @@ function examCard(e, today, reload) {
   );
 }
 
-// 공부: 날짜별로 공부할 것과 과목. 할 일이 아니라서 캘린더·오늘 화면에는 나오지 않는다.
+// 공부: 날짜별로 공부할 것과 과목. 캘린더에는 나오지 않는다. 그날이 되면 할 일·과제의 "오늘 할 일"에도 들어가고(서버),
+// 어느 쪽에서 체크해도 같이 체크된다.
 // 정해 둔 기간(range)의 날마다 카드가 미리 깔려 있어서 그 카드에 바로 적는다.
 let editingStudy = null;
 let studyPastOpen = false;

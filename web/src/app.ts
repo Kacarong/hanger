@@ -468,6 +468,7 @@ ${body || `<section class="works"><p class="empty reveal">${mine ? "아직 포�
 
     if (path === "/api/today" && method === "GET") {
       const d = today();
+      db.queueStudies(d);
       const open = db.listTasks({ done: false, to: addDays(d, UPCOMING_DAYS) });
       return json({
         date: d,
@@ -485,7 +486,7 @@ ${body || `<section class="works"><p class="empty reveal">${mine ? "아직 포�
       const from = url.searchParams.get("from") ?? "";
       const to = url.searchParams.get("to") ?? "";
       if (!isDate(from) || !isDate(to) || to < from || to > addDays(from, CALENDAR_MAX_DAYS - 1)) return json({ error: "날짜 범위가 올바르지 않습니다" }, 400);
-      const tasks = db.listTasks({ from, to });
+      const tasks = db.listTasks({ from, to, noStudies: true }); // 공부 stays off the calendar
       const exams = db.listExams({ from, to });
       if (!cfg.googleEnabled || !db.getSetting("refresh_token")) return json({ tasks, exams, events: [], google: "off" });
       if (!google.calendarGranted()) return json({ tasks, exams, events: [], google: "need_consent" });
@@ -504,6 +505,7 @@ ${body || `<section class="works"><p class="empty reveal">${mine ? "아직 포�
       const from = q.get("from") ?? "";
       const to = q.get("to") ?? "";
       if ((from && !isDate(from)) || (to && !isDate(to))) return json({ error: "날짜가 올바르지 않습니다" }, 400);
+      db.queueStudies(today());
       return json(db.listTasks({ done: done === null ? undefined : done === "1", from, to, kind: q.get("kind") ?? undefined }));
     }
 
@@ -548,7 +550,8 @@ ${body || `<section class="works"><p class="empty reveal">${mine ? "아직 포�
       }
     }
 
-    // 공부: what to study day by day. Not tasks, so the calendar and the today screen never see it.
+    // 공부: what to study day by day. Not tasks, so the calendar never sees it; on its day it also becomes a
+    // 오늘 할 일 task in 할 일·과제 (db.queueStudies, run when that list or the today screen is read).
     // range: the days the 공부 tab lays out as cards ready to write in, even with nothing on them yet.
     if (path === "/api/studies" && method === "GET") return json({ date: today(), range: JSON.parse(db.getSetting("study_range") ?? "null"), studies: db.listStudies() });
 
@@ -568,7 +571,7 @@ ${body || `<section class="works"><p class="empty reveal">${mine ? "아직 포�
       if (typeof f === "string") return json({ error: f }, 400);
       if (!f.date) return json({ error: "날짜를 골라 주세요" }, 400);
       if (!f.title) return json({ error: "공부할 내용을 입력해 주세요" }, 400);
-      return json(db.insertStudy({ course: "", ...f, date: f.date, title: f.title }), 201);
+      return json(db.insertStudy({ course: "", ...f, date: f.date, title: f.title }, today()), 201);
     }
 
     const stm = path.match(/^\/api\/studies\/(\d+)$/);
@@ -578,7 +581,7 @@ ${body || `<section class="works"><p class="empty reveal">${mine ? "아직 포�
       if (method === "PATCH") {
         const f = studyFields(await body(req));
         if (typeof f === "string") return json({ error: f }, 400);
-        db.updateStudy(study.id, f);
+        db.updateStudy(study.id, f, today());
         return json(db.getStudy(study.id));
       }
       if (method === "DELETE") {
@@ -602,6 +605,7 @@ ${body || `<section class="works"><p class="empty reveal">${mine ? "아직 포�
           if (done !== !!t.done) patch.done_at = done ? today() : null;
         }
         db.updateTask(t.id, patch);
+        if (t.study_id && patch.done !== undefined) db.updateStudy(t.study_id, { done: patch.done }, today()); // checked off on the 공부 tab too
         const after = db.getTask(t.id)!;
         // A task from a note is its todo block: write the change back to the block. Taking the
         // date off turns it back into a plain checkbox in the note, and the task goes away.
