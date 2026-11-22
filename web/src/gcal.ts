@@ -83,23 +83,25 @@ export function createCalendarPush(opts: { db: Db; google: Google; today: () => 
     }
     const from = addDays(opts.today(), -PUSH_BACK_DAYS);
     const { tasks, exams } = db.calendarPushItems(from);
-    // What is still there: an event deleted in Google is made again while its item is here.
+    // Events still listed from the window on. Only used to skip unchanged items: an event missing from it may just be dated
+    // before the window (an old item moved forward), so that is not taken as deleted; the PATCH below tells.
     const present = await google.eventIds(target, `${from}T00:00:00+09:00`);
     const want = new Map<string, EventBody>([...tasks.map((t) => [`task:${t.id}`, taskEvent(t)] as const), ...exams.map((e) => [`exam:${e.id}`, examEvent(e)] as const)]);
     for (const [key, body] of want) {
       const hash = createHash("sha256").update(JSON.stringify(body)).digest("hex");
       const l = links.get(key);
-      const there = !!l && l.calendar_id === target && present.has(l.event_id);
-      if (there && l!.hash === hash) continue;
-      if (there) {
+      if (l && l.calendar_id === target) {
+        if (l.hash === hash && present.has(l.event_id)) continue;
         try {
-          await google.patchEvent(target, l.event_id, body);
-          db.setGcalLink({ ...l, hash });
-          continue;
+          // Deleted in Google: 404/410, or still there as "cancelled". Then it is made again below, since the item is still here.
+          if ((await google.patchEvent(target, l.event_id, body)) !== "cancelled") {
+            db.setGcalLink({ ...l, hash });
+            continue;
+          }
         } catch (e) {
-          if (!gone(e)) throw e; // deleted in Google: made again below, since it is still here
+          if (!gone(e)) throw e;
         }
-      } else if (l && l.calendar_id !== target) {
+      } else if (l) {
         await drop(key, l.calendar_id, l.event_id); // the owner picked another calendar
       }
       db.setGcalLink({ key, calendar_id: target, event_id: await google.insertEvent(target, body), hash });

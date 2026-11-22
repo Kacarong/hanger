@@ -17,9 +17,12 @@ let loginEmail = "owner@example.com";
 const READ_SCOPE = "openid email https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/calendar.readonly";
 const FULL_SCOPE = `${READ_SCOPE} https://www.googleapis.com/auth/calendar.events`;
 // Events made through the API, by calendar id (the fixed ones below are always listed too).
-type FakeEvent = { id: string; summary?: string; location?: string; description?: string; start: Record<string, string>; end: Record<string, string>; extendedProperties?: { private: Record<string, string> } };
+type FakeEvent = { id: string; status?: string; summary?: string; location?: string; description?: string; start: Record<string, string>; end: Record<string, string>; extendedProperties?: { private: Record<string, string> } };
 const madeEvents = new Map<string, Map<string, FakeEvent>>();
 const calEvents = (id: string) => madeEvents.get(id) ?? madeEvents.set(id, new Map()).get(id)!;
+const calCalls = { insert: 0, patch: 0 };
+// Like Google's list: deleted ("cancelled") events are left out, and so are events that end before timeMin.
+const eventEnd = (e: FakeEvent) => new Date(e.end.dateTime ?? `${e.end.date}T00:00:00+09:00`).getTime();
 let grantedScope = FULL_SCOPE; // what the fake consent screen lets through
 let lastPrompt: string | null = null; // like Google, a refresh token comes only from a consent screen
 let calendarFails = false;
@@ -125,7 +128,8 @@ beforeAll(() => {
           list.delete(e.id);
           return new Response(null, { status: 204 });
         }
-        // PATCH merges one level down; null clears a key, like Google.
+        // PATCH merges one level down; null clears a key, like Google. A cancelled event can still be patched.
+        calCalls.patch++;
         const patch = (await req.json()) as Record<string, unknown>;
         for (const [k, v] of Object.entries(patch)) {
           if (v && typeof v === "object" && !Array.isArray(v)) {
@@ -135,10 +139,11 @@ beforeAll(() => {
           } else if (v === null) delete (e as Record<string, unknown>)[k];
           else (e as Record<string, unknown>)[k] = v;
         }
-        return Response.json({ id: e.id });
+        return Response.json({ id: e.id, status: e.status ?? "confirmed" });
       }
       const cal = p.match(/^\/calendar\/v3\/calendars\/([^/]+)\/events$/);
       if (cal && req.method === "POST") {
+        calCalls.insert++;
         const e = { ...((await req.json()) as FakeEvent), id: `ev${nextId++}` };
         calEvents(decodeURIComponent(cal[1]!)).set(e.id, e);
         return Response.json({ id: e.id });
@@ -158,7 +163,9 @@ beforeAll(() => {
             : id === "ko#holiday@group.v.calendar.google.com"
               ? [{ id: "h1", start: { date: "2026-11-25" }, end: { date: "2026-11-26" } }]
               : [{ id: "x", summary: "보이면 안 됨", start: { date: "2026-11-19" }, end: { date: "2026-11-20" } }];
-        return Response.json({ items: [...items, ...calEvents(id).values()] });
+        const timeMin = url.searchParams.get("timeMin");
+        const made = [...calEvents(id).values()].filter((e) => e.status !== "cancelled" && (!timeMin || eventEnd(e) > new Date(timeMin).getTime()));
+        return Response.json({ items: [...items, ...made] });
       }
       if (p === "/drive/v3/about") return Response.json({ storageQuota: { limit: String(400 * 1024 ** 3), usage: "1024", usageInDriveTrash: "0" } });
 
@@ -754,6 +761,13 @@ test("구글 캘린더 쓰기: 일정 만들기·고치기·지우기, 할 일·
     const hwAgain = sent().find((e) => e.extendedProperties?.private.kacarong === `task:${task.id}`)!;
     expect(hwAgain.summary).toBe("✓ [수리학] 레포트");
     expect(hwAgain.id).not.toBe(hw.id);
+    // Deleted but kept by Google as "cancelled" (a PATCH still succeeds on it): made again too.
+    hwAgain.status = "cancelled";
+    await gcal.sync();
+    const live = sent().filter((e) => e.status !== "cancelled" && e.extendedProperties?.private.kacarong === `task:${task.id}`);
+    expect(live).toHaveLength(1);
+    expect(live[0]!.id).not.toBe(hwAgain.id);
+    calEvents("me@example.com").delete(hwAgain.id);
     // Deleted in Google but still here: made again.
     calEvents("me@example.com").delete(ex.id);
     await post(`/api/exams/${exam.id}`, { time: "10:00" }, "PATCH");
@@ -961,6 +975,44 @@ test("포트폴리오: 섹션 보기 방식(큰 카드·격자·목록), 항목�
     expect(db.isPublicFile(pic.id)).toBe(false);
     expect(await (await call("/")).text()).not.toContain("자세히 보기");
   } finally {
+    cleanup();
+  }
+});
+
+test("구글로 보내기: 오래전에 보낸 할 일을 앞으로 옮기면 새로 만들지 않고 그 일정을 고침", async () => {
+  loginEmail = "owner@example.com";
+  madeEvents.clear();
+  let clock = new Date("2026-10-01T03:00:00Z");
+  const { call, gcal, cleanup } = makeApp({ now: () => clock });
+  try {
+    const { cookie } = await login(call);
+    const post = (path: string, b: object, method = "POST") => call(path, { method, cookie, headers: JSON_ORIGIN, body: JSON.stringify(b) });
+    const task = (await (await post("/api/tasks", { title: "보고서", due_date: "2026-10-01" })).json()) as { id: number };
+    await post("/api/calendar/push", { calendarId: "me@example.com" }, "PUT");
+    const [ev] = [...calEvents("me@example.com").values()];
+    expect(ev).toMatchObject({ summary: "보고서", start: { date: "2026-10-01" } });
+
+    // Seven weeks later the item is older than the 30-day window, so its event is no longer listed; then it moves forward.
+    clock = new Date("2026-11-22T03:00:00Z");
+    await gcal.sync();
+    const before = { ...calCalls };
+    await post(`/api/tasks/${task.id}`, { due_date: "2026-11-23" }, "PATCH");
+    await Bun.sleep(5);
+    await gcal.sync();
+    expect(calCalls.insert).toBe(before.insert); // no second event
+    expect(calCalls.patch).toBe(before.patch + 1);
+    expect([...calEvents("me@example.com").values()]).toHaveLength(1);
+    expect(ev).toMatchObject({ start: { date: "2026-11-23" }, end: { date: "2026-11-24" } });
+    // Now in the window and unchanged: nothing is sent again.
+    await gcal.sync();
+    expect(calCalls.patch).toBe(before.patch + 1);
+    // Deleting it here still deletes that one event.
+    await call(`/api/tasks/${task.id}`, { method: "DELETE", cookie, headers: JSON_ORIGIN });
+    await Bun.sleep(5);
+    await gcal.sync();
+    expect(calEvents("me@example.com").size).toBe(0);
+  } finally {
+    madeEvents.clear();
     cleanup();
   }
 });
