@@ -38,6 +38,7 @@
     <a class="nav-item" href="#studies" data-tab="studies"><span data-icon="book"></span>공부</a>
     <a class="nav-item" href="#calendar" data-tab="calendar"><span data-icon="calendar"></span>캘린더</a>
     <a class="nav-item" href="#notes" data-tab="notes"><span data-icon="note"></span>노트</a>
+    <a class="nav-item" href="#expenses" data-tab="expenses"><span data-icon="wallet"></span>지출</a>
 
     <div class="nav-group">보관</div>
     <a class="nav-item" href="#files" data-tab="files"><span data-icon="folder"></span>클라우드</a>
@@ -98,6 +99,12 @@
         </details>
         <datalist id="study-courses"></datalist>
         <div id="study-list"></div>
+      </div>
+
+      <div id="tab-expenses" hidden>
+        <div class="stats" id="expense-stats"></div>
+        <table class="table expense-table"><thead><tr><th class="w1"></th><th>이름</th><th class="hide-sm">언제</th><th class="num">금액</th><th></th></tr></thead>
+          <tbody id="expense-list"></tbody></table>
       </div>
 
       <div id="tab-calendar" hidden>
@@ -238,6 +245,22 @@
       <label title="분홍"><input type="radio" name="exam-color" value="pink" aria-label="분홍"><span class="swatch c-pink"></span></label>
     </fieldset>
     <span class="error" id="exam-msg"></span>
+    <div class="foot"><button class="btn" type="button" data-close>취소</button><button class="btn primary" value="ok">저장</button></div>
+  </form>
+</dialog>
+
+<dialog id="expense-dialog">
+  <form method="dialog" id="expense-form">
+    <h2 id="expense-dialog-title">새 지출</h2>
+    <label>종류<select class="input" id="expense-kind"><option value="정기">매달 나가는 돈</option><option value="예정">앞으로 쓸 돈</option></select></label>
+    <label>이름<input class="input" id="expense-title" maxlength="200" placeholder="통신비, 구독료, 노트북 …" required></label>
+    <div class="row">
+      <label>금액(원)<input class="input" id="expense-amount" inputmode="numeric" placeholder="예: 55,000" required></label>
+      <label id="expense-day-box">매달 며칠<input class="input" type="number" id="expense-day" min="1" max="31" placeholder="비워 두면 날짜 없음"></label>
+      <label id="expense-date-box">언제<input class="input" type="date" id="expense-date"></label>
+    </div>
+    <label>메모<textarea class="input" id="expense-note" maxlength="2000" rows="2"></textarea></label>
+    <span class="error" id="expense-msg"></span>
     <div class="foot"><button class="btn" type="button" data-close>취소</button><button class="btn primary" value="ok">저장</button></div>
   </form>
 </dialog>

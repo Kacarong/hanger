@@ -79,6 +79,12 @@ export type NotificationRow = { id: number; title: string; body: string; url: st
 export type GcalLink = { key: string; calendar_id: string; event_id: string; hash: string };
 export type StudyFields = Pick<StudyRow, "date" | "course" | "title">;
 
+// A line on the 지출 tab. 정기 = money that goes out every month (day = the day of the month, null = not fixed);
+// 예정 = money to spend later (date = when, null = not fixed; done = spent).
+export type ExpenseRow = { id: number; kind: string; title: string; amount: number; day: number | null; date: string | null; note: string; done: number; created_at: string };
+export type ExpenseFields = Pick<ExpenseRow, "kind" | "title" | "amount" | "day" | "date" | "note" | "done">;
+export const EXPENSE_KINDS = ["정기", "예정"];
+
 // A note is a list of blocks (src/blocks.ts). A "todo" block with a date is also a task (tasks.note_id/block_id),
 // so it shows up on the today screen and the calendar.
 export { BLOCK_TYPES, NOTE_MAX_BLOCKS, NOTE_MAX_TEXT, blockTitle, type Block } from "./blocks";
@@ -207,6 +213,17 @@ export function openDb(path: string) {
       date TEXT NOT NULL,
       course TEXT NOT NULL DEFAULT '',
       title TEXT NOT NULL,
+      done INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE TABLE IF NOT EXISTS expenses (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      kind TEXT NOT NULL,
+      title TEXT NOT NULL,
+      amount INTEGER NOT NULL DEFAULT 0,
+      day INTEGER,
+      date TEXT,
+      note TEXT NOT NULL DEFAULT '',
       done INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
@@ -568,6 +585,21 @@ export function openDb(path: string) {
     }),
     deleteExam(id: number) {
       db.query("DELETE FROM exams WHERE id = ?").run(id); // its plan goes by trigger
+    },
+    listExpenses(): ExpenseRow[] {
+      return db.query("SELECT * FROM expenses ORDER BY id").all() as ExpenseRow[];
+    },
+    getExpense(id: number): ExpenseRow | null {
+      return db.query("SELECT * FROM expenses WHERE id = ?").get(id) as ExpenseRow | null;
+    },
+    insertExpense(e: ExpenseFields): ExpenseRow {
+      return db.query("INSERT INTO expenses (kind, title, amount, day, date, note, done) VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING *").get(e.kind, e.title, e.amount, e.day, e.date, e.note, e.done) as ExpenseRow;
+    },
+    updateExpense(id: number, e: ExpenseFields): ExpenseRow {
+      return db.query("UPDATE expenses SET kind = ?, title = ?, amount = ?, day = ?, date = ?, note = ?, done = ? WHERE id = ? RETURNING *").get(e.kind, e.title, e.amount, e.day, e.date, e.note, e.done, id) as ExpenseRow;
+    },
+    deleteExpense(id: number) {
+      db.query("DELETE FROM expenses WHERE id = ?").run(id);
     },
     listStudies(): StudyRow[] {
       return db.query("SELECT * FROM studies ORDER BY date, id").all() as StudyRow[];

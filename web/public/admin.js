@@ -36,6 +36,7 @@ const ICONS = {
   book: '<path d="M4 4.5A1.5 1.5 0 0 1 5.5 3H20v15H5.5A1.5 1.5 0 0 0 4 19.5z"/><path d="M4 19.5A1.5 1.5 0 0 0 5.5 21H20v-3"/>',
   bell: '<path d="M6 16V11a6 6 0 0 1 12 0v5l1.5 2h-15z"/><path d="M10 20.5a2 2 0 0 0 4 0"/>',
   eye: '<path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/>',
+  wallet: '<path d="M4 7.5A1.5 1.5 0 0 1 5.5 6H19a1 1 0 0 1 1 1v12a1 1 0 0 1-1 1H5.5A1.5 1.5 0 0 1 4 18.5z"/><path d="M4 7.5 15 4v2M15 13h3"/>',
 };
 const icon = (name) => {
   const t = document.createElement("template");
@@ -688,6 +689,104 @@ async function loadTasks() {
     ...(groups.length
       ? groups.flatMap(([title, items]) => [el("tr", { className: "group-row" }, el("td", { colSpan: 6, textContent: `${title} · ${items.length}` })), ...items.map((x) => taskRow(x, today.date, reload, true))])
       : [emptyRow(6, q ? "검색 결과가 없습니다." : "없습니다.")]),
+  );
+}
+
+// 지출: 매달 나가는 돈(정기)과 앞으로 쓸 돈(예정). 합계는 여기서 낸다.
+const won = (n) => `${Number(n).toLocaleString("ko-KR")}원`;
+let editingExpense = null;
+
+// The next day a monthly expense goes out (its day, or the month's last day when the month is shorter).
+function nextPayDay(day, today) {
+  const at = (y, m) => `${y}-${String(m).padStart(2, "0")}-${String(Math.min(day, new Date(Date.UTC(y, m, 0)).getUTCDate())).padStart(2, "0")}`;
+  const y = Number(today.slice(0, 4)), m = Number(today.slice(5, 7));
+  const here = at(y, m);
+  return here >= today ? here : m === 12 ? at(y + 1, 1) : at(y, m + 1);
+}
+
+function syncExpenseKind() {
+  const monthly = $("expense-kind").value === "정기";
+  $("expense-day-box").hidden = !monthly;
+  $("expense-date-box").hidden = monthly;
+}
+
+function openExpenseDialog(x = null, kind = "정기") {
+  editingExpense = x;
+  $("expense-dialog-title").textContent = x ? "지출 수정" : "새 지출";
+  $("expense-kind").value = x?.kind ?? kind;
+  $("expense-title").value = x?.title ?? "";
+  $("expense-amount").value = x ? x.amount.toLocaleString("ko-KR") : "";
+  $("expense-day").value = x?.day ?? "";
+  $("expense-date").value = x?.date ?? "";
+  $("expense-note").value = x?.note ?? "";
+  $("expense-msg").textContent = "";
+  syncExpenseKind();
+  $("expense-dialog").showModal();
+}
+
+function expenseRow(x, today, reload) {
+  const update = (patch) => call(`/api/expenses/${x.id}`, { method: "PATCH", body: patch }).then(reload, showError);
+  let when;
+  if (x.kind === "정기") {
+    if (!x.day) when = el("td", { className: "muted", textContent: "매달" });
+    else {
+      const d = daysBetween(today, nextPayDay(x.day, today));
+      when = el("td", {}, el("span", { className: "date-main", textContent: `매달 ${x.day}일` }), el("span", { className: `date-note ${d <= 3 ? "soon" : "ok"}`, textContent: d === 0 ? "오늘" : `D-${d}` }));
+    }
+  } else {
+    // Spent ones and ones with no date just show the date; the rest count down like a task.
+    when = dueCell({ due_date: x.date, due_time: null, done: x.done }, today);
+  }
+  return el(
+    "tr",
+    {},
+    el("td", {}, x.kind === "예정" ? el("input", { type: "checkbox", checked: !!x.done, title: "썼음 표시", onchange() { update({ done: this.checked }); } }) : null),
+    // On a narrow screen the 언제 column is hidden and the same text goes under the name.
+    el("td", {}, el("span", { className: "title" + (x.done ? " done" : ""), textContent: x.title }), el("span", { className: "sub when-sub" }, ...[...when.childNodes].map((n) => n.cloneNode(true))), x.note ? el("span", { className: "sub", textContent: x.note }) : null),
+    Object.assign(when, { className: (when.className + " hide-sm").trim() }),
+    el("td", { className: "num" + (x.done ? " muted" : ""), textContent: won(x.amount) }),
+    el(
+      "td",
+      { className: "actions" },
+      iconBtn("수정", "edit", () => openExpenseDialog(x)),
+      iconBtn("삭제", "trash", () => {
+        if (confirm(`"${x.title}" 을(를) 삭제할까요?`)) call(`/api/expenses/${x.id}`, { method: "DELETE" }).then(reload, showError);
+      }, "danger"),
+    ),
+  );
+}
+
+async function loadExpenses() {
+  const { date: today, expenses } = await call("/api/expenses");
+  const reload = () => loadExpenses().catch(showError);
+  const sum = (list) => list.reduce((a, x) => a + x.amount, 0);
+  const monthly = expenses.filter((x) => x.kind === "정기").sort((a, b) => (a.day ?? 99) - (b.day ?? 99) || a.id - b.id);
+  const planned = expenses.filter((x) => x.kind === "예정").sort((a, b) => (a.date ?? "9999").localeCompare(b.date ?? "9999") || a.id - b.id);
+  const toSpend = planned.filter((x) => !x.done);
+  const spent = planned.filter((x) => x.done).reverse();
+  // 이번 달 남은 것: days from today to the end of this month.
+  const left = monthly.filter((x) => x.day && nextPayDay(x.day, today).slice(0, 7) === today.slice(0, 7));
+  $("expense-stats").replaceChildren(
+    stat("매달 나가는 돈", won(sum(monthly)), `${monthly.length}개`),
+    stat("이번 달 남은 정기지출", won(sum(left)), `${left.length}개 · 오늘부터 말일까지`),
+    stat("앞으로 쓸 돈", won(sum(toSpend)), `${toSpend.length}개`),
+  );
+  const q = searchText();
+  const shown = (list) => list.filter((x) => !q || [x.title, x.note].some((v) => v.toLowerCase().includes(q)));
+  const add = (kind) => el("button", { className: "btn ghost sm", type: "button", onclick: () => openExpenseDialog(null, kind) }, icon("plus"), "추가");
+  const group = (title, list, kind) => [
+    // Spans count the 언제 column apart (a hidden cell of its own) so a narrow screen keeps four columns.
+    el("tr", { className: "group-row" }, el("td", { colSpan: 2, textContent: `${title} · ${list.length}` }), el("td", { className: "hide-sm" }), el("td", { className: "num", textContent: list.length ? won(sum(list)) : "" }), el("td", { className: "actions" }, kind ? add(kind) : null)),
+    ...(list.length
+      ? list.map((x) => expenseRow(x, today, reload))
+      : kind
+        ? [el("tr", { className: "empty-row" }, el("td", { colSpan: 4, textContent: q ? "검색 결과가 없습니다." : "없습니다." }), el("td", { className: "hide-sm" }))]
+        : []),
+  ];
+  $("expense-list").replaceChildren(
+    ...group("매달 나가는 돈", shown(monthly), "정기"),
+    ...group("앞으로 쓸 돈", shown(toSpend), "예정"),
+    ...(spent.length ? group("쓴 것", shown(spent), null) : []),
   );
 }
 
@@ -1472,6 +1571,7 @@ const tabs = {
   },
   exams: { title: "시험", load: () => loadExams(), actions: () => [el("button", { className: "btn primary", type: "button", onclick: () => openExamDialog() }, icon("plus"), "새 시험", el("kbd", { textContent: "N" }))] },
   studies: { title: "공부", load: () => loadStudies(), actions: () => [] },
+  expenses: { title: "지출", load: () => loadExpenses(), actions: () => [el("button", { className: "btn primary", type: "button", onclick: () => openExpenseDialog() }, icon("plus"), "새 지출", el("kbd", { textContent: "N" }))] },
   notes: {
     title: "노트",
     load: () => loadNotes(),
@@ -1762,6 +1862,22 @@ async function init() {
       loadCalendar().catch(showError);
     }
   };
+  $("expense-kind").onchange = syncExpenseKind;
+  $("expense-form").onsubmit = async (ev) => {
+    ev.preventDefault();
+    const amount = Number($("expense-amount").value.replace(/[,\s원]/g, ""));
+    if (!Number.isSafeInteger(amount) || amount < 0) return ($("expense-msg").textContent = "금액은 숫자로 적어 주세요(예: 55000)");
+    const day = $("expense-day").value;
+    const body = { kind: $("expense-kind").value, title: $("expense-title").value, amount, day: day ? Number(day) : null, date: $("expense-date").value, note: $("expense-note").value };
+    try {
+      if (editingExpense) await call(`/api/expenses/${editingExpense.id}`, { method: "PATCH", body });
+      else await call("/api/expenses", { method: "POST", body });
+      $("expense-dialog").close();
+      tabs[currentTab()].load().catch(showError);
+    } catch (e) {
+      $("expense-msg").textContent = e.message;
+    }
+  };
   $("exam-form").onsubmit = async (ev) => {
     ev.preventDefault();
     const body = Object.fromEntries(EXAM_KEYS.map((k) => [k, $(`exam-${k}`).value]));
@@ -1852,6 +1968,7 @@ async function init() {
     else if (ev.key.toLowerCase() === "n" && currentTab() === "notes") (ev.preventDefault(), newNote().catch(showError));
     else if (ev.key.toLowerCase() === "n" && currentTab() === "portfolio") (ev.preventDefault(), openItemDialog());
     else if (ev.key.toLowerCase() === "n" && currentTab() === "exams") (ev.preventDefault(), openExamDialog());
+    else if (ev.key.toLowerCase() === "n" && currentTab() === "expenses") (ev.preventDefault(), openExpenseDialog());
     else if (ev.key.toLowerCase() === "n" && currentTab() === "studies") (ev.preventDefault(), document.querySelector("#study-list .study-add input:not(.course)")?.focus());
     else if (ev.key.toLowerCase() === "n" && currentTab() !== "files") (ev.preventDefault(), openTaskDialog());
     else if (ev.key.toLowerCase() === "u" && currentTab() === "files" && me.driveConnected) (ev.preventDefault(), openUpload());

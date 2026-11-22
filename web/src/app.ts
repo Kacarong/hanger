@@ -3,7 +3,7 @@ import { mkdirSync, existsSync, readdirSync, readFileSync, rmSync } from "node:f
 import { join } from "node:path";
 import { cleanBlocks, editRuns, richOrNone } from "./blocks";
 import { noteHtml } from "./note-html";
-import { ATTACH_TARGETS, CATEGORIES, EXAM_COLORS, SECTION_LAYOUTS, TASK_CATEGORIES, TASK_KINDS, type AttachedFile, type Block, type Db, type ExamFields, type FileRow, type PortfolioFields, type PortfolioItem, type StudyFields, type TaskFields } from "./db";
+import { ATTACH_TARGETS, CATEGORIES, EXAM_COLORS, EXPENSE_KINDS, SECTION_LAYOUTS, TASK_CATEGORIES, TASK_KINDS, type AttachedFile, type Block, type Db, type ExamFields, type ExpenseFields, type ExpenseRow, type FileRow, type PortfolioFields, type PortfolioItem, type StudyFields, type TaskFields } from "./db";
 import { createBackup } from "./backup";
 import { createCalendarPush, eventWhen } from "./gcal";
 import { GoogleError, type CalendarEvent, type EventBody, type Google } from "./google";
@@ -306,6 +306,36 @@ export function createApp(cfg: AppConfig, db: Db, google: Google) {
     if ((time && !isTime(time)) || (endTime && !isTime(endTime))) return "시간이 올바르지 않습니다";
     if (time && endTime && `${endDate}T${endTime}` <= `${date}T${time}`) return "끝나는 때가 시작보다 앞입니다";
     return { summary, location, description, ...eventWhen(date, time, endDate, endTime, 60) };
+  }
+
+  // An expense after applying the keys present in a request body to `base`. Fields the kind doesn't use are cleared
+  // (정기 has no date and is never "spent"; 예정 has no day of the month).
+  function expenseFields(b: Record<string, unknown>, base: ExpenseFields): ExpenseFields | string {
+    const e = { ...base };
+    if ("kind" in b) {
+      if (!EXPENSE_KINDS.includes(b.kind as string)) return "종류가 올바르지 않습니다";
+      e.kind = b.kind as string;
+    }
+    if ("title" in b) e.title = str(b.title, 200);
+    if (!e.title) return "이름을 입력해 주세요";
+    if ("amount" in b) {
+      if (typeof b.amount !== "number" || !Number.isSafeInteger(b.amount) || b.amount < 0 || b.amount > 1e12) return "금액이 올바르지 않습니다";
+      e.amount = b.amount;
+    }
+    if ("day" in b) {
+      if (b.day !== null && b.day !== "" && !(Number.isInteger(b.day) && (b.day as number) >= 1 && (b.day as number) <= 31)) return "날짜(1~31일)가 올바르지 않습니다";
+      e.day = b.day === null || b.day === "" ? null : (b.day as number);
+    }
+    if ("date" in b) {
+      const v = str(b.date, 10);
+      if (v && !isDate(v)) return "날짜가 올바르지 않습니다";
+      e.date = v || null;
+    }
+    if ("note" in b) e.note = str(b.note, 2000);
+    if ("done" in b) e.done = b.done === true ? 1 : 0;
+    if (e.kind === "정기") Object.assign(e, { date: null, done: 0 });
+    else e.day = null;
+    return e;
   }
 
   // Validates exam fields from a request body. Only keys present in the body are returned.
@@ -706,6 +736,30 @@ ${body || `<section class="works"><p class="empty reveal">${mine ? "아직 포�
       }
       if (method === "DELETE") {
         db.deleteExam(exam.id);
+        return json({ ok: true });
+      }
+    }
+
+    // 지출: money that goes out every month (정기) and money to spend later (예정). The client sorts and sums.
+    if (path === "/api/expenses" && method === "GET") return json({ date: today(), expenses: db.listExpenses() });
+
+    if (path === "/api/expenses" && method === "POST") {
+      const e = expenseFields(await body(req), { kind: "정기", title: "", amount: 0, day: null, date: null, note: "", done: 0 });
+      if (typeof e === "string") return json({ error: e }, 400);
+      return json(db.insertExpense(e), 201);
+    }
+
+    const xm = path.match(/^\/api\/expenses\/(\d+)$/);
+    if (xm) {
+      const cur: ExpenseRow | null = db.getExpense(Number(xm[1]));
+      if (!cur) return json({ error: "지출을 찾을 수 없습니다" }, 404);
+      if (method === "PATCH") {
+        const e = expenseFields(await body(req), cur);
+        if (typeof e === "string") return json({ error: e }, 400);
+        return json(db.updateExpense(cur.id, e));
+      }
+      if (method === "DELETE") {
+        db.deleteExpense(cur.id);
         return json({ ok: true });
       }
     }

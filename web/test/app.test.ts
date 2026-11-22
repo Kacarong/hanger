@@ -2371,3 +2371,40 @@ test("백업: 하루 한 번(새벽 2~7시 빼고) folio.db 사본을 드라이�
     cleanup();
   }
 });
+
+test("지출: 매달 나가는 돈(정기)·앞으로 쓸 돈(예정) 만들기·고치기·썼음·지우기, 종류에 안 맞는 칸은 비움", async () => {
+  const { call, db, cleanup } = makeApp({ googleEnabled: false, now: () => new Date("2026-11-23T03:00:00Z") });
+  try {
+    db.setSetting("password_hash", await Bun.password.hash("correct horse battery"));
+    const { cookie } = await passwordLogin(call, "correct horse battery");
+    expect((await call("/api/expenses")).status).toBe(401);
+    const send = async (path: string, method: string, b: object) => {
+      const r = await call(path, { method, cookie, headers: JSON_ORIGIN, body: JSON.stringify(b) });
+      return { status: r.status, body: (await r.json()) as Record<string, unknown> };
+    };
+
+    const phone = await send("/api/expenses", "POST", { kind: "정기", title: "통신비", amount: 55000, day: 25, date: "2026-12-01", note: "알뜰폰" });
+    expect(phone.status).toBe(201);
+    expect(phone.body).toMatchObject({ kind: "정기", title: "통신비", amount: 55000, day: 25, date: null, done: 0, note: "알뜰폰" });
+    const laptop = await send("/api/expenses", "POST", { kind: "예정", title: "노트북", amount: 1500000, day: 3, date: "2026-12-20" });
+    expect(laptop.body).toMatchObject({ kind: "예정", amount: 1500000, day: null, date: "2026-12-20", done: 0 });
+
+    for (const bad of [{ title: "" }, { kind: "매년" }, { amount: -1 }, { amount: 1.5 }, { amount: "55000" }, { day: 32 }, { date: "2026-13-01" }]) {
+      expect((await send("/api/expenses", "POST", { kind: "정기", title: "x", amount: 1, ...bad })).status).toBe(400);
+    }
+
+    // Spent, then moved to 정기: a monthly one is never "spent" and has no date.
+    expect((await send(`/api/expenses/${laptop.body.id}`, "PATCH", { done: true })).body).toMatchObject({ done: 1, title: "노트북", amount: 1500000 });
+    expect((await send(`/api/expenses/${laptop.body.id}`, "PATCH", { kind: "정기", day: 10 })).body).toMatchObject({ kind: "정기", day: 10, date: null, done: 0 });
+    expect((await send(`/api/expenses/${phone.body.id}`, "PATCH", { amount: 33000, day: null })).body).toMatchObject({ amount: 33000, day: null, title: "통신비" });
+    expect((await send("/api/expenses/999", "PATCH", { amount: 1 })).status).toBe(404);
+
+    const list = (await (await call("/api/expenses", { cookie })).json()) as { date: string; expenses: { title: string }[] };
+    expect(list.date).toBe("2026-11-23");
+    expect(list.expenses.map((x) => x.title)).toEqual(["통신비", "노트북"]);
+    expect((await call(`/api/expenses/${phone.body.id}`, { method: "DELETE", cookie, headers: JSON_ORIGIN })).status).toBe(200);
+    expect(((await (await call("/api/expenses", { cookie })).json()) as { expenses: unknown[] }).expenses).toHaveLength(1);
+  } finally {
+    cleanup();
+  }
+});
