@@ -1,6 +1,7 @@
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { mkdirSync, existsSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { join, relative } from "node:path";
+import { CONVERT_MAX, convertTarget } from "./convert";
 import { cleanBlocks, editRuns, richOrNone } from "./blocks";
 import { noteHtml } from "./note-html";
 import { ATTACH_TARGETS, CATEGORIES, EXAM_COLORS, EXPENSE_KINDS, SECTION_LAYOUTS, TASK_CATEGORIES, TASK_KINDS, type AttachedFile, type Block, type Db, type ExamFields, type ExpenseFields, type ExpenseRow, type FileRow, type PortfolioFields, type PortfolioItem, type StudyFields, type TaskFields } from "./db";
@@ -30,6 +31,8 @@ export type AppConfig = {
   notionDebounceMs?: number; // how long after a save the note goes to Notion (tests: 0)
   gcalDebounceMs?: number; // how long after a change tasks/exams go to Google Calendar (tests: 0)
   now?: () => Date; // for tests
+  convertUrl?: string; // 변환 서버(convert-main.ts), 보통 http://127.0.0.1:2994
+  convertToken?: string; // 없으면 문서 변환은 꺼짐
 };
 
 // YYYY-MM-DD of the given instant in Korea.
@@ -1041,6 +1044,27 @@ ${body || `<section class="works"><p class="empty reveal">${mine ? "아직 포�
         for (const f of db.deleteFolders(db.folderTree(folder.id))) rmSync(join(thumbDir, f.drive_id), { force: true });
         return json({ ok: true });
       }
+    }
+
+    // 문서 변환: 받은 파일을 변환 서버로 넘기고 결과를 바로 내려준다. 사이트에는 아무것도 남기지 않는다.
+    if (path === "/api/convert" && method === "POST") {
+      if (!cfg.convertUrl || !cfg.convertToken) return json({ error: "문서 변환 서버가 설정되지 않았습니다" }, 503);
+      const name = url.searchParams.get("name") ?? "";
+      const to = convertTarget(name);
+      if (!to) return json({ error: "변환할 수 있는 형식: 워드·한글·엑셀·파워포인트 문서 → PDF, PDF → 워드" }, 400);
+      if (Number(req.headers.get("Content-Length")) > CONVERT_MAX) return json({ error: "문서 변환은 100MB까지 됩니다" }, 413);
+      const input = await req.arrayBuffer();
+      if (input.byteLength > CONVERT_MAX) return json({ error: "문서 변환은 100MB까지 됩니다" }, 413);
+      if (!input.byteLength) return json({ error: "파일이 비어 있습니다" }, 400);
+      let res: Response;
+      try {
+        res = await fetch(`${cfg.convertUrl}/convert?name=${encodeURIComponent(name)}`, { method: "POST", headers: { Authorization: `Bearer ${cfg.convertToken}` }, body: input });
+      } catch {
+        return json({ error: "문서 변환 서버가 꺼져 있습니다" }, 503);
+      }
+      if (!res.ok) return json({ error: ((await res.json().catch(() => null)) as { error?: string } | null)?.error ?? `변환 실패 (${res.status})` }, 502);
+      const outName = name.replace(/\.[^.]+$/, "") + "." + to;
+      return new Response(res.body, { headers: { "Content-Type": to === "pdf" ? "application/pdf" : "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "Content-Disposition": contentDisposition("attachment", outName) } });
     }
 
     if (path === "/api/uploads" && method === "POST") {

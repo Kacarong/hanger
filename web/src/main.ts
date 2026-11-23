@@ -31,7 +31,11 @@ const google = createGoogle(
   },
   db,
 );
-const fetch = createApp({ baseUrl, adminEmail, dataDir, googleEnabled }, db, google);
+const fetch = createApp(
+  { baseUrl, adminEmail, dataDir, googleEnabled, convertUrl: process.env.CONVERT_URL ?? "http://127.0.0.1:2994", convertToken: process.env.CONVERT_TOKEN },
+  db,
+  google,
+);
 
 fetch.moveNotionCopies().catch((e) => console.error("노션 사본 옮기기 실패(다음 시작 때 다시):", e));
 fetch.notion.start(60_000); // look for edits in Notion every minute (and a full pass every half hour)

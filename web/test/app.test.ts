@@ -211,7 +211,7 @@ beforeAll(() => {
 
 afterAll(() => fake.stop(true));
 
-function makeApp(opts: { googleEnabled?: boolean; now?: () => Date; notionApi?: string; baseUrl?: string } = {}) {
+function makeApp(opts: { googleEnabled?: boolean; now?: () => Date; notionApi?: string; baseUrl?: string; convertUrl?: string; convertToken?: string } = {}) {
   const dataDir = mkdtempSync(join(tmpdir(), "folio-test-"));
   const db = openDb(join(dataDir, "t.db"));
   const google = createGoogle(
@@ -226,7 +226,7 @@ function makeApp(opts: { googleEnabled?: boolean; now?: () => Date; notionApi?: 
     db,
   );
   const fetch = createApp(
-    { baseUrl: opts.baseUrl ?? "https://kacarong.kr", adminEmail: "owner@example.com", dataDir, googleEnabled: opts.googleEnabled ?? true, now: opts.now, notionApi: opts.notionApi, notionDebounceMs: 0, gcalDebounceMs: 0 },
+    { baseUrl: opts.baseUrl ?? "https://kacarong.kr", adminEmail: "owner@example.com", dataDir, googleEnabled: opts.googleEnabled ?? true, now: opts.now, notionApi: opts.notionApi, notionDebounceMs: 0, gcalDebounceMs: 0, convertUrl: opts.convertUrl, convertToken: opts.convertToken },
     db,
     google,
   );
@@ -2444,5 +2444,56 @@ test("지출: 매달 나가는 돈(정기)·앞으로 쓸 돈(예정) 만들기�
     expect(((await (await call("/api/expenses", { cookie })).json()) as { expenses: unknown[] }).expenses).toHaveLength(1);
   } finally {
     cleanup();
+  }
+});
+
+test("문서 변환: 로그인해야 쓰고, 파일을 변환 서버로 넘겨 결과를 받기로 내려줌", async () => {
+  const seen: { auth: string | null; name: string | null; body: string }[] = [];
+  const converter = Bun.serve({
+    port: 0,
+    async fetch(req) {
+      const url = new URL(req.url);
+      const body = await req.text();
+      seen.push({ auth: req.headers.get("Authorization"), name: url.searchParams.get("name"), body });
+      if (body === "broken") return Response.json({ error: "변환하지 못했습니다." }, { status: 422 });
+      return new Response("converted:" + body);
+    },
+  });
+  const { call, db, cleanup } = makeApp({ googleEnabled: false, convertUrl: converter.url.toString().replace(/\/$/, ""), convertToken: "tok" });
+  const off = makeApp({ googleEnabled: false });
+  try {
+    db.setSetting("password_hash", await Bun.password.hash("correct horse battery"));
+    const { cookie } = await passwordLogin(call, "correct horse battery");
+    const send = (name: string, body: string, c = cookie) => call(`/api/convert?name=${encodeURIComponent(name)}`, { method: "POST", cookie: c, headers: { Origin: "https://kacarong.kr" }, body });
+
+    expect((await send("보고서.hwp", "x", "")).status).toBe(401);
+    const ok = await send("보고서.hwp", "hello");
+    expect(ok.status).toBe(200);
+    expect(await ok.text()).toBe("converted:hello");
+    expect(ok.headers.get("Content-Type")).toBe("application/pdf");
+    expect(ok.headers.get("Content-Disposition")).toContain("filename*=UTF-8''%EB%B3%B4%EA%B3%A0%EC%84%9C.pdf");
+    expect(seen).toEqual([{ auth: "Bearer tok", name: "보고서.hwp", body: "hello" }]);
+
+    const word = await send("scan.PDF", "p");
+    expect(word.headers.get("Content-Disposition")).toContain('filename="scan.docx"');
+
+    const bad = await send("a.docx", "broken");
+    expect(bad.status).toBe(502);
+    expect((await bad.json()).error).toBe("변환하지 못했습니다.");
+    expect((await send("a.exe", "x")).status).toBe(400);
+    expect((await send("a.docx", "")).status).toBe(400);
+    expect(seen.length).toBe(3); // 형식이 틀리거나 빈 파일은 변환 서버까지 안 감
+
+    converter.stop(true);
+    expect((await send("a.docx", "x")).status).toBe(503); // 변환 서버가 꺼짐
+
+    off.db.setSetting("password_hash", await Bun.password.hash("correct horse battery"));
+    const offLogin = await passwordLogin(off.call, "correct horse battery");
+    const r = await off.call("/api/convert?name=a.docx", { method: "POST", cookie: offLogin.cookie, headers: { Origin: "https://kacarong.kr" }, body: "x" });
+    expect(r.status).toBe(503); // 설정 안 됨
+  } finally {
+    converter.stop(true);
+    cleanup();
+    off.cleanup();
   }
 });

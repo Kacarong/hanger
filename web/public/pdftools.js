@@ -1,4 +1,5 @@
-// 파일 편집기: PDF 나누기·합치기, 이미지 → PDF, PDF → 이미지. 파일은 이 브라우저 안에서만 처리하고 서버로 보내지 않는다.
+// 파일 편집기: PDF 나누기·합치기, 이미지 → PDF, PDF → 이미지는 이 브라우저 안에서만 처리하고 서버로 보내지 않는다.
+// 문서 변환(워드·한글·엑셀·파워포인트 ↔ PDF)만 서버의 변환 서버(src/convert.ts)를 쓴다.
 // 라이브러리(vendor/)는 이 탭을 처음 쓸 때 불러온다.
 const search = new URL(import.meta.url).search; // 같은 ?v= 로 불러야 배포 직후 옛 파일과 섞이지 않는다.
 let pdfLib = null;
@@ -98,7 +99,7 @@ export async function splitPdf(bytes, fileName, plan, onProgress) {
   return out;
 }
 
-// files: [{ name, bytes }] 순서대로 이어 붙인다.
+// files: File들(이름 + arrayBuffer). 순서대로 이어 붙인다. 원본은 한 번에 하나만 읽어 메모리에 쌓지 않는다.
 export async function mergePdfs(files, onProgress) {
   const { PDFDocument } = await lib();
   const out = await PDFDocument.create();
@@ -106,7 +107,7 @@ export async function mergePdfs(files, onProgress) {
     onProgress?.(`합치는 중 ${k + 1}/${files.length}`);
     let src;
     try {
-      src = await openPdf(f.bytes);
+      src = await openPdf(new Uint8Array(await f.arrayBuffer()));
     } catch (e) {
       throw new Error(`${f.name}: ${e.message}`);
     }
@@ -350,7 +351,7 @@ export function mount(root, { icon }) {
   function picker(accept, multiple, text, onFiles) {
     const input = el("input", { type: "file", accept, multiple });
     input.onchange = () => {
-      if (input.files.length) onFiles([...input.files]);
+      if (input.files.length && !busy) onFiles([...input.files]);
       input.value = "";
     };
     const zone = el("label", { className: "dropzone" }, input, icon("upload"), el("strong", { textContent: text }), el("span", { className: "muted small", textContent: "눌러서 고르거나 여기로 끌어다 놓으세요" }));
@@ -367,6 +368,7 @@ export function mount(root, { icon }) {
       if (!ev.dataTransfer?.files.length) return;
       ev.preventDefault();
       ev.stopPropagation();
+      if (busy) return;
       const ok = [...ev.dataTransfer.files].filter((f) => accept.split(",").some((a) => (a.endsWith("/*") ? f.type.startsWith(a.slice(0, -1)) : f.type === a || f.name.toLowerCase().endsWith(a))));
       if (ok.length) onFiles(multiple ? ok : ok.slice(0, 1));
     });
@@ -380,11 +382,12 @@ export function mount(root, { icon }) {
       ul.replaceChildren(
         ...items.map((it, i) => {
           const move = (d) => () => {
+            if (busy) return; // 처리 중에는 순서를 못 바꾼다
             [items[i], items[i + d]] = [items[i + d], items[i]];
             onChange();
           };
           const b = (label, name, fn, off) => el("button", { className: "btn ghost sm", type: "button", title: label, ariaLabel: label, disabled: off, onclick: fn }, icon(name));
-          return el("li", {}, el("span", { className: "num muted", textContent: i + 1 }), ...render(it), b("위로", "up", move(-1), i === 0), b("아래로", "down", move(1), i === items.length - 1), b("빼기", "x", () => (items.splice(i, 1), onChange())));
+          return el("li", {}, el("span", { className: "num muted", textContent: i + 1 }), ...render(it), b("위로", "up", move(-1), i === 0), b("아래로", "down", move(1), i === items.length - 1), b("빼기", "x", () => busy || (items.splice(i, 1), onChange())));
         }),
       );
     };
@@ -430,11 +433,10 @@ export function mount(root, { icon }) {
       const items = [];
       const go = el("button", { className: "btn primary", type: "button", disabled: true }, "합치기");
       const list = orderList(items, (f) => [el("span", { className: "name", textContent: f.name }), el("span", { className: "muted", textContent: sizeText(f.size) })], () => (list.draw(), (go.disabled = items.length < 2)));
-      go.onclick = () => run(go, async (p) => {
-        const files = [];
-        for (const f of items) files.push({ name: f.name, bytes: new Uint8Array(await f.arrayBuffer()) });
-        return [{ name: `${baseName(items[0].name)}_합본.pdf`, blob: await mergePdfs(files, p) }];
-      });
+      go.onclick = () => {
+        const files = items.slice(); // 누른 때의 순서 그대로
+        run(go, async (p) => [{ name: `${baseName(files[0].name)}_합본.pdf`, blob: await mergePdfs(files, p) }]);
+      };
       const zone = picker(pdfOnly, true, "PDF 파일 여러 개 고르기", (fs) => (items.push(...fs), list.draw(), (go.disabled = items.length < 2)));
       return [zone, list.ul, el("p", { className: "muted small", textContent: "위에서부터 차례로 이어 붙입니다. ↑↓로 순서를 바꾸세요." }), el("div", { className: "pdf-row" }, go)];
     },
@@ -484,6 +486,40 @@ export function mount(root, { icon }) {
       });
       return [zone, info, el("div", { className: "pdf-row" }, format, dpi, ranges), el("div", { className: "pdf-row" }, go)];
     },
+
+    // 이것만 서버(변환 서버의 LibreOffice)를 쓴다. 서버는 변환이 끝나면 파일을 바로 지운다.
+    convert() {
+      let file = null;
+      const info = el("p", { className: "muted" });
+      const go = el("button", { className: "btn primary", type: "button", disabled: true }, "변환하기");
+      const outName = (name) => baseName(name) + (/\.pdf$/i.test(name) ? ".docx" : ".pdf");
+      go.onclick = () => {
+        const f = file;
+        run(go, async (p) => {
+          p("서버에서 변환 중… 큰 문서는 1~2분 걸릴 수 있습니다.");
+          const res = await fetch(`/api/convert?name=${encodeURIComponent(f.name)}`, { method: "POST", body: f });
+          if (!res.ok) throw new Error((await res.json().catch(() => null))?.error ?? `변환 실패 (${res.status})`);
+          return [{ name: outName(f.name), blob: await res.blob() }];
+        });
+      };
+      const docs = ".doc,.docx,.odt,.rtf,.txt,.hwp,.xls,.xlsx,.ods,.csv,.ppt,.pptx,.odp,.pdf,application/pdf";
+      const zone = picker(docs, false, "문서 하나 고르기 (워드·한글·엑셀·파워포인트·PDF)", ([f]) => {
+        clearResults();
+        file = null;
+        go.disabled = true;
+        if (f.size > 100 * MB) {
+          info.textContent = "";
+          status.className = "error pdf-status";
+          status.textContent = "문서 변환은 100MB까지 됩니다.";
+          return;
+        }
+        file = f;
+        info.textContent = `${f.name} (${sizeText(f.size)}) → ${outName(f.name)}`;
+        go.disabled = false;
+      });
+      const note = "문서 → PDF, PDF → 워드(docx). 이 기능만 파일을 내 서버로 보내 변환하고, 끝나면 서버에서 바로 지웁니다. PDF → 워드는 글자·그림 위치가 원본과 조금 달라질 수 있습니다.";
+      return [zone, info, el("p", { className: "muted small", textContent: note }), el("div", { className: "pdf-row" }, go)];
+    },
   };
 
   const built = {};
@@ -492,14 +528,17 @@ export function mount(root, { icon }) {
     ["merge", "PDF 합치기"],
     ["images", "이미지 → PDF"],
     ["toimg", "PDF → 이미지"],
+    ["convert", "문서 변환"],
   ];
   const seg = el("div", { className: "seg pdf-seg" });
+  const hint = el("span", { className: "muted small" });
   const show = (key) => {
     if (busy) return;
     clearResults();
     seg.querySelectorAll("button").forEach((b) => b.classList.toggle("on", b.dataset.v === key));
     built[key] ??= el("div", { className: "pdf-pane-body" }, ...panes[key]());
     pane.replaceChildren(built[key]);
+    hint.textContent = key === "convert" ? "문서 변환은 파일을 서버로 보냈다가 변환 후 바로 지웁니다." : "파일은 이 기기 안에서만 처리되고 어디에도 올라가지 않습니다.";
   };
   for (const [key, label] of tabs) {
     const b = el("button", { type: "button", textContent: label, onclick: () => show(key) });
@@ -507,7 +546,7 @@ export function mount(root, { icon }) {
     seg.append(b);
   }
   root.replaceChildren(
-    el("div", { className: "toolbar" }, seg, el("span", { className: "grow" }), el("span", { className: "muted small", textContent: "파일은 이 기기 안에서만 처리되고 어디에도 올라가지 않습니다." })),
+    el("div", { className: "toolbar" }, seg, el("span", { className: "grow" }), hint),
     el("div", { className: "pdf-body" }, pane, status, results),
   );
   show("split");

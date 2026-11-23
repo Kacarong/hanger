@@ -60,9 +60,9 @@ test("PDF 나누기: 용량으로 — 모든 쪽이 순서대로 한 번씩, 조
 test("PDF 합치기: 고른 순서대로 이어 붙임", async () => {
   const a = await makePdf(2, [100, 100]);
   const b = await makePdf(3, [200, 100]);
-  const out = await mergePdfs([{ name: "b.pdf", bytes: b }, { name: "a.pdf", bytes: a }]);
+  const out = await mergePdfs([new File([b], "b.pdf"), new File([a], "a.pdf")]);
   expect(await widths(out)).toEqual([200, 200, 200, 100, 100]);
-  await expect(mergePdfs([{ name: "깨진.pdf", bytes: new Uint8Array([1, 2, 3]) }])).rejects.toThrow("깨진.pdf");
+  await expect(mergePdfs([new File([new Uint8Array([1, 2, 3])], "깨진.pdf")])).rejects.toThrow("깨진.pdf");
 });
 
 const JPEG = Buffer.from("/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAYEBQYFBAYGBQYHBwYIChAKCgkJChQODwwQFxQYGBcUFhYaHSUfGhsjHBYWICwgIyYnKSopGR8tMC0oMCUoKSj/2wBDAQcHBwoIChMKChMoGhYaKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCj/wAARCAAEAAgDASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwDgKKKK+eP2E//Z", "base64");
