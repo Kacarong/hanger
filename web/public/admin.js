@@ -923,20 +923,6 @@ async function loadCalendar() {
   );
   calWrite = !!data.write;
   calendars = data.calendars ?? [];
-  // 구글로 보내기: 고른 캘린더에 날짜 있는 할 일·과제·시험을 넣는다.
-  $("cal-push-box").hidden = !calWrite || !calendars.length;
-  if (calWrite) {
-    const sel = $("cal-push");
-    const known = calendars.some((c) => c.id === data.push.calendarId);
-    sel.replaceChildren(
-      el("option", { value: "", textContent: "보내지 않음" }),
-      ...calendars.map((c) => el("option", { value: c.id, textContent: c.name })),
-      ...(data.push.calendarId && !known ? [el("option", { value: data.push.calendarId, textContent: "(보이지 않는 캘린더)" })] : []),
-    );
-    sel.value = data.push.calendarId;
-  }
-  $("cal-push-error").hidden = !data.push?.error;
-  $("cal-push-error").textContent = data.push?.error ? "구글로 보내기 실패: " + data.push.error : "";
 
   const q = searchText();
   const byDay = new Map();
@@ -1936,20 +1922,6 @@ async function init() {
       loadCalendar().catch(showError);
     } catch (e) {
       $("event-msg").textContent = e.message;
-    }
-  };
-  $("cal-push").onchange = async () => {
-    const sel = $("cal-push");
-    const calendarId = sel.value;
-    if (!calendarId && !confirm("구글로 보내기를 끄면 지금까지 보낸 할 일·시험 일정을 구글 캘린더에서 지웁니다. 끌까요?")) return loadCalendar().catch(showError);
-    sel.disabled = true;
-    try {
-      await call("/api/calendar/push", { method: "PUT", body: { calendarId } });
-    } catch (e) {
-      showError(e);
-    } finally {
-      sel.disabled = false;
-      loadCalendar().catch(showError);
     }
   };
   $("class-kind").onchange = syncClassKind;

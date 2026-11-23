@@ -76,7 +76,6 @@ export const EXAM_COLORS = ["", "red", "orange", "amber", "green", "blue", "purp
 export type StudyRow = { id: number; date: string; course: string; title: string; done: number; queued: number; created_at: string };
 export type PushSubRow = { endpoint: string; p256dh: string; auth: string };
 export type NotificationRow = { id: number; title: string; body: string; url: string; created_at: string };
-export type GcalLink = { key: string; calendar_id: string; event_id: string; hash: string };
 export type StudyFields = Pick<StudyRow, "date" | "course" | "title">;
 
 // A line on the 지출 tab. 정기 = money that goes out every month (day = the day of the month, null = not fixed);
@@ -374,7 +373,6 @@ export function openDb(path: string) {
   if (!pfSectionCols.includes("layout")) db.exec("ALTER TABLE portfolio_sections ADD COLUMN layout TEXT NOT NULL DEFAULT 'cards'");
   // Tasks and exams this site put in the owner's Google Calendar (key "task:<id>" / "exam:<id>").
   // hash: the event body last sent, so only changed items are sent again.
-  db.exec("CREATE TABLE IF NOT EXISTS gcal_links (key TEXT PRIMARY KEY, calendar_id TEXT NOT NULL, event_id TEXT NOT NULL, hash TEXT NOT NULL)");
   // Notifications: the devices that get Web Push, what was sent (also read by pages that show notifications themselves,
   // like the PC program), and which scheduled ones went out already.
   db.exec(`
@@ -448,22 +446,6 @@ export function openDb(path: string) {
     markNotified(key: string): boolean {
       db.query("DELETE FROM notify_sent WHERE at < datetime('now', '-30 days')").run();
       return db.query("INSERT OR IGNORE INTO notify_sent (key) VALUES (?)").run(key).changes > 0;
-    },
-    gcalLinks(): GcalLink[] {
-      return db.query("SELECT * FROM gcal_links").all() as GcalLink[];
-    },
-    setGcalLink(l: GcalLink) {
-      db.query("INSERT OR REPLACE INTO gcal_links (key, calendar_id, event_id, hash) VALUES (?, ?, ?, ?)").run(l.key, l.calendar_id, l.event_id, l.hash);
-    },
-    deleteGcalLink(key: string) {
-      db.query("DELETE FROM gcal_links WHERE key = ?").run(key);
-    },
-    // What goes to Google Calendar: dated tasks (not 공부 tab ones, which stay off the calendar) and dated exams, from `from` on.
-    calendarPushItems(from: string): { tasks: TaskRow[]; exams: ExamRow[] } {
-      return {
-        tasks: db.query("SELECT * FROM tasks WHERE due_date >= ? AND study_id IS NULL").all(from) as TaskRow[],
-        exams: db.query("SELECT * FROM exams WHERE date >= ?").all(from) as ExamRow[],
-      };
     },
     getSetting(key: string): string | null {
       const row = db.query("SELECT value FROM settings WHERE key = ?").get(key) as { value: string } | null;

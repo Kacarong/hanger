@@ -31,7 +31,6 @@ export type DriveFile = {
 
 // One event from the user's Google Calendar, tagged with the calendar it came from.
 // editable: the calendar lets the user change events (owner or writer).
-// pushed: the event is a task or exam this site put there (extendedProperties.private.kacarong).
 export type CalendarEvent = {
   id: string;
   summary?: string;
@@ -44,7 +43,6 @@ export type CalendarEvent = {
   calendarId: string;
   color: string;
   editable: boolean;
-  pushed: boolean;
 };
 export type CalendarInfo = { id: string; summary?: string; backgroundColor?: string; selected?: boolean; primary?: boolean; accessRole?: string };
 // What this site sends for an event. start/end carry nulls for the unused keys so a PATCH can switch all-day ↔ timed.
@@ -54,7 +52,6 @@ export type EventBody = {
   description?: string;
   start: { date: string | null; dateTime: string | null; timeZone: string | null };
   end: { date: string | null; dateTime: string | null; timeZone: string | null };
-  extendedProperties?: { private: Record<string, string> };
 };
 const withoutNulls = (b: EventBody) => JSON.stringify(b, (_k, v) => (v === null ? undefined : v));
 
@@ -235,7 +232,7 @@ export function createGoogle(cfg: GoogleConfig, db: Db) {
     async events(timeMin: string, timeMax: string, cals?: CalendarInfo[]): Promise<CalendarEvent[]> {
       const shown = (cals ?? (await calendarList())).filter((c) => c.selected || c.primary);
       const q = new URLSearchParams({ timeMin, timeMax, singleEvents: "true", orderBy: "startTime", maxResults: "2500", timeZone: "Asia/Seoul" });
-      type Item = Pick<CalendarEvent, "id" | "summary" | "htmlLink" | "location" | "description" | "start" | "end"> & { status?: string; extendedProperties?: { private?: Record<string, string> } };
+      type Item = Pick<CalendarEvent, "id" | "summary" | "htmlLink" | "location" | "description" | "start" | "end"> & { status?: string };
       const lists = await Promise.all(
         shown.map(async (c) => {
           const r = await api(`${eventPath(c.id)}?${q}`, {}, "캘린더 일정 조회");
@@ -255,25 +252,10 @@ export function createGoogle(cfg: GoogleConfig, db: Db) {
               calendarId: c.id,
               color: c.backgroundColor ?? "",
               editable,
-              pushed: !!e.extendedProperties?.private?.kacarong,
             }));
         }),
       );
       return lists.flat();
-    },
-
-    // Ids of the events still in a calendar from timeMin on (deleted ones are not listed), every page.
-    async eventIds(calendarId: string, timeMin: string): Promise<Set<string>> {
-      const ids = new Set<string>();
-      let pageToken = "";
-      for (let page = 0; page < 50; page++) {
-        const q = new URLSearchParams({ timeMin, maxResults: "2500", fields: "items(id),nextPageToken", ...(pageToken ? { pageToken } : {}) });
-        const r = (await (await api(`${eventPath(calendarId)}?${q}`, {}, "캘린더 일정 조회")).json()) as { items?: { id: string }[]; nextPageToken?: string };
-        for (const e of r.items ?? []) ids.add(e.id);
-        if (!r.nextPageToken) break;
-        pageToken = r.nextPageToken;
-      }
-      return ids;
     },
 
     async insertEvent(calendarId: string, body: EventBody): Promise<string> {

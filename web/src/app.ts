@@ -5,7 +5,7 @@ import { cleanBlocks, editRuns, richOrNone } from "./blocks";
 import { noteHtml } from "./note-html";
 import { ATTACH_TARGETS, CATEGORIES, CLASS_CHANGE_KINDS, COURSE_COLORS, EXAM_COLORS, EXPENSE_KINDS, GRADES, TERMS, SECTION_LAYOUTS, TASK_CATEGORIES, TASK_KINDS, type AttachedFile, type Block, type ClassChangeFields, type CourseFields, type CourseTime, type Db, type ExamFields, type ExpenseFields, type ExpenseRow, type FileRow, type PortfolioFields, type PortfolioItem, type StudyFields, type TaskFields } from "./db";
 import { createBackup } from "./backup";
-import { createCalendarPush, eventWhen } from "./gcal";
+import { eventWhen } from "./gcal";
 import { GoogleError, type CalendarEvent, type EventBody, type Google } from "./google";
 import { createNotifier } from "./notify";
 import { createNotionSync, NotionError } from "./notion";
@@ -28,7 +28,6 @@ export type AppConfig = {
   googleEnabled: boolean; // false until the OAuth client is configured
   notionApi?: string; // https://api.notion.com unless a test points elsewhere
   notionDebounceMs?: number; // how long after a save the note goes to Notion (tests: 0)
-  gcalDebounceMs?: number; // how long after a change tasks/exams go to Google Calendar (tests: 0)
   now?: () => Date; // for tests
 };
 
@@ -202,7 +201,6 @@ export function createApp(cfg: AppConfig, db: Db, google: Google) {
     debounceMs: cfg.notionDebounceMs,
   });
   const notifier = createNotifier({ db, subject: origin, now });
-  const gcal = createCalendarPush({ db, google, today, enabled: cfg.googleEnabled, debounceMs: cfg.gcalDebounceMs });
   const backup = createBackup({ db, google, enabled: cfg.googleEnabled, origin, now });
 
   async function body(req: Request): Promise<Record<string, unknown>> {
@@ -659,22 +657,19 @@ ${body || `<section class="works"><p class="empty reveal">${mine ? "아직 포�
       if (!isDate(from) || !isDate(to) || to < from || to > addDays(from, CALENDAR_MAX_DAYS - 1)) return json({ error: "날짜 범위가 올바르지 않습니다" }, 400);
       if (!cfg.googleEnabled || !db.getSetting("refresh_token")) return json({ events: [], google: "off" });
       if (!google.calendarGranted()) return json({ events: [], google: "need_consent" });
-      // write: events can be made here and tasks/exams sent to Google (push = the calendar they go to, '' = not sent).
-      const write = google.calendarWriteGranted();
-      const push = { calendarId: db.getSetting("gcal_push") ?? "", error: db.getSetting("gcal_push_error") ?? "" };
+      const write = google.calendarWriteGranted(); // events can be made and changed here
       try {
         const cals = await google.calendarList();
         const calendars = cals
           .filter((c) => c.accessRole === "owner" || c.accessRole === "writer")
           .map((c) => ({ id: c.id, name: c.summary ?? c.id, primary: !!c.primary }));
         const events = (await google.events(`${from}T00:00:00+09:00`, `${addDays(to, 1)}T00:00:00+09:00`, cals))
-          .filter((e) => !e.pushed) // tasks and exams sent from here stay off this calendar too
           .map(calendarItem)
           .filter((e) => e.endDate >= from && e.startDate <= to);
-        return json({ events, google: "ok", write, calendars, push });
+        return json({ events, google: "ok", write, calendars });
       } catch (e) {
         if (!(e instanceof GoogleError)) throw e;
-        return json({ events: [], google: "error", error: e.message, write, calendars: [], push });
+        return json({ events: [], google: "error", error: e.message, write, calendars: [] });
       }
     }
 
@@ -742,16 +737,6 @@ ${body || `<section class="works"><p class="empty reveal">${mine ? "아직 포�
       if (typeof f === "string") return json({ error: f }, 400);
       await google.patchEvent(calendarId, eventId, f);
       return json({ ok: true });
-    }
-    // Which calendar tasks and exams go to ('' = stop; the events sent so far are deleted from Google).
-    if (path === "/api/calendar/push" && method === "PUT") {
-      const calendarId = str((await body(req)).calendarId, 300);
-      if (calendarId && !(await google.calendarList()).some((c) => c.id === calendarId && (c.accessRole === "owner" || c.accessRole === "writer"))) {
-        return json({ error: "쓸 수 있는 캘린더가 아닙니다" }, 400);
-      }
-      db.setSetting("gcal_push", calendarId);
-      await gcal.sync();
-      return json({ calendarId, error: db.getSetting("gcal_push_error") ?? "" });
     }
 
     if (path === "/api/tasks" && method === "GET") {
@@ -1462,13 +1447,11 @@ ${body || `<section class="works"><p class="empty reveal">${mine ? "아직 포�
     const path = new URL(req.url).pathname;
     try {
       const res = await handle(req);
-      // A change may touch a task or exam that is also in Google Calendar: send it a moment later.
-      if (path.startsWith("/api/") && req.method !== "GET" && res.ok) gcal.kick();
       return withSecurityHeaders(res, path);
     } catch (e) {
       if (e instanceof GoogleError) return withSecurityHeaders(json({ error: e.message }, e.status === 401 || e.status === 400 ? e.status : 502), path);
       console.error(e);
       return withSecurityHeaders(json({ error: "서버 오류" }, 500), path);
     }
-  }, { notion, moveNotionCopies, gcal, notifier, backup });
+  }, { notion, moveNotionCopies, notifier, backup });
 }

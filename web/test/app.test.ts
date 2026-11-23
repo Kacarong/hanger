@@ -21,7 +21,6 @@ const FULL_SCOPE = `${READ_SCOPE} https://www.googleapis.com/auth/calendar.event
 type FakeEvent = { id: string; status?: string; summary?: string; location?: string; description?: string; start: Record<string, string>; end: Record<string, string>; extendedProperties?: { private: Record<string, string> } };
 const madeEvents = new Map<string, Map<string, FakeEvent>>();
 const calEvents = (id: string) => madeEvents.get(id) ?? madeEvents.set(id, new Map()).get(id)!;
-const calCalls = { insert: 0, patch: 0 };
 // Like Google's list: deleted ("cancelled") events are left out, and so are events that end before timeMin.
 const eventEnd = (e: FakeEvent) => new Date(e.end.dateTime ?? `${e.end.date}T00:00:00+09:00`).getTime();
 let grantedScope = FULL_SCOPE; // what the fake consent screen lets through
@@ -133,7 +132,6 @@ beforeAll(() => {
           return new Response(null, { status: 204 });
         }
         // PATCH merges one level down; null clears a key, like Google. A cancelled event can still be patched.
-        calCalls.patch++;
         const patch = (await req.json()) as Record<string, unknown>;
         for (const [k, v] of Object.entries(patch)) {
           if (v && typeof v === "object" && !Array.isArray(v)) {
@@ -147,7 +145,6 @@ beforeAll(() => {
       }
       const cal = p.match(/^\/calendar\/v3\/calendars\/([^/]+)\/events$/);
       if (cal && req.method === "POST") {
-        calCalls.insert++;
         const e = { ...((await req.json()) as FakeEvent), id: `ev${nextId++}` };
         calEvents(decodeURIComponent(cal[1]!)).set(e.id, e);
         return Response.json({ id: e.id });
@@ -226,7 +223,7 @@ function makeApp(opts: { googleEnabled?: boolean; now?: () => Date; notionApi?: 
     db,
   );
   const fetch = createApp(
-    { baseUrl: opts.baseUrl ?? "https://kacarong.kr", adminEmail: "owner@example.com", dataDir, googleEnabled: opts.googleEnabled ?? true, now: opts.now, notionApi: opts.notionApi, notionDebounceMs: 0, gcalDebounceMs: 0 },
+    { baseUrl: opts.baseUrl ?? "https://kacarong.kr", adminEmail: "owner@example.com", dataDir, googleEnabled: opts.googleEnabled ?? true, now: opts.now, notionApi: opts.notionApi, notionDebounceMs: 0 },
     db,
     google,
   );
@@ -235,7 +232,7 @@ function makeApp(opts: { googleEnabled?: boolean; now?: () => Date; notionApi?: 
     if (init.cookie) headers.set("Cookie", init.cookie);
     return fetch(new Request("https://kacarong.kr" + path, { ...init, headers }));
   };
-  return { call, db, notion: fetch.notion, gcal: fetch.gcal, notifier: fetch.notifier, backup: fetch.backup, moveNotionCopies: fetch.moveNotionCopies, cleanup: () => rmSync(dataDir, { recursive: true, force: true }) };
+  return { call, db, notion: fetch.notion, notifier: fetch.notifier, backup: fetch.backup, moveNotionCopies: fetch.moveNotionCopies, cleanup: () => rmSync(dataDir, { recursive: true, force: true }) };
 }
 
 async function login(call: ReturnType<typeof makeApp>["call"], code = "good-code") {
@@ -680,10 +677,10 @@ test("구글에서 권한이 끊기면 다음 로그인에서 전체 권한을 �
   }
 });
 
-test("구글 캘린더 쓰기: 일정 만들기·고치기·지우기, 할 일·시험을 고른 캘린더로 보내고 맞추기", async () => {
+test("구글 캘린더 쓰기: 일정 만들기·고치기·지우기", async () => {
   loginEmail = "owner@example.com";
   madeEvents.clear();
-  const { call, db, gcal, cleanup } = makeApp({ now: () => new Date("2026-11-22T03:00:00Z") });
+  const { call, cleanup } = makeApp({ now: () => new Date("2026-11-22T03:00:00Z") });
   try {
     // A grant from before writing came in: reading works, writing asks for a new consent.
     grantedScope = READ_SCOPE;
@@ -703,7 +700,6 @@ test("구글 캘린더 쓰기: 일정 만들기·고치기·지우기, 할 일·
       { id: "me@example.com", name: "내 캘린더", primary: true },
       { id: "hidden", name: "꺼 둔 캘린더", primary: false },
     ]); // the holiday calendar is read-only
-    expect(r.push).toEqual({ calendarId: "", error: "" });
     expect(r.events.find((e: any) => e.id === "e1")).toMatchObject({ calendarId: "me@example.com", editable: true, end: "2026-11-19", endTime: "01:30" });
     expect(r.events.find((e: any) => e.id === "h1")).toMatchObject({ editable: false });
 
@@ -737,70 +733,6 @@ test("구글 캘린더 쓰기: 일정 만들기·고치기·지우기, 할 일·
     }
     expect((await call(`/api/calendar/events/${timed.id}?calendar=me%40example.com`, { method: "DELETE", cookie, headers: JSON_ORIGIN })).status).toBe(200);
     expect(calEvents("me@example.com").has(timed.id)).toBe(false);
-    calEvents("me@example.com").clear();
-
-    // Sending tasks and exams. 공부 tab entries stay off the calendar, like on this site.
-    const task = (await (await post("/api/tasks", { kind: "과제", title: "레포트", course: "수리학", due_date: "2026-11-24", due_time: "23:00" })).json()) as { id: number };
-    await post("/api/tasks", { title: "날짜 없음" });
-    await post("/api/tasks", { title: "오래전", due_date: "2026-09-01" });
-    const exam = (await (await post("/api/exams", { title: "중간고사", course: "토질역학", date: "2026-11-27", place: "301호", scope: "1~5장" })).json()) as { id: number };
-    await post("/api/studies", { date: "2026-11-22", course: "토질역학", title: "문제풀이" });
-    await call("/api/today", { cookie }); // puts today's 공부 in 할 일·과제
-    expect((await post("/api/calendar/push", { calendarId: "ko#holiday@group.v.calendar.google.com" }, "PUT")).status).toBe(400);
-    res = await post("/api/calendar/push", { calendarId: "me@example.com" }, "PUT");
-    expect(await res.json()).toEqual({ calendarId: "me@example.com", error: "" });
-    const sent = () => [...calEvents("me@example.com").values()];
-    expect(sent().map((e) => e.summary).sort()).toEqual(["[수리학] 레포트", "시험 · 토질역학 중간고사"]);
-    const hw = sent().find((e) => e.extendedProperties?.private.kacarong === `task:${task.id}`)!;
-    expect(hw.start).toEqual({ dateTime: "2026-11-24T14:00:00.000Z", timeZone: "Asia/Seoul" });
-    expect(hw.description).toContain("과제");
-    const ex = sent().find((e) => e.extendedProperties?.private.kacarong === `exam:${exam.id}`)!;
-    expect(ex).toMatchObject({ location: "301호", start: { date: "2026-11-27" }, end: { date: "2026-11-28" } });
-    expect(ex.description).toContain("범위: 1~5장");
-    // The site's own calendar doesn't show them twice.
-    r = (await (await call("/api/calendar?from=2026-11-15&to=2026-11-30", { cookie })).json()) as Record<string, any>;
-    expect(r.events.map((e: any) => e.id).sort()).toEqual(["e1", "e2", "e3", "h1"]);
-    expect(r.push).toEqual({ calendarId: "me@example.com", error: "" });
-
-    // A change here follows a moment later; nothing else is sent again.
-    await post(`/api/tasks/${task.id}`, { done: true }, "PATCH");
-    await Bun.sleep(5);
-    await gcal.sync();
-    expect(hw.summary).toBe("✓ [수리학] 레포트");
-    expect(calEvents("me@example.com").size).toBe(2);
-    // Deleted in Google with nothing changed here: the next pass notices and makes it again.
-    calEvents("me@example.com").delete(hw.id);
-    await gcal.sync();
-    const hwAgain = sent().find((e) => e.extendedProperties?.private.kacarong === `task:${task.id}`)!;
-    expect(hwAgain.summary).toBe("✓ [수리학] 레포트");
-    expect(hwAgain.id).not.toBe(hw.id);
-    // Deleted but kept by Google as "cancelled" (a PATCH still succeeds on it): made again too.
-    hwAgain.status = "cancelled";
-    await gcal.sync();
-    const live = sent().filter((e) => e.status !== "cancelled" && e.extendedProperties?.private.kacarong === `task:${task.id}`);
-    expect(live).toHaveLength(1);
-    expect(live[0]!.id).not.toBe(hwAgain.id);
-    calEvents("me@example.com").delete(hwAgain.id);
-    // Deleted in Google but still here: made again.
-    calEvents("me@example.com").delete(ex.id);
-    await post(`/api/exams/${exam.id}`, { time: "10:00" }, "PATCH");
-    await Bun.sleep(5);
-    await gcal.sync();
-    const ex2 = sent().find((e) => e.extendedProperties?.private.kacarong === `exam:${exam.id}`)!;
-    expect(ex2.start.dateTime).toBe("2026-11-27T01:00:00.000Z");
-    // Losing the date or being deleted takes it off Google.
-    await post(`/api/tasks/${task.id}`, { due_date: "" }, "PATCH");
-    await Bun.sleep(5);
-    await gcal.sync();
-    expect(sent().map((e) => e.extendedProperties?.private.kacarong)).toEqual([`exam:${exam.id}`]);
-    // Another calendar: moved there.
-    await post("/api/calendar/push", { calendarId: "hidden" }, "PUT");
-    expect(calEvents("me@example.com").size).toBe(0);
-    expect(calEvents("hidden").size).toBe(1);
-    // Turning it off deletes what it sent.
-    await post("/api/calendar/push", { calendarId: "" }, "PUT");
-    expect(calEvents("hidden").size).toBe(0);
-    expect(db.gcalLinks()).toEqual([]);
   } finally {
     grantedScope = FULL_SCOPE;
     madeEvents.clear();
@@ -988,44 +920,6 @@ test("포트폴리오: 섹션 보기 방식(큰 카드·격자·목록), 항목�
     expect(db.isPublicFile(pic.id)).toBe(false);
     expect(await (await call("/")).text()).not.toContain("자세히 보기");
   } finally {
-    cleanup();
-  }
-});
-
-test("구글로 보내기: 오래전에 보낸 할 일을 앞으로 옮기면 새로 만들지 않고 그 일정을 고침", async () => {
-  loginEmail = "owner@example.com";
-  madeEvents.clear();
-  let clock = new Date("2026-10-01T03:00:00Z");
-  const { call, gcal, cleanup } = makeApp({ now: () => clock });
-  try {
-    const { cookie } = await login(call);
-    const post = (path: string, b: object, method = "POST") => call(path, { method, cookie, headers: JSON_ORIGIN, body: JSON.stringify(b) });
-    const task = (await (await post("/api/tasks", { title: "보고서", due_date: "2026-10-01" })).json()) as { id: number };
-    await post("/api/calendar/push", { calendarId: "me@example.com" }, "PUT");
-    const [ev] = [...calEvents("me@example.com").values()];
-    expect(ev).toMatchObject({ summary: "보고서", start: { date: "2026-10-01" } });
-
-    // Seven weeks later the item is older than the 30-day window, so its event is no longer listed; then it moves forward.
-    clock = new Date("2026-11-22T03:00:00Z");
-    await gcal.sync();
-    const before = { ...calCalls };
-    await post(`/api/tasks/${task.id}`, { due_date: "2026-11-23" }, "PATCH");
-    await Bun.sleep(5);
-    await gcal.sync();
-    expect(calCalls.insert).toBe(before.insert); // no second event
-    expect(calCalls.patch).toBe(before.patch + 1);
-    expect([...calEvents("me@example.com").values()]).toHaveLength(1);
-    expect(ev).toMatchObject({ start: { date: "2026-11-23" }, end: { date: "2026-11-24" } });
-    // Now in the window and unchanged: nothing is sent again.
-    await gcal.sync();
-    expect(calCalls.patch).toBe(before.patch + 1);
-    // Deleting it here still deletes that one event.
-    await call(`/api/tasks/${task.id}`, { method: "DELETE", cookie, headers: JSON_ORIGIN });
-    await Bun.sleep(5);
-    await gcal.sync();
-    expect(calEvents("me@example.com").size).toBe(0);
-  } finally {
-    madeEvents.clear();
     cleanup();
   }
 });

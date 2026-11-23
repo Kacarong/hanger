@@ -430,9 +430,6 @@ span.note-fold { cursor: default; }
 .by-course .course-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .by-course .pill { justify-self: end; }
 .exam-mark { display: inline-grid; place-items: center; width: 15px; color: var(--orange); }
-.cal-push { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12px; white-space: nowrap; }
-.cal-push select { width: auto; max-width: 160px; height: 30px; padding: 0 8px; font-size: 12px; }
-.cal-push-error { margin: 0 16px 8px; font-size: 12px; }
 dialog label.check { display: flex; align-items: center; gap: 8px; }
 dialog .foot .grow { flex: 1; }
 .notify-device { display: flex; align-items: center; gap: 12px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel-2); }
