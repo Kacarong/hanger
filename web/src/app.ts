@@ -1,6 +1,6 @@
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { mkdirSync, existsSync, readdirSync, readFileSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { cleanBlocks, editRuns, richOrNone } from "./blocks";
 import { noteHtml } from "./note-html";
 import { ATTACH_TARGETS, CATEGORIES, EXAM_COLORS, EXPENSE_KINDS, SECTION_LAYOUTS, TASK_CATEGORIES, TASK_KINDS, type AttachedFile, type Block, type Db, type ExamFields, type ExpenseFields, type ExpenseRow, type FileRow, type PortfolioFields, type PortfolioItem, type StudyFields, type TaskFields } from "./db";
@@ -127,7 +127,10 @@ function contentDisposition(kind: "inline" | "attachment", name: string): string
 // with an old /static/ file still sitting in Cloudflare's cache (it keeps them for hours).
 function assetVersion(): string {
   const h = createHash("sha256");
-  for (const name of readdirSync(PUBLIC_DIR).sort()) h.update(name).update(readFileSync(join(PUBLIC_DIR, name)));
+  const names = readdirSync(PUBLIC_DIR, { recursive: true, withFileTypes: true })
+    .filter((e) => e.isFile())
+    .map((e) => relative(PUBLIC_DIR, join(e.parentPath, e.name)));
+  for (const name of names.sort()) h.update(name).update(readFileSync(join(PUBLIC_DIR, name)));
   return h.digest("hex").slice(0, 10);
 }
 
@@ -1223,7 +1226,8 @@ ${body || `<section class="works"><p class="empty reveal">${mine ? "아직 포�
 
     if (path.startsWith("/static/") && req.method === "GET") {
       const name = path.slice("/static/".length);
-      if (!/^[\w.-]+$/.test(name)) return new Response("not found", { status: 404 });
+      // Subfolders (vendor/) are fine, but no part may start with "." (so no "..").
+      if (!/^[\w-][\w.-]*(\/[\w-][\w.-]*)*$/.test(name)) return new Response("not found", { status: 404 });
       const file = Bun.file(join(PUBLIC_DIR, name));
       return (await file.exists()) ? new Response(file) : new Response("not found", { status: 404 });
     }
@@ -1302,7 +1306,7 @@ ${body || `<section class="works"><p class="empty reveal">${mine ? "아직 포�
     "default-src 'self'",
     "script-src 'self'",
     "style-src 'self' 'unsafe-inline'",
-    "img-src 'self' https: data:", // pictures in notes may come from anywhere Notion links to
+    "img-src 'self' https: data: blob:", // pictures in notes may come from anywhere Notion links to; blob: for 파일 편집기 previews
     "media-src 'self' https:",
     `connect-src 'self' ${google.apiOrigin}`,
     "object-src 'none'",

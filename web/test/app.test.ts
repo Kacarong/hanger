@@ -1047,6 +1047,14 @@ test("정적 파일 주소에 버전이 붙고, 그 주소로 파일이 열림",
       expect(res.status).toBe(200);
       expect(res.headers.get("Content-Type")).toBe("font/woff2");
     }
+    // 파일 편집기 라이브러리는 vendor/ 아래에 있다. 점으로 시작하는 부분("..")과 폴더 자체는 열리지 않는다.
+    for (const f of ["/static/pdftools.js", "/static/vendor/pdf-lib.min.js", "/static/vendor/pdf.worker.min.js"]) {
+      const res = await call(f);
+      expect(res.status).toBe(200);
+      expect(res.headers.get("Content-Type")).toContain("text/javascript");
+    }
+    expect((await call("/static/vendor/cmaps/UniKS-UCS2-H.bcmap")).status).toBe(200);
+    for (const bad of ["/static/vendor", "/static/vendor/", "/static/.well-known", "/static/vendor/..%2f..%2fsrc%2fapp.ts", "/static/vendor/.x"]) expect((await call(bad)).status).toBe(404);
   } finally {
     cleanup();
   }

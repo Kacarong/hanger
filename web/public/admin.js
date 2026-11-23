@@ -36,6 +36,7 @@ const ICONS = {
   book: '<path d="M4 4.5A1.5 1.5 0 0 1 5.5 3H20v15H5.5A1.5 1.5 0 0 0 4 19.5z"/><path d="M4 19.5A1.5 1.5 0 0 0 5.5 21H20v-3"/>',
   bell: '<path d="M6 16V11a6 6 0 0 1 12 0v5l1.5 2h-15z"/><path d="M10 20.5a2 2 0 0 0 4 0"/>',
   eye: '<path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/>',
+  layers: '<path d="m12 3 9 5-9 5-9-5z"/><path d="m3 13 9 5 9-5"/>',
   wallet: '<path d="M4 7.5A1.5 1.5 0 0 1 5.5 6H19a1 1 0 0 1 1 1v12a1 1 0 0 1-1 1H5.5A1.5 1.5 0 0 1 4 18.5z"/><path d="M4 7.5 15 4v2M15 13h3"/>',
 };
 const icon = (name) => {
@@ -126,13 +127,19 @@ async function uploadToDrive(url, file, onProgress) {
   }
 }
 
-// Uploads one file into the 파일함 (meta.folderId, or the top) with its progress line in `list`.
-// Returns the new file row, or null on failure.
-async function uploadOne(file, list, meta) {
-  const name = el("span", { textContent: `${file.name} · 준비 중` });
+function progressLine(file, list, text) {
+  const name = el("span", { textContent: `${file.name} · ${text}` });
   const fill = el("div", { className: "bar-fill" });
   const li = el("li", {}, name, el("div", { className: "bar-track" }, fill));
   list.append(li);
+  return { li, name, fill };
+}
+
+// Uploads one file into the 파일함 (meta.folderId, or the top) with its progress line in `list`
+// (or the given line made earlier by progressLine). Returns the new file row, or null on failure.
+async function uploadOne(file, list, meta, line = progressLine(file, list, "준비 중")) {
+  const { li, name, fill } = line;
+  name.textContent = `${file.name} · 준비 중`;
   try {
     const { uploadUrl } = await call("/api/uploads", { method: "POST", body: { name: file.name, size: file.size, mimeType: file.type, folderId: meta.folderId ?? null } });
     const driveFile = await uploadToDrive(uploadUrl, file, (p) => {
@@ -1583,6 +1590,7 @@ const tabs = {
       el("button", { className: "btn primary", type: "button", onclick: () => newNote().catch(showError) }, icon("plus"), "새 노트", el("kbd", { textContent: "N" })),
     ],
   },
+  pdf: { title: "파일 편집기", load: () => loadPdfTools(), actions: () => [] },
   files: {
     title: "클라우드",
     load: () => {
@@ -1609,6 +1617,41 @@ const tabs = {
 };
 const newTaskBtn = () => el("button", { className: "btn primary", type: "button", onclick: () => openTaskDialog() }, icon("plus"), "새 할 일", el("kbd", { textContent: "N" }));
 
+let pdfTools = null;
+function loadPdfTools() {
+  pdfTools ??= import("./pdftools.js" + new URL(import.meta.url).search).then((m) => m.mount($("tab-pdf"), { icon }));
+  return pdfTools.catch((e) => {
+    pdfTools = null; // 다음에 탭을 열 때 다시 시도
+    throw e;
+  });
+}
+
+// 올리기 창에서 고른 파일은 창을 닫고 차례로 올린다(진행은 클라우드 화면 위 목록에). 올리는 동안 더 골라도 뒤에 붙는다.
+let uploadQueue = Promise.resolve();
+let uploading = 0;
+function queueUploads(files, meta) {
+  const list = $("upload-queue");
+  list.hidden = false;
+  uploading += files.length;
+  for (const f of files) {
+    const line = progressLine(f, list, "기다리는 중");
+    uploadQueue = uploadQueue.then(async () => {
+      const row = await uploadOne(f, list, meta, line); // one at a time to keep bandwidth predictable
+      uploading--;
+      const done = () => {
+        line.li.remove();
+        list.hidden = !list.childElementCount;
+      };
+      if (row) setTimeout(done, 1500);
+      else line.li.append(el("button", { className: "btn ghost sm", type: "button", textContent: "닫기", onclick: done })); // 실패 이유는 닫을 때까지 남긴다
+      if (currentTab() === "files") loadList().catch(showError);
+    });
+  }
+}
+addEventListener("beforeunload", (ev) => {
+  if (uploading) ev.preventDefault(); // 올리는 중에 창을 닫으면 끊긴다
+});
+
 function openUpload() {
   $("progress").replaceChildren();
   $("upload-where").textContent = pathText(currentFolder());
@@ -1627,7 +1670,7 @@ function setupDrop() {
   // 파일을 끌어다 놓을 때 브라우저가 그 파일을 열어 버리지 않게(업로드 중이면 끊긴다) 기본 동작은 늘 막고,
   // 받을 수 있을 때만 골라 넣는다.
   const isFiles = (ev) => ev.dataTransfer?.types.includes("Files");
-  const canDrop = () => currentTab() === "files" && me.driveConnected && !$("upload-btn").disabled;
+  const canDrop = () => currentTab() === "files" && me.driveConnected;
   document.addEventListener("dragover", (ev) => {
     if (!isFiles(ev)) return;
     ev.preventDefault();
@@ -1785,22 +1828,16 @@ async function init() {
       showError(e);
     }
   };
-  $("upload").onsubmit = async (ev) => {
+  $("upload").onsubmit = (ev) => {
     ev.preventDefault();
     const files = [...$("files").files];
     if (!files.length) return $("progress").replaceChildren(el("li", { className: "error", textContent: "올릴 파일을 골라 주세요." }));
     const tooBig = files.filter((f) => f.size >= me.maxFileSize);
     if (tooBig.length) return $("progress").replaceChildren(el("li", { className: "error", textContent: "1GB 미만 파일만 올릴 수 있습니다: " + tooBig.map((f) => f.name).join(", ") }));
-    $("upload-btn").disabled = true;
-    $("progress").replaceChildren();
-    let ok = true;
-    const meta = { category: $("up-category").value, tags: $("up-tags").value, note: $("up-note").value, folderId: currentFolder() };
-    for (const f of files) ok = !!(await uploadOne(f, $("progress"), meta)) && ok; // one at a time to keep bandwidth predictable
-    $("upload-btn").disabled = false;
+    queueUploads(files, { category: $("up-category").value, tags: $("up-tags").value, note: $("up-note").value, folderId: currentFolder() });
     $("files").value = "";
     showPicked();
-    if (ok) $("upload-dialog").close(); // 실패가 있으면 이유를 볼 수 있게 창을 남긴다.
-    loadList().catch(showError);
+    $("upload-dialog").close();
   };
   $("folder-form").onsubmit = async (ev) => {
     ev.preventDefault();

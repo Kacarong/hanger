@@ -42,6 +42,7 @@
 
     <div class="nav-group">보관</div>
     <a class="nav-item" href="#files" data-tab="files"><span data-icon="folder"></span>클라우드</a>
+    <a class="nav-item" href="#pdf" data-tab="pdf"><span data-icon="layers"></span>파일 편집기</a>
     <a class="nav-item" href="#portfolio" data-tab="portfolio"><span data-icon="star"></span>포트폴리오</a>
     <a class="nav-item" href="/" target="_blank"><span data-icon="globe"></span>공개 페이지</a>
 
@@ -137,6 +138,7 @@
       <div id="tab-files" hidden>
         <div class="stats" id="file-stats"></div>
         <p class="notice" id="drive-off" hidden>구글 드라이브가 연결되지 않았습니다.</p>
+        <ul class="progress upload-queue" id="upload-queue" hidden></ul>
         <div class="toolbar">
           <nav class="crumbs" id="crumbs"></nav>
           <span class="grow"></span>
@@ -146,6 +148,8 @@
         <table class="table"><thead><tr><th class="w1"></th><th>이름</th><th class="hide-sm">분류</th><th class="hide-sm">태그</th><th class="num">크기</th><th class="hide-sm">올린 날</th><th></th></tr></thead>
           <tbody id="list"></tbody></table>
       </div>
+
+      <div id="tab-pdf" hidden></div>
 
       <div id="tab-portfolio" class="pf" hidden>
         <form class="pf-card" id="profile-form">
@@ -364,7 +368,7 @@
     </div>
     <label>메모<input class="input" id="up-note"></label>
     <ul class="progress" id="progress"></ul>
-    <div class="foot"><button class="btn" type="button" data-close>닫기</button><button class="btn primary" value="ok" id="upload-btn">올리기</button></div>
+    <div class="foot"><button class="btn" type="button" data-close>닫기</button><button class="btn primary" value="ok">올리기</button></div>
   </form>
 </dialog>
 
