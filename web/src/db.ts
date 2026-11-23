@@ -563,11 +563,10 @@ export function openDb(path: string) {
       return files;
     }),
     // from/to are inclusive YYYY-MM-DD bounds on due_date; a bound excludes undated tasks.
-    listTasks(opts: { done?: boolean; from?: string; to?: string; kind?: string; doneOn?: string; planned?: boolean; noStudies?: boolean }): TaskRow[] {
+    listTasks(opts: { done?: boolean; from?: string; to?: string; kind?: string; doneOn?: string; planned?: boolean }): TaskRow[] {
       const where: string[] = [];
       const args: (string | number)[] = [];
       if (opts.planned) where.push("exam_id IS NOT NULL");
-      if (opts.noStudies) where.push("study_id IS NULL");
       if (opts.done !== undefined) {
         where.push("done = ?");
         args.push(opts.done ? 1 : 0);

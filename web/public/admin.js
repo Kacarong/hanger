@@ -909,7 +909,6 @@ async function loadCalendar() {
   const data = await call(`/api/calendar?from=${from}&to=${to}`);
   if (month !== calMonth) return; // a newer month was asked for meanwhile
   const today = seoulToday();
-  const reload = () => loadCalendar().catch(showError);
   $("cal-month").textContent = `${Number(month.slice(0, 4))}년 ${Number(month.slice(5))}월`;
   const google = $("cal-google");
   google.className = data.google === "error" ? "error" : "muted";
@@ -948,8 +947,6 @@ async function loadCalendar() {
       put(d, { sort: d === e.startDate && e.time ? e.time : "", node: () => eventItem(e, d) });
     }
   }
-  for (const t of data.tasks) if (matches(t, q)) put(t.due_date, { sort: t.due_time ?? "~", node: () => taskItem(t, today, reload) });
-  for (const e of data.exams) if (matches(e, q)) put(e.date, { sort: e.time ?? "", node: () => examItem(e) });
 
   const heads = ["일", "월", "화", "수", "목", "금", "토"].map((w) => el("div", { className: "cal-head", textContent: w }));
   const days = [];
@@ -960,28 +957,15 @@ async function loadCalendar() {
     days.push(
       el(
         "div",
-        { className: cls, title: `${md(d)}에 추가`, onclick: (ev) => (ev.target === ev.currentTarget || ev.target.classList.contains("cal-num") ? addOnDay(d) : null) },
+        calWrite
+          ? { className: cls + " add", title: `${md(d)}에 구글 일정 추가`, onclick: (ev) => (ev.target === ev.currentTarget || ev.target.classList.contains("cal-num") ? openEventDialog(null, d) : null) }
+          : { className: cls },
         el("span", { className: "cal-num", textContent: Number(d.slice(8)) }),
         ...items.map((x) => x.node()),
       ),
     );
   }
   $("cal-grid").replaceChildren(...heads, ...days);
-}
-
-// 빈 칸을 누르면 그날에 할 일, 쓰기 권한이 있으면 할 일과 구글 일정 중에서 고른다.
-function addOnDay(d) {
-  if (!calWrite) return openTaskDialog(null, d);
-  $("day-dialog-title").textContent = `${dayLabel(d)}에 추가`;
-  $("day-task").onclick = () => {
-    $("day-dialog").close();
-    openTaskDialog(null, d);
-  };
-  $("day-event").onclick = () => {
-    $("day-dialog").close();
-    openEventDialog(null, d);
-  };
-  $("day-dialog").showModal();
 }
 
 // 구글 일정 창. e = 고칠 일정(없으면 새 일정, date 날짜로).
@@ -1028,29 +1012,8 @@ function eventItem(e, day) {
   );
 }
 
-function taskItem(t, today, reload) {
-  const late = !t.done && t.due_date < today;
-  return el(
-    "button",
-    { type: "button", className: `cal-item task${t.kind === "과제" ? " hw" : ""}${t.done ? " done" : ""}${late ? " late" : ""}`, title: `${t.kind}${t.course ? " · " + t.course : ""} · ${t.title}`, onclick: () => openTaskDialog(t) },
-    el("i", { className: "dot" }),
-    t.due_time ? el("span", { className: "t", textContent: t.due_time }) : null,
-    el("span", { textContent: (t.course ? `[${t.course}] ` : "") + t.title }),
-  );
-}
-
-function examItem(e) {
-  return el(
-    "a",
-    { className: "cal-item exam", href: "#exams", title: `시험 · ${e.title}${e.time ? " · " + e.time : ""}${e.place ? " · " + e.place : ""}` },
-    el("i", { className: "dot" }),
-    e.time ? el("span", { className: "t", textContent: e.time }) : null,
-    el("span", { textContent: `시험 · ${e.title}` }),
-  );
-}
-
 // 시험: 시험마다 일정(날짜·시간·장소·범위)과 날짜별 공부 계획. 공부 계획 하나하나는 할 일(종류 "공부")이라
-// 오늘 화면과 캘린더에도 나오고, 거기서 체크해도 여기에 반영된다.
+// 오늘 화면에도 나오고, 거기서 체크해도 여기에 반영된다.
 const weekday = (d) => "일월화수목금토"[new Date(d + "T00:00:00Z").getUTCDay()];
 const dday = (today, date) => {
   const n = daysBetween(today, date);
@@ -1662,7 +1625,6 @@ const tabs = {
     load: () => loadCalendar(),
     actions: () => [
       ...(me?.calendarWrite ? [el("button", { className: "btn", type: "button", onclick: () => openEventDialog() }, icon("calendar"), "새 구글 일정")] : []),
-      newTaskBtn(),
     ],
   },
   exams: { title: "시험", load: () => loadExams(), actions: () => [el("button", { className: "btn primary", type: "button", onclick: () => openExamDialog() }, icon("plus"), "새 시험", el("kbd", { textContent: "N" }))] },
@@ -2113,6 +2075,7 @@ async function init() {
     else if (ev.key.toLowerCase() === "n" && currentTab() === "classes") (ev.preventDefault(), openClassDialog());
     else if (ev.key.toLowerCase() === "n" && currentTab() === "timetable") (ev.preventDefault(), timetable?.then((t) => t.openCourse()));
     else if (ev.key.toLowerCase() === "n" && currentTab() === "studies") (ev.preventDefault(), document.querySelector("#study-list .study-add input:not(.course)")?.focus());
+    else if (ev.key.toLowerCase() === "n" && currentTab() === "calendar") (ev.preventDefault(), calWrite && openEventDialog());
     else if (ev.key.toLowerCase() === "n" && currentTab() !== "files") (ev.preventDefault(), openTaskDialog());
     else if (ev.key.toLowerCase() === "u" && currentTab() === "files" && me.driveConnected) (ev.preventDefault(), openUpload());
   });

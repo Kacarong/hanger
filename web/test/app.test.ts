@@ -597,7 +597,7 @@ test("할 일·과제: 추가 → 오늘 화면 분류 → 완료 → 수정·�
   }
 });
 
-test("캘린더: 권한 없으면 다시 동의 요청, 구글 일정 + 할 일을 한국 날짜로", async () => {
+test("캘린더: 권한 없으면 다시 동의 요청, 구글 일정만 한국 날짜로(할 일은 안 나옴)", async () => {
   loginEmail = "owner@example.com";
   const { call, cleanup } = makeApp();
   try {
@@ -630,7 +630,7 @@ test("캘린더: 권한 없으면 다시 동의 요청, 구글 일정 + 할 일�
     eventQueries.length = 0;
     r = (await (await call("/api/calendar?from=2026-11-15&to=2026-11-30", { cookie })).json()) as Record<string, unknown>;
     expect(r.google).toBe("ok");
-    expect((r.tasks as { title: string }[]).map((t) => t.title)).toEqual(["레포트"]);
+    expect(r.tasks).toBeUndefined(); // 할 일·과제 stay off the calendar
     expect(eventQueries).toHaveLength(2); // the calendar switched off in Google is skipped
     expect(eventQueries[0]!.get("timeMin")).toBe("2026-11-15T00:00:00+09:00");
     expect(eventQueries[0]!.get("timeMax")).toBe("2026-12-01T00:00:00+09:00");
@@ -643,13 +643,13 @@ test("캘린더: 권한 없으면 다시 동의 요청, 구글 일정 + 할 일�
     expect(byId.e3).toMatchObject({ startDate: "2026-11-20", endDate: "2026-11-20", time: "23:00" });
     expect(byId.h1).toMatchObject({ title: "(제목 없음)", calendar: "대한민국의 휴일", color: "" }); // odd color dropped
 
-    // Google trouble still shows the tasks.
+    // Google trouble: the reason, no events.
     calendarFails = true;
     r = (await (await call("/api/calendar?from=2026-11-15&to=2026-11-30", { cookie })).json()) as Record<string, unknown>;
     calendarFails = false;
     expect(r.google).toBe("error");
     expect(String(r.error)).toContain("403");
-    expect(r.tasks).toHaveLength(1);
+    expect(r.events).toEqual([]);
 
     for (const q of ["from=2026-11-30&to=2026-11-01", "from=2026-11-01&to=2027-01-02", "from=2026-11-01", "from=2026-11-01&to=2026-11-31"]) {
       expect((await call(`/api/calendar?${q}`, { cookie })).status).toBe(400);
@@ -1175,16 +1175,16 @@ test("보안 헤더: CSP·프레임 금지·nosniff·HSTS, 개인 데이터는 �
   }
 });
 
-test("캘린더: 구글이 꺼져 있으면 할 일만", async () => {
+test("캘린더: 구글이 꺼져 있으면 비어 있음(할 일·시험은 안 나옴)", async () => {
   const { call, db, cleanup } = makeApp({ googleEnabled: false });
   try {
     db.setSetting("password_hash", await Bun.password.hash("correct horse battery"));
     const { cookie } = await passwordLogin(call, "correct horse battery");
     expect((await call("/api/calendar?from=2026-11-01&to=2026-11-30")).status).toBe(401);
     await call("/api/tasks", { method: "POST", cookie, headers: JSON_ORIGIN, body: JSON.stringify({ title: "장보기", due_date: "2026-11-19" }) });
+    await call("/api/exams", { method: "POST", cookie, headers: JSON_ORIGIN, body: JSON.stringify({ title: "중간고사", date: "2026-11-20" }) });
     const r = (await (await call("/api/calendar?from=2026-11-01&to=2026-11-30", { cookie })).json()) as Record<string, unknown>;
-    expect(r).toMatchObject({ google: "off", events: [] });
-    expect(r.tasks).toHaveLength(1);
+    expect(r).toEqual({ google: "off", events: [] });
   } finally {
     cleanup();
   }
@@ -1245,8 +1245,6 @@ test("노트: 블록 저장, 날짜 있는 체크박스는 할 일이 되어 오
     let today = (await (await req("/api/today", "GET")).json()) as { today: { id: number; title: string; due_time: string; note_id: number; note_title: string }[] };
     expect(today.today).toHaveLength(1);
     expect(today.today[0]).toMatchObject({ title: "레포트 초안", due_time: "18:00", note_id: note.id, note_title: "수업 메모" });
-    const cal = (await (await req("/api/calendar?from=2026-11-01&to=2026-11-30", "GET")).json()) as { tasks: { title: string }[] };
-    expect(cal.tasks.map((t) => t.title)).toEqual(["레포트 초안", "전시 보기"]);
     const taskId = today.today[0]!.id;
 
     // Checking it off on the today screen checks the box in the note; the kind set on the task stays.
@@ -1558,13 +1556,13 @@ test("시험: 일정 → 날짜별 공부 계획(오늘·캘린더·할 일에�
     expect(list.exams.map((e: any) => e.title)).toEqual(["지난 퀴즈", "토질역학 중간고사", "토익", "날짜 미정 시험"]);
     expect(list.exams[1].plan.map((t: any) => t.title)).toEqual(["1장 복습", "2장 문제풀이"]);
 
-    // The today screen shows today's plan day and exams within two weeks; the calendar shows both.
+    // The today screen shows today's plan day and exams within two weeks; the calendar shows neither.
     const today = (await req("/api/today", "GET")).body;
     expect(today.today.map((t: any) => t.title)).toEqual(["1장 복습"]);
     expect(today.exams.map((e: any) => e.title)).toEqual(["토질역학 중간고사"]);
     const cal = (await req("/api/calendar?from=2026-11-01&to=2026-11-30", "GET")).body;
-    expect(cal.exams.map((e: any) => e.title)).toEqual(["지난 퀴즈", "토질역학 중간고사"]);
-    expect(cal.tasks.map((t: any) => t.title)).toEqual(["1장 복습", "2장 문제풀이"]);
+    expect(cal.exams).toBeUndefined();
+    expect(cal.tasks).toBeUndefined();
 
     // Checked off from the today screen, it is done on the 시험 tab too.
     await req(`/api/tasks/${day1.id}`, "PATCH", { done: true });
@@ -1615,7 +1613,7 @@ test("공부: 날짜별로 공부·과목을 적고 체크·수정·삭제, 캘�
 
     // The calendar never sees it, not even once today's are in 할 일·과제 (see the next test).
     expect((await req("/api/tasks", "GET")).body.length).toBe(2);
-    expect((await req("/api/calendar?from=2026-11-01&to=2026-11-30", "GET")).body.tasks).toEqual([]);
+    expect((await req("/api/calendar?from=2026-11-01&to=2026-11-30", "GET")).body.tasks).toBeUndefined();
 
     expect((await req(`/api/studies/${a.id}`, "PATCH", { done: true })).body).toMatchObject({ done: 1 });
     expect((await req(`/api/studies/${a.id}`, "PATCH", { date: "2026-11-22", course: "", title: "4장 복습" })).body).toMatchObject({ date: "2026-11-22", course: "", title: "4장 복습", done: 1 });
@@ -1693,7 +1691,7 @@ test("공부: 그날 0시가 되면 할 일·과제의 오늘 할 일에 들어�
       ["공부", "오늘 할 일", "", "영단어 50개", "2026-11-23", 0],
     ]);
     expect((await req("/api/today", "GET")).body.today.map((t: any) => t.title)).toEqual(["3장 복습", "영단어 50개"]);
-    expect((await req("/api/calendar?from=2026-11-01&to=2026-11-30", "GET")).body.tasks).toEqual([]);
+    expect((await req("/api/calendar?from=2026-11-01&to=2026-11-30", "GET")).body.tasks).toBeUndefined();
     const [ta, tb] = tasks;
 
     // Checked in 할 일·과제 → checked on the 공부 tab, and the other way round.

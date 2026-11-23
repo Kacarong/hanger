@@ -651,16 +651,14 @@ ${body || `<section class="works"><p class="empty reveal">${mine ? "아직 포�
       });
     }
 
-    // Tasks with a date in [from, to] plus Google Calendar events of those days.
-    // A Google failure still returns the tasks, with google = "error" and the reason.
+    // Google Calendar events of the days [from, to]. Only Google: 할 일·과제·시험 stay off the calendar (user, 2026-11-24).
+    // A Google failure returns google = "error" and the reason.
     if (path === "/api/calendar" && method === "GET") {
       const from = url.searchParams.get("from") ?? "";
       const to = url.searchParams.get("to") ?? "";
       if (!isDate(from) || !isDate(to) || to < from || to > addDays(from, CALENDAR_MAX_DAYS - 1)) return json({ error: "날짜 범위가 올바르지 않습니다" }, 400);
-      const tasks = db.listTasks({ from, to, noStudies: true }); // 공부 stays off the calendar
-      const exams = db.listExams({ from, to });
-      if (!cfg.googleEnabled || !db.getSetting("refresh_token")) return json({ tasks, exams, events: [], google: "off" });
-      if (!google.calendarGranted()) return json({ tasks, exams, events: [], google: "need_consent" });
+      if (!cfg.googleEnabled || !db.getSetting("refresh_token")) return json({ events: [], google: "off" });
+      if (!google.calendarGranted()) return json({ events: [], google: "need_consent" });
       // write: events can be made here and tasks/exams sent to Google (push = the calendar they go to, '' = not sent).
       const write = google.calendarWriteGranted();
       const push = { calendarId: db.getSetting("gcal_push") ?? "", error: db.getSetting("gcal_push_error") ?? "" };
@@ -670,13 +668,13 @@ ${body || `<section class="works"><p class="empty reveal">${mine ? "아직 포�
           .filter((c) => c.accessRole === "owner" || c.accessRole === "writer")
           .map((c) => ({ id: c.id, name: c.summary ?? c.id, primary: !!c.primary }));
         const events = (await google.events(`${from}T00:00:00+09:00`, `${addDays(to, 1)}T00:00:00+09:00`, cals))
-          .filter((e) => !e.pushed) // tasks and exams sent from here already show as themselves
+          .filter((e) => !e.pushed) // tasks and exams sent from here stay off this calendar too
           .map(calendarItem)
           .filter((e) => e.endDate >= from && e.startDate <= to);
-        return json({ tasks, exams, events, google: "ok", write, calendars, push });
+        return json({ events, google: "ok", write, calendars, push });
       } catch (e) {
         if (!(e instanceof GoogleError)) throw e;
-        return json({ tasks, exams, events: [], google: "error", error: e.message, write, calendars: [], push });
+        return json({ events: [], google: "error", error: e.message, write, calendars: [], push });
       }
     }
 
