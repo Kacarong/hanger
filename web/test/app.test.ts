@@ -1632,6 +1632,36 @@ test("공부: 날짜별로 공부·과목을 적고 체크·수정·삭제, 캘�
   }
 });
 
+test("나중에 할 일: 마감일이 되면 오늘 할 일로 옮겨지고, 날짜 없는 것·끝낸 것·아직 먼 것은 그대로", async () => {
+  let clock = new Date("2026-11-22T14:59:00Z"); // 11-22 23:59 KST
+  const { call, db, cleanup } = makeApp({ googleEnabled: false, now: () => clock });
+  try {
+    db.setSetting("password_hash", await Bun.password.hash("correct horse battery"));
+    const { cookie } = await passwordLogin(call, "correct horse battery");
+    const req = async (path: string, method: string, b?: object) => {
+      const r = await call(path, { method, cookie, headers: JSON_ORIGIN, body: b ? JSON.stringify(b) : undefined });
+      return { status: r.status, body: (await r.json()) as any };
+    };
+    const later = (title: string, due_date: string | null) => req("/api/tasks", "POST", { category: "나중에 할 일", title, due_date });
+    await later("마감 11-23", "2026-11-23");
+    await later("마감 11-25", "2026-11-25");
+    await later("날짜 없음", null);
+    const done = (await later("끝낸 것", "2026-11-23")).body;
+    await req(`/api/tasks/${done.id}`, "PATCH", { done: true });
+    const cats = async () => Object.fromEntries([...(await req("/api/tasks", "GET")).body].map((t: any) => [t.title, t.category]));
+    expect(await cats()).toEqual({ "마감 11-23": "나중에 할 일", "마감 11-25": "나중에 할 일", "날짜 없음": "나중에 할 일", "끝낸 것": "나중에 할 일" });
+
+    clock = new Date("2026-11-22T15:00:00Z"); // 11-23 00:00 KST
+    expect(await cats()).toEqual({ "마감 11-23": "오늘 할 일", "마감 11-25": "나중에 할 일", "날짜 없음": "나중에 할 일", "끝낸 것": "나중에 할 일" });
+
+    // Nobody looked on 11-25: by 11-26 the passed one has moved too, the first time anything is read (here the today screen).
+    clock = new Date("2026-11-25T15:00:00Z"); // 11-26 00:00 KST
+    expect((await req("/api/today", "GET")).body.overdue.map((t: any) => [t.title, t.category])).toEqual([["마감 11-23", "오늘 할 일"], ["마감 11-25", "오늘 할 일"]]);
+  } finally {
+    cleanup();
+  }
+});
+
 test("공부: 그날 0시가 되면 할 일·과제의 오늘 할 일에 들어가고, 어느 쪽에서 체크해도 같이 체크", async () => {
   let clock = new Date("2026-11-22T14:59:00Z"); // 11-22 23:59 KST
   const { call, db, cleanup } = makeApp({ googleEnabled: false, now: () => clock });

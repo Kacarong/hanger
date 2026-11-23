@@ -573,6 +573,7 @@ ${body || `<section class="works"><p class="empty reveal">${mine ? "아직 포�
     if (path === "/api/today" && method === "GET") {
       const d = today();
       db.queueStudies(d);
+      db.promoteLaterTasks(d);
       const open = db.listTasks({ done: false, to: addDays(d, UPCOMING_DAYS) });
       return json({
         date: d,
@@ -696,6 +697,7 @@ ${body || `<section class="works"><p class="empty reveal">${mine ? "아직 포�
       const to = q.get("to") ?? "";
       if ((from && !isDate(from)) || (to && !isDate(to))) return json({ error: "날짜가 올바르지 않습니다" }, 400);
       db.queueStudies(today());
+      db.promoteLaterTasks(today());
       return json(db.listTasks({ done: done === null ? undefined : done === "1", from, to, kind: q.get("kind") ?? undefined }));
     }
 

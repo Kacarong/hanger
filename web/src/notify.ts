@@ -59,6 +59,7 @@ export function createNotifier(opts: { db: Db; subject: string; now: () => Date 
     const out: Note[] = [];
     if (s.morning) {
       db.queueStudies(d); // today's 공부 is part of today's list
+      db.promoteLaterTasks(d);
       const open = db.listTasks({ done: false, to: addDays(d, 1) });
       const today = open.filter((t) => t.due_date === d);
       const late = open.filter((t) => t.due_date! < d);

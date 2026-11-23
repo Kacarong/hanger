@@ -632,6 +632,10 @@ export function openDb(path: string) {
         db.query("UPDATE studies SET queued = 1 WHERE id = ?").run(s.id);
       }
     }),
+    // An open 나중에 할 일 task whose due day has come (or gone) moves to 오늘 할 일.
+    promoteLaterTasks(today: string) {
+      db.query("UPDATE tasks SET category = '오늘 할 일' WHERE category = '나중에 할 일' AND done = 0 AND due_date <= ?").run(today);
+    },
     deleteStudy(id: number) {
       db.query("DELETE FROM studies WHERE id = ?").run(id);
     },
