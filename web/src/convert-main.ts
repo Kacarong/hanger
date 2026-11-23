@@ -1,7 +1,7 @@
 // 변환 서버(deploy/kacarong-convert.service): 127.0.0.1에서 사이트의 변환 요청만 받는다. 한 번에 하나씩 변환한다.
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { CONVERT_MAX, convertFile } from "./convert";
+import { CONVERT_MAX, CONVERT_TIMEOUT, convertFile } from "./convert";
 
 const token = process.env.CONVERT_TOKEN;
 if (!token) throw new Error("환경변수 CONVERT_TOKEN 이 필요합니다");
@@ -13,6 +13,7 @@ const server = Bun.serve({
   hostname: "127.0.0.1",
   port: Number(process.env.CONVERT_PORT ?? 2994),
   maxRequestBodySize: CONVERT_MAX,
+  idleTimeout: CONVERT_TIMEOUT / 1000 + 30, // 변환이 끝날 때까지 연결을 끊지 않게(기본 10초)
   async fetch(req) {
     const url = new URL(req.url);
     if (req.method !== "POST" || url.pathname !== "/convert") return new Response("not found", { status: 404 });

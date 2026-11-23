@@ -7,6 +7,8 @@ import { extname, join } from "node:path";
 
 const TO_PDF = ["doc", "docx", "odt", "rtf", "txt", "hwp", "xls", "xlsx", "ods", "csv", "ppt", "pptx", "odp"];
 export const CONVERT_MAX = 100 * 1024 * 1024; // Cloudflare가 받아 주는 요청 크기(무료 요금제 100MB)
+// Cloudflare는 서버가 100초 안에 답하지 않으면 끊는다(524). 그 전에 멈추고 이유를 알려 준다.
+export const CONVERT_TIMEOUT = 90_000;
 
 // 입력 파일 이름 → 결과 형식. PDF는 Word로, 나머지 문서는 PDF로. 못 하면 null.
 export function convertTarget(name: string): "pdf" | "docx" | null {
@@ -16,7 +18,7 @@ export function convertTarget(name: string): "pdf" | "docx" | null {
 }
 
 // 한 번에 하나씩 부를 것(LibreOffice 프로필 하나를 같이 쓴다). 작업 폴더는 끝나면 바로 지운다.
-export async function convertFile(input: Uint8Array, name: string, workDir: string, timeoutMs = 120_000): Promise<Uint8Array<ArrayBuffer>> {
+export async function convertFile(input: Uint8Array, name: string, workDir: string, timeoutMs = CONVERT_TIMEOUT): Promise<Uint8Array<ArrayBuffer>> {
   const to = convertTarget(name);
   if (!to) throw new Error("이 형식은 변환할 수 없습니다");
   const job = join(workDir, "job-" + randomUUID());

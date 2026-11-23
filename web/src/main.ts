@@ -1,6 +1,7 @@
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { createApp } from "./app";
+import { CONVERT_TIMEOUT } from "./convert";
 import { openDb } from "./db";
 import { createGoogle } from "./google";
 
@@ -46,6 +47,7 @@ fetch.backup.start(60 * 60_000); // once a day, a copy of folio.db to Drive (loo
 const server = Bun.serve({
   hostname: process.env.HOST ?? "127.0.0.1",
   port: Number(process.env.PORT ?? 2992),
+  idleTimeout: CONVERT_TIMEOUT / 1000 + 30, // 문서 변환을 기다리는 동안 연결을 끊지 않게(기본 10초)
   fetch,
 });
 console.log(`kacarong-folio listening on ${server.url}`);
