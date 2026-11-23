@@ -35,7 +35,11 @@ kbd { display: inline-grid; place-items: center; min-width: 18px; height: 18px; 
 .input, select.input, textarea.input { height: 32px; padding: 0 10px; border: 1px solid var(--line-2); border-radius: 6px; background: var(--panel-2); outline: none; }
 textarea.input { height: auto; min-height: 72px; padding: 8px 10px; resize: vertical; }
 .input:focus { border-color: #4a4a55; box-shadow: 0 0 0 3px rgba(143,163,255,.12); }
-input[type="checkbox"] { accent-color: #ececf0; width: 15px; height: 15px; margin: 0; cursor: pointer; }
+input[type="checkbox"] { appearance: none; -webkit-appearance: none; flex: none; display: inline-block; vertical-align: middle; width: 16px; height: 16px; margin: 0; border: 1.5px solid #4a4a55; border-radius: 4px; background: var(--panel-2) center / 12px no-repeat; cursor: pointer; transition: background-color .12s, border-color .12s, box-shadow .12s; }
+input[type="checkbox"]:hover { border-color: var(--muted); }
+input[type="checkbox"]:checked { border-color: var(--blue); background-color: var(--blue); background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cpath d='M2.5 6.2 5 8.6l4.5-5' fill='none' stroke='%230b0b0d' stroke-width='1.9' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E"); }
+input[type="checkbox"]:focus-visible { outline: none; box-shadow: 0 0 0 3px rgba(143,163,255,.25); }
+input[type="checkbox"]:disabled { opacity: .5; cursor: default; }
 .error { color: var(--orange); }
 
 /* 로그인 */
