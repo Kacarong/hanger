@@ -862,10 +862,12 @@ ${body || `<section class="works"><p class="empty reveal">${mine ? "아직 포�
     }
     const cm = path.match(/^\/api\/courses\/(\d+)$/);
     if (cm) {
+      // The body first: the row is read after the last await, so a save that landed meanwhile is not undone.
+      const b = method === "PATCH" ? await body(req) : {};
       const cur = db.getCourse(Number(cm[1]));
       if (!cur) return json({ error: "과목을 찾을 수 없습니다" }, 404);
       if (method === "PATCH") {
-        const c = courseFields(await body(req), cur);
+        const c = courseFields(b, cur);
         if (typeof c === "string") return json({ error: c }, 400);
         return json(db.updateCourse(cur.id, c));
       }
@@ -884,10 +886,12 @@ ${body || `<section class="works"><p class="empty reveal">${mine ? "아직 포�
     }
     const ccm = path.match(/^\/api\/class-changes\/(\d+)$/);
     if (ccm) {
+      // The body first: the row is read after the last await, so a save that landed meanwhile is not undone.
+      const b = method === "PATCH" ? await body(req) : {};
       const cur = db.getClassChange(Number(ccm[1]));
       if (!cur) return json({ error: "수업일정을 찾을 수 없습니다" }, 404);
       if (method === "PATCH") {
-        const c = classChangeFields(await body(req), cur);
+        const c = classChangeFields(b, cur);
         if (typeof c === "string") return json({ error: c }, 400);
         return json(db.updateClassChange(cur.id, c));
       }

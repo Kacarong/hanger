@@ -2567,3 +2567,39 @@ test("수업일정: 바뀐 수업(변경·보강·휴강)을 적으면 그 수�
     cleanup();
   }
 });
+
+test("시간표·수업일정: 본문이 늦게 오는 PATCH 가 그사이 저장된 다른 칸을 옛 값으로 되돌리지 않음", async () => {
+  const { call, db, cleanup } = makeApp({ googleEnabled: false, now: () => new Date("2026-11-23T03:00:00Z") });
+  try {
+    db.setSetting("password_hash", await Bun.password.hash("correct horse battery"));
+    const { cookie } = await passwordLogin(call, "correct horse battery");
+    const send = async (path: string, method: string, b: object) => (await call(path, { method, cookie, headers: JSON_ORIGIN, body: JSON.stringify(b) })).json() as Promise<Record<string, any>>;
+    // A PATCH whose body arrives only when release() is called.
+    const slow = (path: string, b: object) => {
+      let release!: () => void;
+      const stream = new ReadableStream({ start: (c) => void (release = () => (c.enqueue(new TextEncoder().encode(JSON.stringify(b))), c.close())) });
+      const res = call(path, { method: "PATCH", cookie, headers: JSON_ORIGIN, body: stream, duplex: "half" } as RequestInit);
+      return { res, release };
+    };
+    const tick = () => new Promise((ok) => setTimeout(ok, 20));
+
+    const sem = ((await (await call("/api/timetable", { cookie })).json()) as any).semesters[0].id;
+    const c = await send("/api/courses", "POST", { semester_id: sem, name: "구조역학", credits: 3 });
+    const grade = slow(`/api/courses/${c.id}`, { grade: "A+" });
+    await tick();
+    await send(`/api/courses/${c.id}`, "PATCH", { credits: 4 });
+    grade.release();
+    await grade.res;
+    expect(db.getCourse(c.id)).toMatchObject({ credits: 4, grade: "A+" });
+
+    const cc = await send("/api/class-changes", "POST", { course: "교통공학", kind: "보강", date: "2026-11-26" });
+    const note = slow(`/api/class-changes/${cc.id}`, { note: "A23-215" });
+    await tick();
+    await send(`/api/class-changes/${cc.id}`, "PATCH", { start: "10:00" });
+    note.release();
+    await note.res;
+    expect(db.getClassChange(cc.id)).toMatchObject({ start: "10:00", note: "A23-215" });
+  } finally {
+    cleanup();
+  }
+});
