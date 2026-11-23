@@ -2,9 +2,9 @@ import type { Db, NotificationRow } from "./db";
 import { makeVapid, sendPush, type Vapid } from "./push";
 
 // What to be told about (settings notify_settings). morning: "HH:MM" for the day's summary, "" = none.
-export type NotifySettings = { morning: string; homework: boolean; exam: boolean };
-const DEFAULTS: NotifySettings = { morning: "08:00", homework: true, exam: true };
-const EVENING = "20:00"; // the day before a 과제 deadline or an exam
+export type NotifySettings = { morning: string; homework: boolean; exam: boolean; classes: boolean };
+const DEFAULTS: NotifySettings = { morning: "08:00", homework: true, exam: true, classes: true };
+const EVENING = "20:00"; // the day before a 과제 deadline, an exam or a changed class
 const LATE_MINUTES = 60; // a notification whose time passed longer ago than this (server was down) is skipped
 
 function addDays(date: string, days: number): string {
@@ -20,7 +20,9 @@ const dday = (today: string, date: string) => {
   return n === 0 ? "D-day" : `D-${n}`;
 };
 
-type Note = { key: string; when: Date; title: string; body: string; url: string };
+// until: the last moment it may still go out (default: LATE_MINUTES after `when`).
+type Note = { key: string; when: Date; until?: Date; title: string; body: string; url: string };
+const weekday = (d: string) => "일월화수목금토"[new Date(d + "T00:00:00Z").getUTCDay()];
 
 // Sends the scheduled notifications (checked every minute) to every device that subscribed to Web Push, and keeps
 // each one in the notifications table for pages that show them themselves (the PC program polls it).
@@ -115,7 +117,22 @@ export function createNotifier(opts: { db: Db; subject: string; now: () => Date 
         });
       }
     }
-    return out.filter((n) => now >= n.when && now.getTime() < n.when.getTime() + LATE_MINUTES * 60_000);
+    if (s.classes) {
+      // Each changed class tomorrow, from 20:00 until midnight, so one written down later that evening still goes out.
+      const tomorrow = addDays(d, 1);
+      for (const c of db.listClassChanges({ from: tomorrow, to: tomorrow })) {
+        const when = c.start ? `${c.start}${c.end ? `~${c.end}` : ""}` : "";
+        out.push({
+          key: `class:${c.id}:${c.date}`,
+          when: at(d, EVENING),
+          until: at(tomorrow, "00:00"),
+          title: `내일 ${c.kind === "휴강" ? "휴강" : c.kind === "보강" ? "보강" : "수업 변경"} · ${c.course}`,
+          body: [`${md(c.date)} (${weekday(c.date)})${when ? ` ${when}` : ""}${c.place ? ` · ${c.place}` : ""}`, c.from_date ? `원래 ${md(c.from_date)} (${weekday(c.from_date)}) 수업` : "", c.note].filter(Boolean).join("\n"),
+          url: "/admin#classes",
+        });
+      }
+    }
+    return out.filter((n) => now >= n.when && now < (n.until ?? new Date(n.when.getTime() + LATE_MINUTES * 60_000)));
   }
 
   let busy = false;

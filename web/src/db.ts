@@ -85,6 +85,22 @@ export type ExpenseRow = { id: number; kind: string; title: string; amount: numb
 export type ExpenseFields = Pick<ExpenseRow, "kind" | "title" | "amount" | "day" | "date" | "note" | "done">;
 export const EXPENSE_KINDS = ["정기", "예정"];
 
+// 시간표: a semester (year + term) holds courses. A course's grade feeds the 학점 계산기; times = when it meets each
+// week (day 0 = 월 … 6 = 일). A semester with no grades yet (now or later) is just a plan.
+export const TERMS = ["1", "여름", "2", "겨울"];
+export const GRADES = ["", "A+", "A0", "B+", "B0", "C+", "C0", "D+", "D0", "F", "P", "NP"];
+export const COURSE_COLORS = ["yellow", "mint", "blue", "pink", "rose", "lime", "peach", "lavender", "sky", "sand"];
+export type SemesterRow = { id: number; year: number; term: string };
+export type CourseTime = { day: number; start: string; end: string; room: string };
+export type CourseRow = { id: number; semester_id: number; name: string; professor: string; credits: number; grade: string; major: number; color: string; times: CourseTime[] };
+export type CourseFields = Omit<CourseRow, "id">;
+type CourseRecord = Omit<CourseRow, "times"> & { times: string };
+
+// 수업일정: a class that moved, was added (보강) or cancelled (휴강) on a day. The evening before, a notification.
+export const CLASS_CHANGE_KINDS = ["변경", "보강", "휴강"];
+export type ClassChangeRow = { id: number; course: string; kind: string; date: string; start: string | null; end: string | null; place: string; from_date: string | null; note: string; created_at: string };
+export type ClassChangeFields = Omit<ClassChangeRow, "id" | "created_at">;
+
 // A note is a list of blocks (src/blocks.ts). A "todo" block with a date is also a task (tasks.note_id/block_id),
 // so it shows up on the today screen and the calendar.
 export { BLOCK_TYPES, NOTE_MAX_BLOCKS, NOTE_MAX_TEXT, blockTitle, type Block } from "./blocks";
@@ -225,6 +241,34 @@ export function openDb(path: string) {
       date TEXT,
       note TEXT NOT NULL DEFAULT '',
       done INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE TABLE IF NOT EXISTS semesters (id INTEGER PRIMARY KEY AUTOINCREMENT, year INTEGER NOT NULL, term TEXT NOT NULL, UNIQUE (year, term));
+    CREATE TABLE IF NOT EXISTS courses (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      semester_id INTEGER NOT NULL,
+      name TEXT NOT NULL,
+      professor TEXT NOT NULL DEFAULT '',
+      credits REAL NOT NULL DEFAULT 3,
+      grade TEXT NOT NULL DEFAULT '',
+      major INTEGER NOT NULL DEFAULT 0,
+      color TEXT NOT NULL DEFAULT '',
+      times TEXT NOT NULL DEFAULT '[]'
+    );
+    CREATE INDEX IF NOT EXISTS courses_semester ON courses (semester_id);
+    CREATE TRIGGER IF NOT EXISTS courses_semester_gone AFTER DELETE ON semesters BEGIN
+      DELETE FROM courses WHERE semester_id = old.id;
+    END;
+    CREATE TABLE IF NOT EXISTS class_changes (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      course TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      date TEXT NOT NULL,
+      start TEXT,
+      end TEXT,
+      place TEXT NOT NULL DEFAULT '',
+      from_date TEXT,
+      note TEXT NOT NULL DEFAULT '',
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
     CREATE TABLE IF NOT EXISTS portfolio_sections (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, sort INTEGER NOT NULL DEFAULT 0);
@@ -600,6 +644,52 @@ export function openDb(path: string) {
     },
     deleteExpense(id: number) {
       db.query("DELETE FROM expenses WHERE id = ?").run(id);
+    },
+    listSemesters(): SemesterRow[] {
+      return db.query("SELECT * FROM semesters ORDER BY year, CASE term WHEN '1' THEN 0 WHEN '여름' THEN 1 WHEN '2' THEN 2 ELSE 3 END").all() as SemesterRow[];
+    },
+    getSemester(id: number): SemesterRow | null {
+      return db.query("SELECT * FROM semesters WHERE id = ?").get(id) as SemesterRow | null;
+    },
+    // null when that semester is already there.
+    insertSemester(year: number, term: string): SemesterRow | null {
+      return db.query("INSERT OR IGNORE INTO semesters (year, term) VALUES (?, ?) RETURNING *").get(year, term) as SemesterRow | null;
+    },
+    deleteSemester(id: number) {
+      db.query("DELETE FROM semesters WHERE id = ?").run(id); // its courses go by trigger
+    },
+    listCourses(): CourseRow[] {
+      return (db.query("SELECT * FROM courses ORDER BY id").all() as CourseRecord[]).map((c) => ({ ...c, times: JSON.parse(c.times) }));
+    },
+    getCourse(id: number): CourseRow | null {
+      const c = db.query("SELECT * FROM courses WHERE id = ?").get(id) as CourseRecord | null;
+      return c && { ...c, times: JSON.parse(c.times) };
+    },
+    insertCourse(c: CourseFields): CourseRow {
+      const r = db.query("INSERT INTO courses (semester_id, name, professor, credits, grade, major, color, times) VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING *").get(c.semester_id, c.name, c.professor, c.credits, c.grade, c.major, c.color, JSON.stringify(c.times)) as CourseRecord;
+      return { ...r, times: JSON.parse(r.times) };
+    },
+    updateCourse(id: number, c: CourseFields): CourseRow {
+      const r = db.query("UPDATE courses SET semester_id = ?, name = ?, professor = ?, credits = ?, grade = ?, major = ?, color = ?, times = ? WHERE id = ? RETURNING *").get(c.semester_id, c.name, c.professor, c.credits, c.grade, c.major, c.color, JSON.stringify(c.times), id) as CourseRecord;
+      return { ...r, times: JSON.parse(r.times) };
+    },
+    deleteCourse(id: number) {
+      db.query("DELETE FROM courses WHERE id = ?").run(id);
+    },
+    listClassChanges(opts: { from?: string; to?: string } = {}): ClassChangeRow[] {
+      return db.query("SELECT * FROM class_changes WHERE date >= ? AND date <= ? ORDER BY date, start, id").all(opts.from ?? "", opts.to ?? "9999") as ClassChangeRow[];
+    },
+    getClassChange(id: number): ClassChangeRow | null {
+      return db.query("SELECT * FROM class_changes WHERE id = ?").get(id) as ClassChangeRow | null;
+    },
+    insertClassChange(c: ClassChangeFields): ClassChangeRow {
+      return db.query("INSERT INTO class_changes (course, kind, date, start, end, place, from_date, note) VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING *").get(c.course, c.kind, c.date, c.start, c.end, c.place, c.from_date, c.note) as ClassChangeRow;
+    },
+    updateClassChange(id: number, c: ClassChangeFields): ClassChangeRow {
+      return db.query("UPDATE class_changes SET course = ?, kind = ?, date = ?, start = ?, end = ?, place = ?, from_date = ?, note = ? WHERE id = ? RETURNING *").get(c.course, c.kind, c.date, c.start, c.end, c.place, c.from_date, c.note, id) as ClassChangeRow;
+    },
+    deleteClassChange(id: number) {
+      db.query("DELETE FROM class_changes WHERE id = ?").run(id);
     },
     listStudies(): StudyRow[] {
       return db.query("SELECT * FROM studies ORDER BY date, id").all() as StudyRow[];

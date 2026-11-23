@@ -37,6 +37,8 @@ const ICONS = {
   bell: '<path d="M6 16V11a6 6 0 0 1 12 0v5l1.5 2h-15z"/><path d="M10 20.5a2 2 0 0 0 4 0"/>',
   eye: '<path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/>',
   layers: '<path d="m12 3 9 5-9 5-9-5z"/><path d="m3 13 9 5 9-5"/>',
+  grid: '<rect x="3.5" y="4" width="17" height="16" rx="1.5"/><path d="M3.5 9h17M9 4v16M14.5 4v16"/>',
+  clock: '<circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/>',
   wallet: '<path d="M4 7.5A1.5 1.5 0 0 1 5.5 6H19a1 1 0 0 1 1 1v12a1 1 0 0 1-1 1H5.5A1.5 1.5 0 0 1 4 18.5z"/><path d="M4 7.5 15 4v2M15 13h3"/>',
 };
 const icon = (name) => {
@@ -798,6 +800,91 @@ async function loadExpenses() {
   );
 }
 
+// 시간표·학점 계산기는 따로 둔 timetable.js 가 그린다(이 탭을 처음 열 때 불러옴).
+let timetable = null;
+function loadTimetable() {
+  timetable ??= import("./timetable.js" + new URL(import.meta.url).search).then((m) => m.mount($("tab-timetable"), { icon, call, el, showError }));
+  return timetable.then((t) => t.load()).catch((e) => {
+    timetable = null; // 다음에 탭을 열 때 다시 시도
+    throw e;
+  });
+}
+
+// 수업일정: 바뀐 수업(시간·장소 변경, 보강, 휴강)을 적어 두면 그 전날 저녁 8시에 알림.
+let editingClass = null;
+const CLASS_KIND_PILL = { 변경: ["시간·장소 변경", "blue"], 보강: ["보강", "amber"], 휴강: ["휴강", "orange"] };
+let classPastOpen = false;
+
+function syncClassKind() {
+  const off = $("class-kind").value === "휴강";
+  $("class-time-box").hidden = off;
+  $("class-place-box").hidden = off;
+  $("class-from-box").hidden = $("class-kind").value !== "변경";
+  $("class-date-label").textContent = off ? "휴강 날짜" : $("class-kind").value === "보강" ? "보강 날짜" : "바뀐 날짜";
+}
+
+async function openClassDialog(c = null) {
+  editingClass = c;
+  $("class-dialog-title").textContent = c ? "수업일정 수정" : "바뀐 수업 기록";
+  for (const k of ["course", "kind", "date", "start", "end", "place", "note"]) $(`class-${k}`).value = c?.[k] ?? (k === "kind" ? "변경" : "");
+  $("class-from").value = c?.from_date ?? "";
+  $("class-msg").textContent = "";
+  syncClassKind();
+  $("class-dialog").showModal();
+  // 과목 칸 자동완성: 시간표의 과목 이름(지금 학기 것 먼저).
+  call("/api/timetable").then(
+    (t) => {
+      const now = t.semesters.find((s) => s.year === t.current.year && s.term === t.current.term)?.id;
+      const names = [...t.courses.filter((x) => x.semester_id === now), ...t.courses.filter((x) => x.semester_id !== now).reverse()].map((x) => x.name);
+      $("class-courses").replaceChildren(...[...new Set(names)].map((n) => el("option", { value: n })));
+    },
+    () => {},
+  );
+}
+
+function classRow(c, today, reload) {
+  const d = daysBetween(today, c.date);
+  const [kindText, color] = CLASS_KIND_PILL[c.kind] ?? [c.kind, "gray"];
+  const time = c.start ? `${c.start}${c.end ? `~${c.end}` : ""}` : "";
+  const detail = [time, c.place, c.from_date ? `원래 ${md(c.from_date)} (${weekday(c.from_date)})` : ""].filter(Boolean).join(" · ");
+  return el(
+    "tr",
+    {},
+    el("td", {}, el("span", { className: "date-main", textContent: dayLabel(c.date) }), d >= 0 ? el("span", { className: `date-note ${d <= 1 ? "soon" : "ok"}`, textContent: d === 0 ? "오늘" : d === 1 ? "내일" : `D-${d}` }) : null),
+    el("td", {}, el("span", { className: "title" + (d < 0 ? " done" : ""), textContent: c.course }), el("span", { className: "sub when-sub", textContent: [kindText, detail].filter(Boolean).join(" · ") }), c.note ? el("span", { className: "sub", textContent: c.note }) : null),
+    el("td", { className: "hide-sm" }, pill(kindText, color), detail ? el("span", { className: "muted class-detail", textContent: detail }) : null),
+    el(
+      "td",
+      { className: "actions" },
+      iconBtn("수정", "edit", () => openClassDialog(c)),
+      iconBtn("삭제", "trash", () => {
+        if (confirm(`${dayLabel(c.date)} ${c.course} 기록을 삭제할까요?`)) call(`/api/class-changes/${c.id}`, { method: "DELETE" }).then(reload, showError);
+      }, "danger"),
+    ),
+  );
+}
+
+async function loadClasses() {
+  const { date: today, changes } = await call("/api/class-changes");
+  const reload = () => loadClasses().catch(showError);
+  const q = searchText();
+  const shown = changes.filter((c) => !q || [c.course, c.place, c.note].some((v) => v.toLowerCase().includes(q)));
+  const ahead = shown.filter((c) => c.date >= today);
+  const past = shown.filter((c) => c.date < today).reverse();
+  const week = changes.filter((c) => c.date >= today && daysBetween(today, c.date) < 7);
+  const tomorrow = changes.filter((c) => daysBetween(today, c.date) === 1);
+  $("class-stats").replaceChildren(
+    stat("앞으로 바뀐 수업", String(changes.filter((c) => c.date >= today).length), "오늘 포함"),
+    stat("이번 주(7일 안)", String(week.length), week.length ? week.map((c) => c.course).filter((v, i, a) => a.indexOf(v) === i).join(", ") : ""),
+    stat("내일", String(tomorrow.length), tomorrow.length ? tomorrow.map((c) => `${c.course} ${c.kind}`).join(", ") : "알림 받을 수업 없음"),
+  );
+  const pastRow = el("tr", { className: "group-row fold" }, el("td", { colSpan: 3 }, el("button", { className: "btn ghost sm", type: "button", onclick: () => ((classPastOpen = !classPastOpen), reload()) }, classPastOpen ? "지난 기록 접기" : `지난 기록 ${past.length}개 보기`)), el("td", { className: "hide-sm" }));
+  $("class-list").replaceChildren(
+    ...(ahead.length ? ahead.map((c) => classRow(c, today, reload)) : [el("tr", { className: "empty-row" }, el("td", { colSpan: 3, textContent: q ? "검색 결과가 없습니다." : "앞으로 바뀐 수업이 없습니다. 오른쪽 위 '바뀐 수업 기록'으로 적어 두세요." }), el("td", { className: "hide-sm" }))]),
+    ...(past.length ? [pastRow, ...(classPastOpen ? past.map((c) => classRow(c, today, reload)) : [])] : []),
+  );
+}
+
 // 캘린더: 한 달(6주) 칸에 구글 캘린더 일정과 날짜 있는 할 일·과제를 함께 보여 준다.
 const seoulToday = () => new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Seoul" }).format(new Date());
 const isoDay = (d) => d.toISOString().slice(0, 10);
@@ -1211,6 +1298,7 @@ async function openNotify() {
   $("notify-morning").value = settings.morning || "08:00";
   $("notify-homework").checked = settings.homework;
   $("notify-exam").checked = settings.exam;
+  $("notify-classes").checked = settings.classes;
   $("notify-msg").textContent = "";
   await showNotifyState();
   $("notify-dialog").showModal();
@@ -1579,6 +1667,8 @@ const tabs = {
   },
   exams: { title: "시험", load: () => loadExams(), actions: () => [el("button", { className: "btn primary", type: "button", onclick: () => openExamDialog() }, icon("plus"), "새 시험", el("kbd", { textContent: "N" }))] },
   studies: { title: "공부", load: () => loadStudies(), actions: () => [] },
+  timetable: { title: "시간표", load: () => loadTimetable(), actions: () => [] },
+  classes: { title: "수업일정", load: () => loadClasses(), actions: () => [el("button", { className: "btn primary", type: "button", onclick: () => openClassDialog() }, icon("plus"), "바뀐 수업 기록", el("kbd", { textContent: "N" }))] },
   expenses: { title: "지출", load: () => loadExpenses(), actions: () => [el("button", { className: "btn primary", type: "button", onclick: () => openExpenseDialog() }, icon("plus"), "새 지출", el("kbd", { textContent: "N" }))] },
   notes: {
     title: "노트",
@@ -1900,6 +1990,19 @@ async function init() {
       loadCalendar().catch(showError);
     }
   };
+  $("class-kind").onchange = syncClassKind;
+  $("class-form").onsubmit = async (ev) => {
+    ev.preventDefault();
+    const body = { course: $("class-course").value, kind: $("class-kind").value, date: $("class-date").value, start: $("class-start").value, end: $("class-end").value, place: $("class-place").value, from_date: $("class-kind").value === "변경" ? $("class-from").value : "", note: $("class-note").value };
+    try {
+      if (editingClass) await call(`/api/class-changes/${editingClass.id}`, { method: "PATCH", body });
+      else await call("/api/class-changes", { method: "POST", body });
+      $("class-dialog").close();
+      tabs[currentTab()].load().catch(showError);
+    } catch (e) {
+      $("class-msg").textContent = e.message;
+    }
+  };
   $("expense-kind").onchange = syncExpenseKind;
   $("expense-form").onsubmit = async (ev) => {
     ev.preventDefault();
@@ -2007,6 +2110,8 @@ async function init() {
     else if (ev.key.toLowerCase() === "n" && currentTab() === "portfolio") (ev.preventDefault(), openItemDialog());
     else if (ev.key.toLowerCase() === "n" && currentTab() === "exams") (ev.preventDefault(), openExamDialog());
     else if (ev.key.toLowerCase() === "n" && currentTab() === "expenses") (ev.preventDefault(), openExpenseDialog());
+    else if (ev.key.toLowerCase() === "n" && currentTab() === "classes") (ev.preventDefault(), openClassDialog());
+    else if (ev.key.toLowerCase() === "n" && currentTab() === "timetable") (ev.preventDefault(), timetable?.then((t) => t.openCourse()));
     else if (ev.key.toLowerCase() === "n" && currentTab() === "studies") (ev.preventDefault(), document.querySelector("#study-list .study-add input:not(.course)")?.focus());
     else if (ev.key.toLowerCase() === "n" && currentTab() !== "files") (ev.preventDefault(), openTaskDialog());
     else if (ev.key.toLowerCase() === "u" && currentTab() === "files" && me.driveConnected) (ev.preventDefault(), openUpload());
@@ -2033,10 +2138,10 @@ async function init() {
     }
   };
   const saveNotify = () =>
-    call("/api/notify", { method: "PUT", body: { morning: $("notify-morning-on").checked ? $("notify-morning").value : "", homework: $("notify-homework").checked, exam: $("notify-exam").checked } }).catch(
+    call("/api/notify", { method: "PUT", body: { morning: $("notify-morning-on").checked ? $("notify-morning").value : "", homework: $("notify-homework").checked, exam: $("notify-exam").checked, classes: $("notify-classes").checked } }).catch(
       (e) => ($("notify-msg").textContent = e.message),
     );
-  for (const id of ["notify-morning-on", "notify-morning", "notify-homework", "notify-exam"]) $(id).onchange = saveNotify;
+  for (const id of ["notify-morning-on", "notify-morning", "notify-homework", "notify-exam", "notify-classes"]) $(id).onchange = saveNotify;
   $("notify-test").onclick = () =>
     call("/api/notify/test", { method: "POST" }).then(
       () => ($("notify-msg").textContent = "보냈습니다. 잠시 뒤 알림이 뜨지 않으면 이 기기 알림이 꺼져 있는 것입니다."),

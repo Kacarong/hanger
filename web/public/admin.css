@@ -122,7 +122,9 @@ input[type="checkbox"]:disabled { opacity: .5; cursor: default; }
 .empty-row td { height: 120px; text-align: center; color: var(--muted); }
 .date-note { margin-left: 6px; font-size: 12px; white-space: nowrap; }
 .expense-table .num, .expense-table .date-main { white-space: nowrap; }
-.expense-table .when-sub { display: none; }
+.expense-table .when-sub, .class-table .when-sub { display: none; }
+.class-table .date-main { white-space: nowrap; }
+.class-detail { margin-left: 8px; font-size: 12px; }
 .date-note.warn { color: var(--orange); }
 .date-note.soon { color: var(--amber); }
 .date-note.ok { color: var(--muted); }
@@ -372,7 +374,9 @@ span.note-fold { cursor: default; }
   .main { border-radius: 0; border: 0; }
   .menu-btn { display: inline-flex; }
   .table .hide-sm { display: none; }
-  .expense-table .when-sub { display: block; }
+  .expense-table .when-sub, .class-table .when-sub { display: block; }
+  .class-table .sub { white-space: normal; }
+  .class-table .date-note { display: block; margin-left: 0; }
   .table .actions { opacity: 1; }
   .bar kbd { display: none; }
   .cal-day { min-height: 72px; padding: 2px; }
@@ -489,3 +493,70 @@ dialog .small { margin: 0; font-size: 12px; font-weight: 400; line-height: 1.5; 
   .pdf-seg { display: grid; grid-template-columns: 1fr 1fr; width: 100%; }
 }
 .pdf-pane-body > p:empty { display: none; }
+
+/* 시간표 (에브리타임처럼 요일 × 시간 칸, 과목 블록은 밝은 파스텔에 어두운 글자) */
+.tt-summary { font-size: 12px; }
+.tt-wrap { padding: 0 16px 12px; }
+.tt-grid { display: grid; border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; background: var(--panel-2); }
+.tt-corner, .tt-dayname { height: 32px; border-bottom: 1px solid var(--line); border-left: 1px solid var(--line); background: var(--panel); }
+.tt-corner { border-left: 0; }
+.tt-dayname { display: grid; place-items: center; font-size: 12px; color: var(--muted); }
+.tt-hours div { height: var(--hour); padding: 4px 6px 0 0; text-align: right; font-size: 11px; color: var(--dim); border-top: 1px solid var(--line); white-space: nowrap; }
+.tt-hours div:first-child { border-top: 0; }
+.tt-day { position: relative; border-left: 1px solid var(--line); cursor: copy; background-image: repeating-linear-gradient(180deg, transparent 0 calc(var(--hour) - 1px), var(--line) calc(var(--hour) - 1px) var(--hour)); }
+.tt-day:hover { background-color: rgba(255,255,255,.012); }
+.tt-block { position: absolute; display: flex; flex-direction: column; align-items: flex-start; gap: 2px; padding: 5px 7px; border: 0; border-radius: 3px; overflow: hidden; text-align: left; cursor: pointer; color: #1d1d22; }
+.tt-block strong { font-size: 12.5px; font-weight: 600; line-height: 1.25; word-break: keep-all; overflow-wrap: anywhere; }
+.tt-block span { font-size: 11px; opacity: .72; line-height: 1.25; }
+.tt-block:hover { filter: brightness(1.05); box-shadow: 0 0 0 1.5px rgba(255,255,255,.5); }
+.tc-yellow { background: #f6ebb4; } .tc-mint { background: #cfeadf; } .tc-blue { background: #d4def3; } .tc-pink { background: #f6d7d7; }
+.tc-rose { background: #ead9d9; } .tc-lime { background: #e3eec4; } .tc-peach { background: #f6dfc4; } .tc-lavender { background: #e1d8f1; }
+.tc-sky { background: #cfe6f2; } .tc-sand { background: #e6e0d4; }
+.tt-untimed { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 0 16px 12px; font-size: 12px; }
+.tt-untimed:empty { display: none; }
+.tt-chip { height: 26px; padding: 0 10px; border: 0; border-radius: 5px; color: #1d1d22; font-size: 12px; cursor: pointer; }
+.tt-title { margin: 8px 16px 10px; padding-top: 16px; border-top: 1px solid var(--line); font-size: 15px; font-weight: 600; }
+.tt-gpa-stats { border-top: 1px solid var(--line); }
+.tt-sems { display: flex; gap: 8px; padding: 12px 16px; overflow-x: auto; }
+.tt-sem { flex: none; display: grid; gap: 2px; padding: 8px 12px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel-2); text-align: left; cursor: pointer; }
+.tt-sem strong { font-size: 12.5px; font-weight: 500; }
+.tt-sem span { font-size: 11.5px; color: var(--muted); }
+.tt-sem:hover { border-color: var(--line-2); }
+.tt-sem.on { border-color: var(--blue); background: var(--blue-bg); }
+.tt-gpa-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 14px; padding: 4px 16px 8px; font-size: 13px; color: var(--fg-2); }
+.tt-gpa-head b { color: var(--blue); font-weight: 600; font-variant-numeric: tabular-nums; }
+.tt-gpa { margin-bottom: 40px; }
+.tt-gpa td { height: 40px; padding-top: 4px; padding-bottom: 4px; }
+.tt-gpa .input { width: 100%; min-width: 0; height: 30px; background: transparent; border-color: transparent; }
+.tt-gpa .input:hover, .tt-gpa .input:focus { border-color: var(--line-2); background: var(--panel-2); }
+.tt-gpa td:nth-child(2) { width: 80px; }
+.tt-gpa td:nth-child(3) { width: 90px; }
+.tt-gpa td:nth-child(4) { width: 50px; }
+.tt-gpa .input.credits { text-align: right; -moz-appearance: textfield; }
+.tt-gpa .input.credits::-webkit-inner-spin-button, .tt-gpa .input.credits::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+.tt-gpa select.input { color-scheme: dark; }
+.tt-gpa .tt-add .input { border-color: var(--line); border-style: dashed; }
+.tt-field { display: grid; gap: 8px; color: var(--fg-2); font-size: 14px; font-weight: 500; }
+.tt-field > .btn { justify-self: start; }
+.tt-times { display: grid; gap: 8px; }
+.tt-times:empty { display: none; }
+.tt-time { display: grid; grid-template-columns: 60px minmax(118px, 1fr) auto minmax(118px, 1fr) minmax(0, 1fr) auto; align-items: center; gap: 6px; }
+dialog .tt-time .input { height: 38px; padding: 0 8px; font-size: 14px; }
+.tt-colors { display: flex; flex-wrap: wrap; gap: 8px; }
+.tt-swatch { width: 28px; height: 28px; border: 2px solid transparent; border-radius: 50%; cursor: pointer; }
+.tt-swatch.on { border-color: var(--fg); box-shadow: 0 0 0 2px var(--panel) inset; }
+@media (max-width: 860px) {
+  .tt-wrap { padding: 0 8px 12px; }
+  .tt-hours div { padding-right: 3px; font-size: 10px; }
+  .tt-block { padding: 3px 4px; }
+  .tt-block strong { font-size: 11px; }
+  .tt-block span { font-size: 10px; }
+  .tt-time { grid-template-columns: 56px 1fr auto 1fr auto; }
+  .tt-time > .input:nth-child(5) { grid-column: 1 / -2; }
+  .tt-gpa th, .tt-gpa td { padding-left: 3px; padding-right: 3px; }
+  .tt-gpa td:nth-child(2) { width: 44px; }
+  .tt-gpa td:nth-child(3) { width: 66px; }
+  .tt-gpa td:nth-child(4) { width: 36px; }
+  .tt-gpa .input { padding: 0 4px; }
+  .tt-gpa .actions .btn { padding: 0 4px; }
+}

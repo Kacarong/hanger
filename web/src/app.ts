@@ -3,7 +3,7 @@ import { mkdirSync, existsSync, readdirSync, readFileSync, rmSync } from "node:f
 import { join, relative } from "node:path";
 import { cleanBlocks, editRuns, richOrNone } from "./blocks";
 import { noteHtml } from "./note-html";
-import { ATTACH_TARGETS, CATEGORIES, EXAM_COLORS, EXPENSE_KINDS, SECTION_LAYOUTS, TASK_CATEGORIES, TASK_KINDS, type AttachedFile, type Block, type Db, type ExamFields, type ExpenseFields, type ExpenseRow, type FileRow, type PortfolioFields, type PortfolioItem, type StudyFields, type TaskFields } from "./db";
+import { ATTACH_TARGETS, CATEGORIES, CLASS_CHANGE_KINDS, COURSE_COLORS, EXAM_COLORS, EXPENSE_KINDS, GRADES, TERMS, SECTION_LAYOUTS, TASK_CATEGORIES, TASK_KINDS, type AttachedFile, type Block, type ClassChangeFields, type CourseFields, type CourseTime, type Db, type ExamFields, type ExpenseFields, type ExpenseRow, type FileRow, type PortfolioFields, type PortfolioItem, type StudyFields, type TaskFields } from "./db";
 import { createBackup } from "./backup";
 import { createCalendarPush, eventWhen } from "./gcal";
 import { GoogleError, type CalendarEvent, type EventBody, type Google } from "./google";
@@ -341,6 +341,69 @@ export function createApp(cfg: AppConfig, db: Db, google: Google) {
     return e;
   }
 
+  // A course after applying the keys present in a request body to `base`.
+  function courseFields(b: Record<string, unknown>, base: CourseFields): CourseFields | string {
+    const c = { ...base };
+    if ("semester_id" in b) {
+      if (!db.getSemester(Number(b.semester_id))) return "학기를 찾을 수 없습니다";
+      c.semester_id = Number(b.semester_id);
+    }
+    if ("name" in b) c.name = str(b.name, 100);
+    if (!c.name) return "과목명을 입력해 주세요";
+    if ("professor" in b) c.professor = str(b.professor, 100);
+    if ("credits" in b) {
+      const n = b.credits;
+      if (typeof n !== "number" || !(n >= 0 && n <= 30) || !Number.isInteger(n * 2)) return "학점이 올바르지 않습니다";
+      c.credits = n;
+    }
+    if ("grade" in b) {
+      if (!GRADES.includes(b.grade as string)) return "성적이 올바르지 않습니다";
+      c.grade = b.grade as string;
+    }
+    if ("major" in b) c.major = b.major === true ? 1 : 0;
+    if ("color" in b) {
+      if (b.color !== "" && !COURSE_COLORS.includes(b.color as string)) return "색이 올바르지 않습니다";
+      c.color = b.color as string;
+    }
+    if ("times" in b) {
+      if (!Array.isArray(b.times) || b.times.length > 14) return "수업 시간이 올바르지 않습니다";
+      const times: CourseTime[] = [];
+      for (const t of b.times as Record<string, unknown>[]) {
+        const start = str(t?.start, 5), end = str(t?.end, 5);
+        if (!(Number.isInteger(t?.day) && (t.day as number) >= 0 && (t.day as number) <= 6) || !isTime(start) || !isTime(end) || start >= end) return "수업 시간이 올바르지 않습니다(요일, 시작 < 끝)";
+        times.push({ day: t.day as number, start, end, room: str(t.room, 100) });
+      }
+      c.times = times;
+    }
+    return c;
+  }
+
+  // A class change after applying the keys present in a request body to `base`. 휴강 has no new time or place.
+  function classChangeFields(b: Record<string, unknown>, base: ClassChangeFields): ClassChangeFields | string {
+    const c = { ...base };
+    if ("course" in b) c.course = str(b.course, 100);
+    if (!c.course) return "과목을 입력해 주세요";
+    if ("kind" in b) {
+      if (!CLASS_CHANGE_KINDS.includes(b.kind as string)) return "종류가 올바르지 않습니다";
+      c.kind = b.kind as string;
+    }
+    if ("date" in b) c.date = str(b.date, 10);
+    if ("from_date" in b) c.from_date = str(b.from_date, 10) || null;
+    if (!c.date) return "날짜를 입력해 주세요";
+    if (!isDate(c.date) || (c.from_date && !isDate(c.from_date))) return "날짜가 올바르지 않습니다";
+    for (const k of ["start", "end"] as const) {
+      if (!(k in b)) continue;
+      const v = str(b[k], 5);
+      if (v && !isTime(v)) return "시간이 올바르지 않습니다";
+      c[k] = v || null;
+    }
+    if ("place" in b) c.place = str(b.place, 100);
+    if ("note" in b) c.note = str(b.note, 2000);
+    if (c.kind === "휴강") Object.assign(c, { start: null, end: null, place: "" });
+    if (c.start && c.end && c.start >= c.end) return "끝나는 시간이 시작보다 늦어야 합니다";
+    return c;
+  }
+
   // Validates exam fields from a request body. Only keys present in the body are returned.
   function examFields(b: Record<string, unknown>): Partial<ExamFields> | string {
     const out: Partial<ExamFields> = {};
@@ -625,7 +688,7 @@ ${body || `<section class="works"><p class="empty reveal">${mine ? "아직 포�
       const b = await body(req);
       const morning = str(b.morning, 5);
       if (morning && !isTime(morning)) return json({ error: "시간이 올바르지 않습니다" }, 400);
-      notifier.setSettings({ morning, homework: b.homework === true, exam: b.exam === true });
+      notifier.setSettings({ morning, homework: b.homework === true, exam: b.exam === true, classes: b.classes === true });
       return json(notifier.settings());
     }
     if (path === "/api/notify/test" && method === "POST") {
@@ -765,6 +828,71 @@ ${body || `<section class="works"><p class="empty reveal">${mine ? "아직 포�
       }
       if (method === "DELETE") {
         db.deleteExpense(cur.id);
+        return json({ ok: true });
+      }
+    }
+
+    // 시간표·학점 계산기: every semester and course at once (a handful); the client lays them out and does the math.
+    // The semester going on now is always there (3~8월 = 1학기, 9~2월 = 2학기).
+    if (path === "/api/timetable" && method === "GET") {
+      const d = today();
+      const y = Number(d.slice(0, 4)), m = Number(d.slice(5, 7));
+      const current = m >= 3 && m <= 8 ? { year: y, term: "1" } : { year: m <= 2 ? y - 1 : y, term: "2" };
+      db.insertSemester(current.year, current.term);
+      return json({ date: d, current, semesters: db.listSemesters(), courses: db.listCourses() });
+    }
+    if (path === "/api/semesters" && method === "POST") {
+      const b = await body(req);
+      if (!(Number.isInteger(b.year) && (b.year as number) >= 2000 && (b.year as number) <= 2100) || !TERMS.includes(b.term as string)) return json({ error: "학기가 올바르지 않습니다" }, 400);
+      const s = db.insertSemester(b.year as number, b.term as string);
+      return s ? json(s, 201) : json({ error: "이미 있는 학기입니다" }, 409);
+    }
+    const sem = path.match(/^\/api\/semesters\/(\d+)$/);
+    if (sem && method === "DELETE") {
+      if (!db.getSemester(Number(sem[1]))) return json({ error: "학기를 찾을 수 없습니다" }, 404);
+      db.deleteSemester(Number(sem[1]));
+      return json({ ok: true });
+    }
+    if (path === "/api/courses" && method === "POST") {
+      const b = await body(req);
+      if (!("semester_id" in b)) return json({ error: "학기를 찾을 수 없습니다" }, 400);
+      const c = courseFields(b, { semester_id: 0, name: "", professor: "", credits: 3, grade: "", major: 0, color: "", times: [] });
+      if (typeof c === "string") return json({ error: c }, 400);
+      return json(db.insertCourse(c), 201);
+    }
+    const cm = path.match(/^\/api\/courses\/(\d+)$/);
+    if (cm) {
+      const cur = db.getCourse(Number(cm[1]));
+      if (!cur) return json({ error: "과목을 찾을 수 없습니다" }, 404);
+      if (method === "PATCH") {
+        const c = courseFields(await body(req), cur);
+        if (typeof c === "string") return json({ error: c }, 400);
+        return json(db.updateCourse(cur.id, c));
+      }
+      if (method === "DELETE") {
+        db.deleteCourse(cur.id);
+        return json({ ok: true });
+      }
+    }
+
+    // 수업일정: classes that moved, were added or cancelled. Notified the evening before (src/notify.ts).
+    if (path === "/api/class-changes" && method === "GET") return json({ date: today(), changes: db.listClassChanges() });
+    if (path === "/api/class-changes" && method === "POST") {
+      const c = classChangeFields(await body(req), { course: "", kind: "변경", date: "", start: null, end: null, place: "", from_date: null, note: "" });
+      if (typeof c === "string") return json({ error: c }, 400);
+      return json(db.insertClassChange(c), 201);
+    }
+    const ccm = path.match(/^\/api\/class-changes\/(\d+)$/);
+    if (ccm) {
+      const cur = db.getClassChange(Number(ccm[1]));
+      if (!cur) return json({ error: "수업일정을 찾을 수 없습니다" }, 404);
+      if (method === "PATCH") {
+        const c = classChangeFields(await body(req), cur);
+        if (typeof c === "string") return json({ error: c }, 400);
+        return json(db.updateClassChange(cur.id, c));
+      }
+      if (method === "DELETE") {
+        db.deleteClassChange(cur.id);
         return json({ ok: true });
       }
     }

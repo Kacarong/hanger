@@ -36,6 +36,8 @@
     <a class="nav-item" href="#tasks" data-tab="tasks"><span data-icon="check"></span>할 일·과제</a>
     <a class="nav-item" href="#exams" data-tab="exams"><span data-icon="exam"></span>시험</a>
     <a class="nav-item" href="#studies" data-tab="studies"><span data-icon="book"></span>공부</a>
+    <a class="nav-item" href="#timetable" data-tab="timetable"><span data-icon="grid"></span>시간표</a>
+    <a class="nav-item" href="#classes" data-tab="classes"><span data-icon="clock"></span>수업일정</a>
     <a class="nav-item" href="#calendar" data-tab="calendar"><span data-icon="calendar"></span>캘린더</a>
     <a class="nav-item" href="#notes" data-tab="notes"><span data-icon="note"></span>노트</a>
     <a class="nav-item" href="#expenses" data-tab="expenses"><span data-icon="wallet"></span>지출</a>
@@ -100,6 +102,15 @@
         </details>
         <datalist id="study-courses"></datalist>
         <div id="study-list"></div>
+      </div>
+
+      <div id="tab-timetable" hidden></div>
+
+      <div id="tab-classes" hidden>
+        <div class="stats" id="class-stats"></div>
+        <table class="table class-table"><thead><tr><th>날짜</th><th>과목</th><th class="hide-sm">내용</th><th></th></tr></thead>
+          <tbody id="class-list"></tbody></table>
+        <p class="foot-note">수업 전날 저녁 8시에 알림이 갑니다(그날 밤에 적어도 바로 갑니다). 알림 설정에서 끌 수 있습니다.</p>
       </div>
 
       <div id="tab-expenses" hidden>
@@ -253,6 +264,29 @@
   </form>
 </dialog>
 
+<dialog id="class-dialog">
+  <form method="dialog" id="class-form">
+    <h2 id="class-dialog-title">바뀐 수업 기록</h2>
+    <div class="row">
+      <label>과목<input class="input" id="class-course" list="class-courses" maxlength="100" placeholder="구조역학" required></label>
+      <label>종류<select class="input" id="class-kind"><option value="변경">시간·장소 변경</option><option value="보강">보강</option><option value="휴강">휴강</option></select></label>
+    </div>
+    <datalist id="class-courses"></datalist>
+    <div class="row">
+      <label><span id="class-date-label">바뀐 날짜</span><input class="input" type="date" id="class-date" required></label>
+      <label id="class-from-box">원래 날짜<input class="input" type="date" id="class-from"></label>
+    </div>
+    <div class="row" id="class-time-box">
+      <label>시작<input class="input" type="time" id="class-start"></label>
+      <label>끝<input class="input" type="time" id="class-end"></label>
+    </div>
+    <label id="class-place-box">장소<input class="input" id="class-place" maxlength="100" placeholder="A23-215"></label>
+    <label>메모<textarea class="input" id="class-note" maxlength="2000" rows="2"></textarea></label>
+    <span class="error" id="class-msg"></span>
+    <div class="foot"><button class="btn" type="button" data-close>취소</button><button class="btn primary" value="ok">저장</button></div>
+  </form>
+</dialog>
+
 <dialog id="expense-dialog">
   <form method="dialog" id="expense-form">
     <h2 id="expense-dialog-title">새 지출</h2>
@@ -293,6 +327,7 @@
       <input class="input sm-time" type="time" id="notify-morning" aria-label="요약 받을 시간"></label>
     <label class="check"><input type="checkbox" id="notify-homework"> 과제 마감 전날 저녁 8시 · 마감 1시간 전</label>
     <label class="check"><input type="checkbox" id="notify-exam"> 시험 전날 저녁 8시</label>
+    <label class="check"><input type="checkbox" id="notify-classes"> 바뀐 수업(수업일정) 전날 저녁 8시</label>
     <p class="muted small">알림은 알림을 켠 기기 모두에 갑니다. PC 프로그램은 프로그램이 켜져 있는 동안(최소화해도 됨) 알림을 띄웁니다.</p>
     <span class="error" id="notify-msg"></span>
     <div class="foot"><button class="btn" type="button" id="notify-test">테스트 알림 보내기</button><span class="grow"></span><button class="btn primary" type="button" data-close>닫기</button></div>

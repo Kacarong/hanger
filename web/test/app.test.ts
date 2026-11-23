@@ -915,7 +915,7 @@ test("알림: 기기 구독 → 아침 요약·과제 마감 전·시험 전날�
 
     // Turned off: nothing; the test button still goes out.
     expect((await req("/api/notify", "PUT", { morning: "25:00" })).status).toBe(400);
-    expect(await (await req("/api/notify", "PUT", { morning: "", homework: false, exam: false })).json()).toEqual({ morning: "", homework: false, exam: false });
+    expect(await (await req("/api/notify", "PUT", { morning: "", homework: false, exam: false })).json()).toEqual({ morning: "", homework: false, exam: false, classes: false });
     clock = new Date("2026-11-25T08:00:00+09:00");
     await notifier.tick();
     expect(pushes).toHaveLength(0);
@@ -2442,6 +2442,127 @@ test("지출: 매달 나가는 돈(정기)·앞으로 쓸 돈(예정) 만들기�
     expect(list.expenses.map((x) => x.title)).toEqual(["통신비", "노트북"]);
     expect((await call(`/api/expenses/${phone.body.id}`, { method: "DELETE", cookie, headers: JSON_ORIGIN })).status).toBe(200);
     expect(((await (await call("/api/expenses", { cookie })).json()) as { expenses: unknown[] }).expenses).toHaveLength(1);
+  } finally {
+    cleanup();
+  }
+});
+
+test("시간표: 지금 학기는 늘 있고, 학기 추가·과목(시간·강의실·학점·성적·전공) 만들기·고치기·지우기, 학기를 지우면 과목도", async () => {
+  const { call, db, cleanup } = makeApp({ googleEnabled: false, now: () => new Date("2026-11-23T03:00:00Z") });
+  try {
+    db.setSetting("password_hash", await Bun.password.hash("correct horse battery"));
+    const { cookie } = await passwordLogin(call, "correct horse battery");
+    expect((await call("/api/timetable")).status).toBe(401);
+    const send = async (path: string, method: string, b?: object) => {
+      const r = await call(path, { method, cookie, headers: JSON_ORIGIN, body: b ? JSON.stringify(b) : undefined });
+      return { status: r.status, body: (await r.json()) as Record<string, any> };
+    };
+
+    const first = (await send("/api/timetable", "GET")).body;
+    expect(first.current).toEqual({ year: 2026, term: "2" });
+    expect(first.semesters).toMatchObject([{ year: 2026, term: "2" }]);
+    const now = first.semesters[0].id;
+    expect((await send("/api/timetable", "GET")).body.semesters).toHaveLength(1); // not twice
+
+    // A past and a future semester; listed in order.
+    expect((await send("/api/semesters", "POST", { year: 2027, term: "1" })).status).toBe(201);
+    const past = (await send("/api/semesters", "POST", { year: 2026, term: "1" })).body;
+    expect((await send("/api/semesters", "POST", { year: 2026, term: "1" })).status).toBe(409);
+    expect((await send("/api/semesters", "POST", { year: 2026, term: "3" })).status).toBe(400);
+    await send("/api/semesters", "POST", { year: 2026, term: "여름" });
+    expect((await send("/api/timetable", "GET")).body.semesters.map((s: any) => `${s.year}-${s.term}`)).toEqual(["2026-1", "2026-여름", "2026-2", "2027-1"]);
+
+    const c = await send("/api/courses", "POST", {
+      semester_id: now, name: "수리학및실험", professor: "오정은", credits: 3, grade: "B+", major: true, color: "pink",
+      times: [{ day: 3, start: "11:00", end: "12:50", room: "A23-206" }, { day: 1, start: "16:00", end: "17:50", room: "A15-204" }],
+    });
+    expect(c.status).toBe(201);
+    expect(c.body).toMatchObject({ semester_id: now, name: "수리학및실험", credits: 3, grade: "B+", major: 1, color: "pink", times: [{ day: 3, room: "A23-206" }, { day: 1, start: "16:00" }] });
+    const online = (await send("/api/courses", "POST", { semester_id: now, name: "부경인성세미나", credits: 0.5 })).body;
+    expect(online).toMatchObject({ credits: 0.5, grade: "", major: 0, times: [] });
+
+    for (const bad of [
+      { name: "" }, { semester_id: 999 }, { credits: 1.3 }, { credits: -1 }, { credits: "3" }, { grade: "A" }, { color: "black" },
+      { times: [{ day: 7, start: "09:00", end: "10:00" }] }, { times: [{ day: 0, start: "10:00", end: "09:00" }] }, { times: [{ day: 0, start: "9:00", end: "10:00" }] }, { times: "월 9시" },
+    ]) {
+      expect((await send("/api/courses", "POST", { semester_id: now, name: "x", ...bad })).status).toBe(400);
+    }
+    expect((await send("/api/courses", "POST", { name: "x" })).status).toBe(400);
+
+    // Grade, major and moving it to another semester; the other fields stay.
+    expect((await send(`/api/courses/${c.body.id}`, "PATCH", { grade: "A+", major: false })).body).toMatchObject({ grade: "A+", major: 0, name: "수리학및실험", times: [{ day: 3 }, { day: 1 }] });
+    expect((await send(`/api/courses/${online.id}`, "PATCH", { semester_id: past.id, grade: "P" })).body).toMatchObject({ semester_id: past.id, grade: "P", name: "부경인성세미나" });
+    expect((await send("/api/courses/999", "PATCH", { grade: "A0" })).status).toBe(404);
+
+    const list = (await send("/api/timetable", "GET")).body;
+    expect(list.courses.map((x: any) => x.name)).toEqual(["수리학및실험", "부경인성세미나"]);
+    expect((await send(`/api/semesters/${past.id}`, "DELETE")).status).toBe(200);
+    expect((await send("/api/timetable", "GET")).body.courses.map((x: any) => x.name)).toEqual(["수리학및실험"]);
+    expect((await send(`/api/courses/${c.body.id}`, "DELETE")).status).toBe(200);
+    expect((await send("/api/timetable", "GET")).body.courses).toEqual([]);
+  } finally {
+    cleanup();
+  }
+});
+
+test("수업일정: 바뀐 수업(변경·보강·휴강)을 적으면 그 수업 전날 저녁 8시에 알림, 그날 밤 늦게 적어도 알림, 날짜를 바꾸면 새 날짜 전날에 다시", async () => {
+  let clock = new Date("2026-11-23T10:00:00+09:00");
+  const { call, db, notifier, cleanup } = makeApp({ now: () => clock, googleEnabled: false });
+  try {
+    db.setSetting("password_hash", await Bun.password.hash("correct horse battery"));
+    const { cookie } = await passwordLogin(call, "correct horse battery");
+    const send = async (path: string, method: string, b?: object) => {
+      const r = await call(path, { method, cookie, headers: JSON_ORIGIN, body: b ? JSON.stringify(b) : undefined });
+      return { status: r.status, body: (await r.json()) as Record<string, any> };
+    };
+    const notes = async () => db.raw.query("SELECT title, body FROM notifications ORDER BY id").all() as { title: string; body: string }[];
+    db.setSetting("notify_settings", JSON.stringify({ morning: "" })); // only class changes in this test
+
+    const moved = await send("/api/class-changes", "POST", { course: "구조역학", kind: "변경", date: "2026-11-25", start: "15:00", end: "17:50", place: "A23-215", from_date: "2026-11-24", note: "교수님 출장" });
+    expect(moved.status).toBe(201);
+    expect(moved.body).toMatchObject({ course: "구조역학", kind: "변경", date: "2026-11-25", start: "15:00", end: "17:50", place: "A23-215", from_date: "2026-11-24" });
+    const off = await send("/api/class-changes", "POST", { course: "교통공학", kind: "휴강", date: "2026-11-24", start: "09:00", place: "A23-215" });
+    expect(off.body).toMatchObject({ kind: "휴강", start: null, end: null, place: "" }); // 휴강 has no time or place
+    for (const bad of [{ course: "" }, { date: "" }, { date: "2026-02-30" }, { kind: "취소" }, { start: "25:00" }, { start: "15:00", end: "14:00" }]) {
+      expect((await send("/api/class-changes", "POST", { course: "x", kind: "보강", date: "2026-11-26", ...bad })).status).toBe(400);
+    }
+    expect((await send("/api/class-changes", "GET")).body.changes.map((c: any) => c.course)).toEqual(["교통공학", "구조역학"]); // by date
+
+    // 11/23 20:00: tomorrow (11/24) is the 휴강.
+    clock = new Date("2026-11-23T19:59:00+09:00");
+    await notifier.tick();
+    expect(await notes()).toEqual([]);
+    clock = new Date("2026-11-23T20:00:30+09:00");
+    await notifier.tick();
+    await notifier.tick(); // once
+    expect(await notes()).toMatchObject([{ title: "내일 휴강 · 교통공학", body: "11월 24일 (화)" }]);
+
+    // Written down late on the evening before: still told that night.
+    clock = new Date("2026-11-23T23:10:00+09:00");
+    await send("/api/class-changes", "POST", { course: "토질공학및실험", kind: "보강", date: "2026-11-24", start: "18:00", end: "19:50", place: "A23-215" });
+    await notifier.tick();
+    expect((await notes()).map((n) => n.title)).toEqual(["내일 휴강 · 교통공학", "내일 보강 · 토질공학및실험"]);
+
+    // 11/24 20:00: the moved class on 11/25, with where it came from and the note.
+    clock = new Date("2026-11-24T20:00:00+09:00");
+    await notifier.tick();
+    expect((await notes())[2]).toEqual(expect.objectContaining({ title: "내일 수업 변경 · 구조역학", body: "11월 25일 (수) 15:00~17:50 · A23-215\n원래 11월 24일 (화) 수업\n교수님 출장" }));
+
+    // Moved again to 11/27: told again the evening before the new day; deleted ones are not.
+    await send(`/api/class-changes/${moved.body.id}`, "PATCH", { date: "2026-11-27" });
+    await send(`/api/class-changes/${off.body.id}`, "PATCH", { date: "2026-11-27" });
+    await send(`/api/class-changes/${off.body.id}`, "DELETE");
+    expect((await send(`/api/class-changes/${off.body.id}`, "PATCH", { note: "x" })).status).toBe(404);
+    clock = new Date("2026-11-26T20:30:00+09:00");
+    await notifier.tick();
+    expect((await notes()).slice(3).map((n) => n.title)).toEqual(["내일 수업 변경 · 구조역학"]);
+
+    // Turned off: nothing.
+    await send("/api/class-changes", "POST", { course: "교통공학", kind: "보강", date: "2026-11-28" });
+    await send("/api/notify", "PUT", { morning: "", homework: true, exam: true, classes: false });
+    clock = new Date("2026-11-27T20:00:00+09:00");
+    await notifier.tick();
+    expect(await notes()).toHaveLength(4);
   } finally {
     cleanup();
   }
