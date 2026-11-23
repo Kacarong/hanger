@@ -12,6 +12,8 @@ Tauri 2 + Windows 내장 WebView2). 화면·기능은 전부 사이트에 있으
   (tauri-plugin-notification)을 부른다. 그 기능은 kacarong.kr 페이지만 쓸 수 있다(`capabilities/site.json`).
   설치 파일이 `HKCU\Software\Classes\AppUserModelId\kr.kacarong.workspace` 에 이름·아이콘을 등록해야 알림이 뜬다(제거 때 지움).
   프로그램이 켜져 있는 동안(최소화 포함)만 받는다. 시험 빌드(KACARONG_HOME)에서 알림을 보려면 capability 의 urls 에 그 주소도 잠깐 넣는다.
+- (1.2.0) 받기(다운로드)를 누르면 저장 위치를 고르는 창(기본: 다운로드 폴더, 사이트가 준 파일 이름)을 띄운다. 취소하면 받지 않는다.
+  WebView2 는 아무 표시 없이 다운로드 폴더에 저장해서 받기가 안 되는 것처럼 보였다(`on_download` + rfd).
 - 로그인·캐시는 `%LOCALAPPDATA%\kr.kacarong.workspace` 에 남는다(제거하면 같이 지운다).
 
 ## 빌드 (리눅스에서)

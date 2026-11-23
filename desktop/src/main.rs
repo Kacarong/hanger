@@ -6,10 +6,12 @@
 //! - 다시 실행하면 새로 뜨지 않고 열려 있는 창을 앞으로 가져온다.
 //! - 사이트가 window.__TAURI__.notification 으로 윈도우 알림을 띄운다(WebView2 는 웹 알림을 막는다).
 //!   이 사이트 주소만 그 기능을 쓸 수 있다(capabilities/site.json).
+//! - 받기(다운로드)를 누르면 저장 위치를 고르는 창을 띄운다. WebView2 는 아무 표시 없이 다운로드 폴더에
+//!   저장해서 받기가 안 되는 것처럼 보였다.
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use tauri::webview::NewWindowResponse;
+use tauri::webview::{DownloadEvent, NewWindowResponse};
 use tauri::{Manager, Url, WebviewUrl, WebviewWindowBuilder};
 
 /// 여는 주소. 시험 빌드만 `KACARONG_HOME=http://.../admin cargo build` 로 다른 서버를 가리킨다.
@@ -87,6 +89,25 @@ fn main() {
                     }
                     open_in_browser(url);
                     false
+                })
+                .on_download(|webview, event| {
+                    let DownloadEvent::Requested { destination, .. } = event else {
+                        return true;
+                    };
+                    let mut dialog = rfd::FileDialog::new().set_parent(&webview.window());
+                    if let Some(dir) = destination.parent() {
+                        dialog = dialog.set_directory(dir);
+                    }
+                    if let Some(name) = destination.file_name() {
+                        dialog = dialog.set_file_name(name.to_string_lossy());
+                    }
+                    match dialog.save_file() {
+                        Some(path) => {
+                            *destination = path;
+                            true
+                        }
+                        None => false,
+                    }
                 })
                 .on_new_window(|url, _| {
                     if same_site(&url) {
