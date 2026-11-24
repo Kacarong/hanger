@@ -424,7 +424,6 @@ span.note-fold { cursor: default; }
 .meter-track { flex: 1; height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; }
 .meter-fill { height: 100%; background: var(--green); }
 .meter-text { flex: none; color: var(--fg-2); font-size: 12px; font-variant-numeric: tabular-nums; }
-.exam-mark { display: inline-grid; place-items: center; width: 15px; color: var(--orange); }
 dialog label.check { display: flex; align-items: center; gap: 8px; }
 dialog .foot .grow { flex: 1; }
 .notify-device { display: flex; align-items: center; gap: 12px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel-2); }

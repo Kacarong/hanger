@@ -661,7 +661,6 @@ async function loadToday() {
   const sections = [
     ["지난 일", t.overdue, row],
     ["오늘", t.today, row],
-    ["다가오는 시험 (2주 안)", t.exams, (e) => examTodayRow(e, t.date)],
     ["다가오는 과제 (3일 안)", t.upcoming, row],
     ["오늘 끝낸 일", t.doneToday, row],
   ]
@@ -1019,20 +1018,6 @@ function openExamDialog(e = null) {
   document.querySelector(`#exam-colors input[value="${e?.color ?? ""}"]`).checked = true;
   $("exam-msg").textContent = "";
   $("exam-dialog").showModal();
-}
-
-function examTodayRow(e, today) {
-  const n = daysBetween(today, e.date);
-  return el(
-    "tr",
-    {},
-    el("td", {}, el("span", { className: "exam-mark" }, icon("exam"))),
-    el("td", {}, el("a", { className: "title", href: "#exams", textContent: e.title }), e.place ? el("span", { className: "sub", textContent: e.place }) : null),
-    el("td", { className: "hide-sm" }, pill("시험", "orange")),
-    el("td", { className: "hide-sm muted", textContent: e.course || "—" }),
-    el("td", {}, el("span", { className: "date-main", textContent: md(e.date) + (e.time ? " " + e.time : "") }), el("span", { className: `date-note ${n <= 3 ? "soon" : "ok"}`, textContent: dday(today, e.date) })),
-    el("td", {}, pill(n === 0 ? "오늘" : dday(today, e.date), n <= 3 ? "orange" : "amber")),
-  );
 }
 
 // 과목별 공부량: 공부 탭에 그 과목으로 적은 공부 중 끝낸 것/전체와 밀린 것. until이 있으면 그날 뒤로 잡은 것은 빼고(시험 날까지),
