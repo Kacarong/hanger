@@ -16,7 +16,6 @@ const SESSION_DAYS = 30;
 const CALENDAR_MAX_DAYS = 62; // longest range /api/calendar serves (a 6-week month grid is 42)
 const UPCOMING_DAYS = 3; // 과제 due within this many days show up on the today screen
 const EXAM_DAYS = 14; // exams within this many days show up on the today screen
-const STUDY_RANGE_DAYS = 120; // longest 공부 period (one card per day)
 const LOGIN_FAIL_LIMIT = 5; // password failures allowed per LOGIN_FAIL_WINDOW
 const LOGIN_FAIL_WINDOW = 15 * 60_000;
 const PUBLIC_DIR = join(import.meta.dir, "..", "public");
@@ -434,8 +433,9 @@ export function createApp(cfg: AppConfig, db: Db, google: Google) {
   function studyFields(b: Record<string, unknown>): Partial<StudyFields & { done: number }> | string {
     const out: Partial<StudyFields & { done: number }> = {};
     if ("date" in b) {
-      out.date = str(b.date, 10);
-      if (!isDate(out.date)) return "날짜를 골라 주세요";
+      const v = str(b.date, 10);
+      if (v && !isDate(v)) return "날짜가 올바르지 않습니다";
+      out.date = v || null;
     }
     if ("course" in b) out.course = str(b.course, 100);
     if ("title" in b) {
@@ -884,28 +884,16 @@ ${body || `<section class="works"><p class="empty reveal">${mine ? "아직 포�
       }
     }
 
-    // 공부: what to study day by day. Not tasks, so the calendar never sees it; on its day it also becomes a
-    // 오늘 할 일 task in 할 일·과제 (db.queueStudies, run when that list or the today screen is read).
-    // range: the days the 공부 tab lays out as cards ready to write in, even with nothing on them yet.
-    if (path === "/api/studies" && method === "GET") return json({ date: today(), range: JSON.parse(db.getSetting("study_range") ?? "null"), studies: db.listStudies() });
-
-    if (path === "/api/studies/range" && method === "PUT") {
-      const b = await body(req);
-      const from = str(b.from, 10);
-      const to = str(b.to, 10);
-      if (!isDate(from) || !isDate(to)) return json({ error: "기간을 골라 주세요" }, 400);
-      if (from > to) return json({ error: "끝 날짜가 시작 날짜보다 앞입니다" }, 400);
-      if (to > addDays(from, STUDY_RANGE_DAYS - 1)) return json({ error: `기간은 ${STUDY_RANGE_DAYS}일까지 정할 수 있습니다` }, 400);
-      db.setSetting("study_range", JSON.stringify({ from, to }));
-      return json({ from, to });
-    }
+    // 공부: each course's list of what to study, each line with the day to do it (or none yet). Not tasks, so the
+    // calendar never sees it; on its day it also becomes a 오늘 할 일 task in 할 일·과제 (db.queueStudies, run
+    // when that list or the today screen is read).
+    if (path === "/api/studies" && method === "GET") return json({ date: today(), studies: db.listStudies() });
 
     if (path === "/api/studies" && method === "POST") {
       const f = studyFields(await body(req));
       if (typeof f === "string") return json({ error: f }, 400);
-      if (!f.date) return json({ error: "날짜를 골라 주세요" }, 400);
       if (!f.title) return json({ error: "공부할 내용을 입력해 주세요" }, 400);
-      return json(db.insertStudy({ course: "", ...f, date: f.date, title: f.title }, today()), 201);
+      return json(db.insertStudy({ course: "", date: null, ...f, title: f.title }, today()), 201);
     }
 
     const stm = path.match(/^\/api\/studies\/(\d+)$/);

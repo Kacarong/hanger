@@ -1482,7 +1482,7 @@ test("시험: 일정 → 날짜별 공부 계획(오늘·캘린더·할 일에�
   }
 });
 
-test("공부: 날짜별로 공부·과목을 적고 체크·수정·삭제, 캘린더에는 안 나옴", async () => {
+test("공부: 과목마다 공부할 것을 적고(날짜는 나중에 붙여도 됨) 체크·수정·삭제, 캘린더에는 안 나옴", async () => {
   const { call, db, cleanup } = makeApp({ googleEnabled: false, now: () => new Date("2026-11-20T03:00:00Z") });
   try {
     db.setSetting("password_hash", await Bun.password.hash("correct horse battery"));
@@ -1496,37 +1496,31 @@ test("공부: 날짜별로 공부·과목을 적고 체크·수정·삭제, 캘�
     const a = (await req("/api/studies", "POST", { date: "2026-11-21", course: "토질역학", title: "3장 복습" })).body;
     expect(a).toMatchObject({ date: "2026-11-21", course: "토질역학", title: "3장 복습", done: 0 });
     await req("/api/studies", "POST", { date: "2026-11-20", title: "영단어 50개" });
-    await req("/api/studies", "POST", { date: "2026-11-20", course: "수학", title: "미적분 문제" });
-    expect((await req("/api/studies", "POST", { title: "날짜 없음" })).status).toBe(400);
+    const u = (await req("/api/studies", "POST", { course: "토질역학", title: "4장 정리" })).body; // no day yet
+    expect(u).toMatchObject({ date: null, course: "토질역학", title: "4장 정리", done: 0 });
+    expect((await req("/api/studies", "POST", { course: "수학", date: "", title: "미적분 문제" })).body.date).toBeNull();
     expect((await req("/api/studies", "POST", { date: "2026-02-30", title: "x" })).status).toBe(400);
     expect((await req("/api/studies", "POST", { date: "2026-11-20", title: " " })).status).toBe(400);
 
+    // In the order they were written (the tab groups them by course).
     let list = (await req("/api/studies", "GET")).body;
     expect(list.date).toBe("2026-11-20");
-    expect(list.studies.map((s: any) => [s.date, s.course, s.title])).toEqual([["2026-11-20", "", "영단어 50개"], ["2026-11-20", "수학", "미적분 문제"], ["2026-11-21", "토질역학", "3장 복습"]]);
+    expect(list.studies.map((s: any) => [s.date, s.course, s.title])).toEqual([["2026-11-21", "토질역학", "3장 복습"], ["2026-11-20", "", "영단어 50개"], [null, "토질역학", "4장 정리"], [null, "수학", "미적분 문제"]]);
 
-    // The calendar never sees it, not even once today's are in 할 일·과제 (see the next test).
-    expect((await req("/api/tasks", "GET")).body.length).toBe(2);
+    // The calendar never sees it, not even once today's are in 할 일·과제 (see the next test). One without a day isn't a task.
+    expect((await req("/api/tasks", "GET")).body.map((t: any) => t.title)).toEqual(["영단어 50개"]);
     expect((await req("/api/calendar?from=2026-11-01&to=2026-11-30", "GET")).body.tasks).toBeUndefined();
 
     expect((await req(`/api/studies/${a.id}`, "PATCH", { done: true })).body).toMatchObject({ done: 1 });
     expect((await req(`/api/studies/${a.id}`, "PATCH", { date: "2026-11-22", course: "", title: "4장 복습" })).body).toMatchObject({ date: "2026-11-22", course: "", title: "4장 복습", done: 1 });
     expect((await req(`/api/studies/${a.id}`, "PATCH", { title: "" })).status).toBe(400);
-    expect((await req(`/api/studies/${a.id}`, "PATCH", { date: "" })).status).toBe(400);
+    expect((await req(`/api/studies/${a.id}`, "PATCH", { date: "2026-13-01" })).status).toBe(400);
+    expect((await req(`/api/studies/${a.id}`, "PATCH", { date: "" })).body).toMatchObject({ date: null, title: "4장 복습" }); // the day taken off again
     expect((await req("/api/studies/9999", "PATCH", { title: "x" })).status).toBe(404);
 
     expect((await req(`/api/studies/${a.id}`, "DELETE")).status).toBe(200);
     list = (await req("/api/studies", "GET")).body;
-    expect(list.studies.map((s: any) => s.title)).toEqual(["영단어 50개", "미적분 문제"]);
-
-    // The period the tab lays out day cards for: none until set, kept once set.
-    expect(list.range).toBeNull();
-    expect((await req("/api/studies/range", "PUT", { from: "2026-11-23", to: "2026-12-17" })).body).toEqual({ from: "2026-11-23", to: "2026-12-17" });
-    expect((await req("/api/studies", "GET")).body.range).toEqual({ from: "2026-11-23", to: "2026-12-17" });
-    expect((await req("/api/studies/range", "PUT", { from: "2026-12-17", to: "2026-11-23" })).status).toBe(400);
-    expect((await req("/api/studies/range", "PUT", { from: "2026-11-23", to: "" })).status).toBe(400);
-    expect((await req("/api/studies/range", "PUT", { from: "2026-11-23", to: "2027-11-23" })).status).toBe(400);
-    expect((await req("/api/studies", "GET")).body.range).toEqual({ from: "2026-11-23", to: "2026-12-17" });
+    expect(list.studies.map((s: any) => s.title)).toEqual(["영단어 50개", "4장 정리", "미적분 문제"]);
   } finally {
     cleanup();
   }
@@ -1576,6 +1570,7 @@ test("공부: 그날 0시가 되면 할 일·과제의 오늘 할 일에 들어�
     const b = (await req("/api/studies", "POST", { date: "2026-11-23", title: "영단어 50개" })).body;
     await req("/api/studies", "POST", { date: "2026-11-24", title: "내일 것" });
     await req("/api/studies", "POST", { date: "2026-11-21", title: "지난 기록" }); // a day already gone: never a task
+    const n = (await req("/api/studies", "POST", { course: "수학", title: "날짜는 나중에" })).body; // no day: waits for one
     expect((await req("/api/tasks", "GET")).body).toEqual([]);
 
     clock = new Date("2026-11-22T15:00:00Z"); // 11-23 00:00 KST
@@ -1599,17 +1594,45 @@ test("공부: 그날 0시가 되면 할 일·과제의 오늘 할 일에 들어�
     // Deleted in 할 일·과제: stays deleted, the study stays. Moved to tomorrow: off today, back tomorrow.
     await req(`/api/tasks/${tb.id}`, "DELETE");
     expect((await req("/api/tasks", "GET")).body.map((t: any) => t.title)).toEqual(["3~4장 복습"]);
-    expect((await req("/api/studies", "GET")).body.studies.length).toBe(4);
+    expect((await req("/api/studies", "GET")).body.studies.length).toBe(5);
     await req(`/api/studies/${a.id}`, "PATCH", { date: "2026-11-24" });
     expect((await req("/api/tasks", "GET")).body).toEqual([]);
+    // Given a day later (the day after): goes in on that day like the rest.
+    await req(`/api/studies/${n.id}`, "PATCH", { date: "2026-11-24" });
 
     clock = new Date("2026-11-23T15:00:00Z"); // 11-24 00:00 KST
-    expect((await req("/api/tasks", "GET")).body.map((t: any) => [t.title, t.due_date])).toEqual([["3~4장 복습", "2026-11-24"], ["내일 것", "2026-11-24"]]);
-    // Deleting the study takes its task with it.
+    expect((await req("/api/tasks", "GET")).body.map((t: any) => [t.title, t.due_date])).toEqual([["3~4장 복습", "2026-11-24"], ["내일 것", "2026-11-24"], ["날짜는 나중에", "2026-11-24"]]);
+    // Its day taken off: off 할 일·과제 until it gets one again. Deleting the study takes its task with it.
+    await req(`/api/studies/${n.id}`, "PATCH", { date: "" });
     await req(`/api/studies/${a.id}`, "DELETE");
     expect((await req("/api/tasks", "GET")).body.map((t: any) => t.title)).toEqual(["내일 것"]);
   } finally {
     cleanup();
+  }
+});
+
+test("공부 날짜가 꼭 있어야 하던 DB를 열면 공부는 그대로, 날짜 없이도 적히고 지우면 할 일도 같이 지워짐", () => {
+  const dir = mkdtempSync(join(tmpdir(), "folio-test-"));
+  try {
+    const path = join(dir, "old.db");
+    const raw = new Database(path);
+    raw.exec(`
+      CREATE TABLE studies (id INTEGER PRIMARY KEY AUTOINCREMENT, date TEXT NOT NULL, course TEXT NOT NULL DEFAULT '', title TEXT NOT NULL, done INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL DEFAULT (datetime('now')), queued INTEGER NOT NULL DEFAULT 0);
+      INSERT INTO studies (date, course, title, done, queued) VALUES ('2026-11-23', '구조역학', '2장, 3장 공부', 1, 1);
+    `);
+    raw.close();
+    let db = openDb(path);
+    db.insertTask({ kind: "공부", category: "오늘 할 일", title: "2장, 3장 공부", course: "구조역학", due_date: "2026-11-23", due_time: null, note: "" });
+    db.raw.query("UPDATE tasks SET study_id = 1").run();
+    db.raw.close();
+    db = openDb(path); // opening again leaves it as it is
+    expect(db.listStudies().map((s) => [s.id, s.date, s.course, s.title, s.done, s.queued])).toEqual([[1, "2026-11-23", "구조역학", "2장, 3장 공부", 1, 1]]);
+    expect(db.insertStudy({ date: null, course: "구조역학", title: "4장" }, "2026-11-24")).toMatchObject({ id: 2, date: null, queued: 0 });
+    db.deleteStudy(1);
+    expect(db.listTasks({}).length).toBe(0);
+    db.raw.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });
 

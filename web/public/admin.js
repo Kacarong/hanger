@@ -1035,10 +1035,11 @@ function examTodayRow(e, today) {
   );
 }
 
-// 과목별 공부량: 공부 탭에 그 과목으로 적은 공부 중 끝낸 것/전체와 밀린 것. until이 있으면 그날까지 것만(시험 날까지).
+// 과목별 공부량: 공부 탭에 그 과목으로 적은 공부 중 끝낸 것/전체와 밀린 것. until이 있으면 그날 뒤로 잡은 것은 빼고(시험 날까지),
+// 날짜를 아직 안 정한 것은 넣는다.
 function studyCount(studies, course, today, until = null) {
-  const list = studies.filter((s) => s.course === course && (!until || s.date <= until));
-  return { total: list.length, done: list.filter((s) => s.done).length, late: list.filter((s) => !s.done && s.date < today).length };
+  const list = studies.filter((s) => s.course === course && (!until || !s.date || s.date <= until));
+  return { total: list.length, done: list.filter((s) => s.done).length, late: list.filter((s) => !s.done && s.date && s.date < today).length };
 }
 const meter = (c) =>
   el(
@@ -1096,108 +1097,116 @@ function examCard(e, today, reload, studies) {
   );
 }
 
-// 공부: 날짜별로 공부할 것과 과목. 캘린더에는 나오지 않는다. 그날이 되면 할 일·과제의 "오늘 할 일"에도 들어가고(서버),
-// 어느 쪽에서 체크해도 같이 체크된다.
-// 정해 둔 기간(range)의 날마다 카드가 미리 깔려 있어서 그 카드에 바로 적는다.
+// 공부: 과목마다 공부할 것 목록. 줄마다 언제 할지 날짜를 붙이고(안 정해도 됨) 끝내면 체크한다. 캘린더에는 나오지 않는다.
+// 날짜가 된 줄은 할 일·과제의 "오늘 할 일"에도 들어가고(서버), 어느 쪽에서 체크해도 같이 체크된다.
+// 과목 카드는 이번 학기 시간표의 과목(시간표 순서)과 공부에 적은 다른 과목, 과목 없이 적은 것("과목 없음") 순.
 let editingStudy = null;
-let studyPastOpen = false;
-const studyDrafts = new Map(); // date → { course, title } typed into that day's card, kept across redraws
-let studyFocus = null; // the day whose card gets the focus back after the list is redrawn
+const studyDrafts = new Map(); // course → { title, date } typed into that course's card, kept across redraws
+let studyFocus = null; // the course whose card gets the focus back after the list is redrawn
 
 async function loadStudies() {
-  const [{ date: today, range, studies }, { exams }] = await Promise.all([call("/api/studies"), call("/api/exams")]);
+  const [{ date: today, studies }, { exams }, tt] = await Promise.all([call("/api/studies"), call("/api/exams"), call("/api/timetable")]);
   const reload = () => loadStudies().catch(showError);
-  if (document.activeElement !== $("study-from") && document.activeElement !== $("study-to")) {
-    $("study-from").value = range?.from ?? "";
-    $("study-to").value = range?.to ?? "";
-  }
-  $("study-courses").replaceChildren(...[...new Set(studies.map((s) => s.course).filter(Boolean))].map((c) => el("option", { value: c })));
+  const term = tt.semesters.find((m) => m.year === tt.current.year && m.term === tt.current.term);
+  const termCourses = tt.courses.filter((c) => term && c.semester_id === term.id).map((c) => c.name);
+  const others = [...new Set(studies.map((s) => s.course).filter((c) => c && !termCourses.includes(c)))].sort((a, b) => a.localeCompare(b, "ko"));
+  const courses = [...new Set([...termCourses, ...others])];
+  if (studies.some((s) => !s.course)) courses.push("");
+  $("study-courses").replaceChildren(...courses.filter(Boolean).map((c) => el("option", { value: c })));
   const todays = studies.filter((s) => s.date === today);
-  const ahead = studies.filter((s) => s.date > today && !s.done);
-  const late = studies.filter((s) => s.date < today && !s.done);
+  const undated = studies.filter((s) => !s.date && !s.done);
+  const late = studies.filter((s) => s.date && s.date < today && !s.done);
   $("study-stats").replaceChildren(
     stat("오늘 공부", `${todays.filter((s) => s.done).length}/${todays.length}`, ""),
-    stat("앞으로 할 공부", String(ahead.length), ""),
+    stat("날짜 안 정한 공부", String(undated.length), ""),
     stat("밀린 공부", String(late.length), "", late.length > 0),
     ...examStats(exams.filter((e) => e.date && e.date >= today), today, studies).slice(0, 1),
   );
-  // 과목별: every course written on the 공부 tab, with how much of it is done and its next exam.
-  const courses = [...new Set(studies.map((s) => s.course).filter(Boolean))].sort((a, b) => a.localeCompare(b, "ko"));
-  $("study-courses-box").hidden = !courses.length;
-  $("study-by-course").replaceChildren(
-    ...courses.map((c) => {
-      const next = exams.find((e) => e.course === c && e.date && e.date >= today);
-      return el(
-        "li",
-        {},
-        el("span", { className: "course-name", textContent: c }),
-        meter(studyCount(studies, c, today)),
-        next ? pill(`시험 ${dday(today, next.date)}`, daysBetween(today, next.date) <= 3 ? "orange" : "amber") : el("span"),
-      );
-    }),
-  );
   const q = searchText();
-  const shown = studies.filter((s) => !q || [s.title, s.course].join("\n").toLowerCase().includes(q));
-  const days = new Map();
-  // Every day of the period from today on gets a card, empty or not (not while searching: only the hits then).
-  if (range && !q) for (let d = range.from < today ? today : range.from; d <= range.to; d = plusDays(d, 1)) days.set(d, []);
-  for (const s of shown) days.set(s.date, [...(days.get(s.date) ?? []), s]);
-  const card = ([d, list]) =>
-    el(
-      "section",
-      { className: "exam study-day" + (d < today ? " past" : "") },
+  const out = [];
+  let focusIn = null;
+  for (const c of courses) {
+    const list = studies.filter((s) => s.course === c && (!q || [s.title, s.course].join("\n").toLowerCase().includes(q)));
+    if (q && !list.length) continue;
+    const next = c ? exams.find((e) => e.course === c && e.date && e.date >= today) : null;
+    const add = studyAdd(c);
+    if (studyFocus === c) focusIn = add.querySelector("input");
+    out.push(
       el(
-        "div",
-        { className: "exam-head" },
-        el("div", { className: "grow" }, el("h2", { textContent: dayLabel(d) })),
-        ...exams.filter((e) => e.date === d).map((e) => pill(`시험 · ${examName(e)}`, "orange")),
-        d === today ? pill("오늘", "blue") : null,
+        "section",
+        { className: "exam study-course" },
+        el(
+          "div",
+          { className: "exam-head" },
+          el("div", { className: "grow" }, el("h2", { textContent: c || "과목 없음" })),
+          next ? pill(`시험 ${dday(today, next.date)}`, daysBetween(today, next.date) <= 3 ? "orange" : "amber") : null,
+        ),
+        list.length ? meter(studyCount(studies, c, today)) : null,
+        list.length ? el("ul", { className: "plan" }, ...list.map((s) => studyRow(s, today, reload))) : null,
+        add,
       ),
-      list.length ? el("ul", { className: "plan" }, ...list.map((s) => studyRow(s, today, reload))) : null,
-      studyAdd(d),
     );
-  const all = [...days].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
-  const out = all.filter(([d]) => d >= today).map(card);
-  const past = all.filter(([d]) => d < today).reverse(); // the latest first
-  if (past.length) out.push(el("details", { className: "exam-past", open: studyPastOpen || !!q, ontoggle() { if (!q) studyPastOpen = this.open; } }, el("summary", {}, icon("right"), `지난 공부 · ${past.length}일`), ...past.map(card)));
-  if (!all.length) out.push(el("p", { className: "notice", textContent: q ? "검색 결과가 없습니다." : "위에서 공부할 기간을 정하면 그 기간의 날마다 카드가 생깁니다." }));
+  }
+  if (q && !out.length) out.push(el("p", { className: "notice", textContent: "검색 결과가 없습니다." }));
+  if (!q) out.push(studyAddCourse());
   $("study-list").replaceChildren(...out);
-  if (studyFocus) $(`study-text-${studyFocus}`)?.focus();
+  focusIn?.focus();
   studyFocus = null;
 }
 
-// The write-in line at the bottom of a day's card. The course stays after adding, so the next one is one line away.
-function studyAdd(d) {
-  const draft = studyDrafts.get(d) ?? { course: "", title: "" };
-  studyDrafts.set(d, draft);
-  const courseIn = el("input", { className: "input course", placeholder: "과목", maxLength: 100, value: draft.course, oninput() { draft.course = this.value; } });
-  courseIn.setAttribute("list", "study-courses");
-  const textIn = el("input", { className: "input", id: `study-text-${d}`, placeholder: "공부할 내용", maxLength: 200, value: draft.title, oninput() { draft.title = this.value; } });
+// The write-in line at the bottom of a course's card: what to study and, if already known, the day.
+function studyAdd(course) {
+  const draft = studyDrafts.get(course) ?? { title: "", date: "" };
+  studyDrafts.set(course, draft);
+  const textIn = el("input", { className: "input", placeholder: "공부할 내용", maxLength: 200, value: draft.title, oninput() { draft.title = this.value; } });
+  const dateIn = el("input", { className: "input date", type: "date", title: "할 날짜 (비워 두면 미정)", ariaLabel: "할 날짜", value: draft.date, oninput() { draft.date = this.value; } });
   const add = async (ev) => {
     ev.preventDefault();
     if (!textIn.value.trim()) return textIn.focus();
     try {
-      await call("/api/studies", { method: "POST", body: { date: d, course: courseIn.value, title: textIn.value } });
+      await call("/api/studies", { method: "POST", body: { course, title: textIn.value, date: dateIn.value } });
       draft.title = "";
-      studyFocus = d;
+      studyFocus = course;
       await loadStudies();
     } catch (err) {
       showError(err);
     }
   };
-  return el("form", { className: "plan-add study-add", onsubmit: add }, courseIn, textIn, el("button", { className: "btn", type: "submit" }, icon("plus"), "추가"));
+  return el("form", { className: "plan-add study-add", onsubmit: add }, textIn, dateIn, el("button", { className: "btn", type: "submit" }, icon("plus"), "추가"));
 }
 
+// Under the cards: a line for a course that has no card yet (not in this semester's 시간표).
+function studyAddCourse() {
+  const courseIn = el("input", { className: "input course", placeholder: "다른 과목", maxLength: 100 });
+  courseIn.setAttribute("list", "study-courses");
+  const textIn = el("input", { className: "input", placeholder: "공부할 내용", maxLength: 200 });
+  const dateIn = el("input", { className: "input date", type: "date", title: "할 날짜 (비워 두면 미정)", ariaLabel: "할 날짜" });
+  const add = async (ev) => {
+    ev.preventDefault();
+    if (!courseIn.value.trim()) return courseIn.focus();
+    if (!textIn.value.trim()) return textIn.focus();
+    try {
+      await call("/api/studies", { method: "POST", body: { course: courseIn.value, title: textIn.value, date: dateIn.value } });
+      studyFocus = courseIn.value.trim();
+      await loadStudies();
+    } catch (err) {
+      showError(err);
+    }
+  };
+  return el("form", { className: "plan-add study-add study-new-course", onsubmit: add }, courseIn, textIn, dateIn, el("button", { className: "btn", type: "submit" }, icon("plus"), "과목 추가"));
+}
+
+// A line of the list: check it off, or set / change / clear its day right there.
 function studyRow(s, today, reload) {
   const update = (patch) => call(`/api/studies/${s.id}`, { method: "PATCH", body: patch }).then(reload, showError);
-  const late = !s.done && s.date < today;
+  const late = !s.done && s.date && s.date < today;
   return el(
     "li",
     { className: s.done ? "done" : late ? "late" : "" },
     el("input", { type: "checkbox", checked: !!s.done, title: "끝냄 표시", onchange() { update({ done: this.checked }); } }),
-    s.course ? pill(s.course, "amber") : null,
     el("span", { className: "plan-title", textContent: s.title }),
-    late ? pill("밀림", "orange") : null,
+    s.date === today ? pill("오늘", "blue") : late ? pill("밀림", "orange") : null,
+    el("input", { className: "input date", type: "date", value: s.date ?? "", title: "할 날짜", ariaLabel: `${s.title} 할 날짜`, onchange() { update({ date: this.value }); } }),
     iconBtn("수정", "edit", () => openStudyDialog(s)),
     iconBtn("삭제", "trash", () => confirm(`"${s.title}" 을(를) 지울까요?`) && call(`/api/studies/${s.id}`, { method: "DELETE" }).then(reload, showError), "danger"),
   );
@@ -1205,7 +1214,7 @@ function studyRow(s, today, reload) {
 
 function openStudyDialog(s) {
   editingStudy = s;
-  $("study-edit-date").value = s.date;
+  $("study-edit-date").value = s.date ?? "";
   $("study-edit-course").value = s.course;
   $("study-edit-title").value = s.title;
   $("study-msg").textContent = "";
@@ -1964,17 +1973,6 @@ async function init() {
       tabs[currentTab()].load().catch(showError);
     } catch (e) {
       $("exam-msg").textContent = e.message;
-    }
-  };
-  // The 공부 period: changing either end lays out the cards again.
-  $("study-from").onchange = $("study-to").onchange = async () => {
-    const from = $("study-from").value, to = $("study-to").value;
-    if (!from || !to) return;
-    try {
-      await call("/api/studies/range", { method: "PUT", body: { from, to } });
-      await loadStudies();
-    } catch (e) {
-      showError(e);
     }
   };
   $("study-form").onsubmit = async (ev) => {

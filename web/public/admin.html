@@ -90,16 +90,6 @@
 
       <div id="tab-studies" hidden>
         <div class="stats" id="study-stats"></div>
-        <div class="study-range">
-          <span class="muted">기간</span>
-          <input class="input" type="date" id="study-from" aria-label="공부 시작 날짜">
-          <span class="muted">~</span>
-          <input class="input" type="date" id="study-to" aria-label="공부 끝 날짜">
-        </div>
-        <details class="study-courses-box" id="study-courses-box" hidden open>
-          <summary>과목별 공부량</summary>
-          <ul class="by-course" id="study-by-course"></ul>
-        </details>
         <datalist id="study-courses"></datalist>
         <div id="study-list"></div>
       </div>
@@ -294,7 +284,7 @@
   <form method="dialog" id="study-form">
     <h2>공부 수정</h2>
     <div class="row">
-      <label>날짜<input class="input" type="date" id="study-edit-date" required></label>
+      <label>할 날짜 (비워 두면 미정)<input class="input" type="date" id="study-edit-date"></label>
       <label>과목<input class="input" id="study-edit-course" list="study-courses" maxlength="100"></label>
     </div>
     <label>공부할 내용<input class="input" id="study-edit-title" maxlength="200" required></label>

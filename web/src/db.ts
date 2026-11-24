@@ -71,9 +71,10 @@ export type ExamRow = {
 export type ExamFields = Pick<ExamRow, "title" | "course" | "date" | "time" | "place" | "scope" | "note" | "color">;
 export const EXAM_COLORS = ["", "red", "orange", "amber", "green", "blue", "purple", "pink"];
 
-// A day's study on the 공부 tab. Kept apart from tasks so it never shows up on the calendar. When its day comes it
-// is also put in 할 일·과제 as a 오늘 할 일 task (tasks.study_id, queued = done so), checked off together with it.
-export type StudyRow = { id: number; date: string; course: string; title: string; done: number; queued: number; created_at: string };
+// A line of a course's study list on the 공부 tab, with the day to do it (null = not decided yet). Kept apart from
+// tasks so it never shows up on the calendar. When its day comes it is also put in 할 일·과제 as a 오늘 할 일 task
+// (tasks.study_id, queued = done so), checked off together with it.
+export type StudyRow = { id: number; date: string | null; course: string; title: string; done: number; queued: number; created_at: string };
 export type PushSubRow = { endpoint: string; p256dh: string; auth: string };
 export type NotificationRow = { id: number; title: string; body: string; url: string; created_at: string };
 export type StudyFields = Pick<StudyRow, "date" | "course" | "title">;
@@ -225,7 +226,7 @@ export function openDb(path: string) {
     );
     CREATE TABLE IF NOT EXISTS studies (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
-      date TEXT NOT NULL,
+      date TEXT,
       course TEXT NOT NULL DEFAULT '',
       title TEXT NOT NULL,
       done INTEGER NOT NULL DEFAULT 0,
@@ -304,6 +305,26 @@ export function openDb(path: string) {
   const studyCols = (db.query("PRAGMA table_info(studies)").all() as { name: string }[]).map((c) => c.name);
   // Days already gone when this came in are not put in 할 일·과제 afterwards.
   if (!studyCols.includes("queued")) db.exec("ALTER TABLE studies ADD COLUMN queued INTEGER NOT NULL DEFAULT 0; UPDATE studies SET queued = 1 WHERE date < date('now', '+9 hours');");
+  // A study's day became optional (a course's list first, days later): SQLite can't drop NOT NULL, so the table is rebuilt.
+  if ((db.query("PRAGMA table_info(studies)").all() as { name: string; notnull: number }[]).find((c) => c.name === "date")?.notnull) {
+    db.transaction(() => {
+      db.exec(`
+        DROP TRIGGER IF EXISTS tasks_study_gone;
+        CREATE TABLE studies_new (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          date TEXT,
+          course TEXT NOT NULL DEFAULT '',
+          title TEXT NOT NULL,
+          done INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          queued INTEGER NOT NULL DEFAULT 0
+        );
+        INSERT INTO studies_new (id, date, course, title, done, created_at, queued) SELECT id, date, course, title, done, created_at, queued FROM studies;
+        DROP TABLE studies;
+        ALTER TABLE studies_new RENAME TO studies;
+      `);
+    })();
+  }
   db.exec(`
     CREATE INDEX IF NOT EXISTS tasks_exam ON tasks (exam_id);
     -- An exam takes its study plan with it.
@@ -673,23 +694,24 @@ export function openDb(path: string) {
       db.query("DELETE FROM class_changes WHERE id = ?").run(id);
     },
     listStudies(): StudyRow[] {
-      return db.query("SELECT * FROM studies ORDER BY date, id").all() as StudyRow[];
+      return db.query("SELECT * FROM studies ORDER BY id").all() as StudyRow[]; // the order they were written in
     },
     getStudy(id: number): StudyRow | null {
       return db.query("SELECT * FROM studies WHERE id = ?").get(id) as StudyRow | null;
     },
-    // A day already gone is a record, not something to do: it doesn't go to 할 일·과제.
+    // A day already gone is a record, not something to do: it doesn't go to 할 일·과제. No day yet: waits for one.
     insertStudy(s: StudyFields, today: string): StudyRow {
-      return db.query("INSERT INTO studies (date, course, title, queued) VALUES (?, ?, ?, ?) RETURNING *").get(s.date, s.course, s.title, s.date < today ? 1 : 0) as StudyRow;
+      return db.query("INSERT INTO studies (date, course, title, queued) VALUES (?, ?, ?, ?) RETURNING *").get(s.date, s.course, s.title, s.date !== null && s.date < today ? 1 : 0) as StudyRow;
     },
-    // The 오늘 할 일 task follows. Moved to another day, it waits for that day again (a day already gone: not at all).
+    // The 오늘 할 일 task follows. Moved to another day, it waits for that day again (a day already gone: not at all;
+    // the day taken off: until it gets one).
     updateStudy: db.transaction((id: number, patch: Partial<StudyFields & { done: number }>, today: string) => {
       const before = db.query("SELECT * FROM studies WHERE id = ?").get(id) as StudyRow;
       const keys = Object.keys(patch) as (keyof typeof patch)[];
       if (keys.length) db.query(`UPDATE studies SET ${keys.map((k) => `${k} = ?`).join(", ")} WHERE id = ?`).run(...keys.map((k) => patch[k]!), id);
       if (patch.date !== undefined && patch.date !== before.date) {
         db.query("DELETE FROM tasks WHERE study_id = ?").run(id);
-        db.query("UPDATE studies SET queued = ? WHERE id = ?").run(patch.date < today ? 1 : 0, id);
+        db.query("UPDATE studies SET queued = ? WHERE id = ?").run(patch.date !== null && patch.date < today ? 1 : 0, id);
         return;
       }
       if (patch.title !== undefined) db.query("UPDATE tasks SET title = ? WHERE study_id = ?").run(patch.title, id);
