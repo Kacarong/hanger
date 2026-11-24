@@ -1090,14 +1090,15 @@ const studyDrafts = new Map(); // course → { title, date } typed into that cou
 let studyFocus = null; // the course whose card gets the focus back after the list is redrawn
 
 async function loadStudies() {
-  const [{ date: today, studies }, { exams }, tt] = await Promise.all([call("/api/studies"), call("/api/exams"), call("/api/timetable")]);
+  const [{ date: today, studies, hidden }, { exams }, tt] = await Promise.all([call("/api/studies"), call("/api/exams"), call("/api/timetable")]);
   const reload = () => loadStudies().catch(showError);
   const term = tt.semesters.find((m) => m.year === tt.current.year && m.term === tt.current.term);
-  const termCourses = tt.courses.filter((c) => term && c.semester_id === term.id).map((c) => c.name);
+  const allTermCourses = tt.courses.filter((c) => term && c.semester_id === term.id).map((c) => c.name);
+  const termCourses = allTermCourses.filter((c) => !hidden.includes(c)); // 과목 삭제로 뺀 과목은 카드 없이 '다른 과목' 목록에만
   const others = [...new Set(studies.map((s) => s.course).filter((c) => c && !termCourses.includes(c)))].sort((a, b) => a.localeCompare(b, "ko"));
   const courses = [...new Set([...termCourses, ...others])];
   if (studies.some((s) => !s.course)) courses.push("");
-  $("study-courses").replaceChildren(...courses.filter(Boolean).map((c) => el("option", { value: c })));
+  $("study-courses").replaceChildren(...[...new Set([...courses, ...allTermCourses])].filter(Boolean).map((c) => el("option", { value: c })));
   const todays = studies.filter((s) => s.date === today);
   const undated = studies.filter((s) => !s.date && !s.done);
   const late = studies.filter((s) => s.date && s.date < today && !s.done);
@@ -1105,7 +1106,7 @@ async function loadStudies() {
     stat("오늘 공부", `${todays.filter((s) => s.done).length}/${todays.length}`, ""),
     stat("날짜 안 정한 공부", String(undated.length), ""),
     stat("밀린 공부", String(late.length), "", late.length > 0),
-    ...examStats(exams.filter((e) => e.date && e.date >= today), today, studies).slice(0, 1),
+    ...examStats(exams.filter((e) => e.date && e.date >= today && !hidden.includes(e.course)), today, studies).slice(0, 1),
   );
   const q = searchText();
   const out = [];
@@ -1125,6 +1126,7 @@ async function loadStudies() {
           { className: "exam-head" },
           el("div", { className: "grow" }, el("h2", { textContent: c || "과목 없음" })),
           next ? pill(`시험 ${dday(today, next.date)}`, daysBetween(today, next.date) <= 3 ? "orange" : "amber") : null,
+          iconBtn("과목 삭제", "trash", () => deleteStudyCourse(c, studies.filter((s) => s.course === c).length).then(reload, showError), "danger"),
         ),
         list.length ? meter(studyCount(studies, c, today)) : null,
         list.length ? el("ul", { className: "plan" }, ...list.map((s) => studyRow(s, today, reload))) : null,
@@ -1139,12 +1141,35 @@ async function loadStudies() {
   studyFocus = null;
 }
 
+// 과목 삭제: the card goes with its lines. A 시간표 course stays off until a line is written for it again ('다른 과목').
+async function deleteStudyCourse(course, count) {
+  const name = course || "과목 없음";
+  if (!confirm(count ? `"${name}" 과목과 공부 ${count}줄을 지울까요?` : `"${name}" 과목을 공부 탭에서 뺄까요?`)) return;
+  studyDrafts.delete(course);
+  await call("/api/studies/course", { method: "DELETE", body: { course } });
+}
+
+// A day field that shows only its calendar button while empty (no "연도. 월. 일." placeholder).
+function dateInput(props) {
+  const input = el("input", { className: "input date", type: "date", ...props });
+  const sync = () => input.classList.toggle("empty", !input.value);
+  input.addEventListener("input", sync);
+  input.addEventListener("change", sync);
+  input.addEventListener("click", () => {
+    try {
+      if (!input.value) input.showPicker?.(); // the whole small box opens the calendar, not just the icon
+    } catch {}
+  });
+  sync();
+  return input;
+}
+
 // The write-in line at the bottom of a course's card: what to study and, if already known, the day.
 function studyAdd(course) {
   const draft = studyDrafts.get(course) ?? { title: "", date: "" };
   studyDrafts.set(course, draft);
   const textIn = el("input", { className: "input", placeholder: "공부할 내용", maxLength: 200, value: draft.title, oninput() { draft.title = this.value; } });
-  const dateIn = el("input", { className: "input date", type: "date", title: "할 날짜 (비워 두면 미정)", ariaLabel: "할 날짜", value: draft.date, oninput() { draft.date = this.value; } });
+  const dateIn = dateInput({ title: "할 날짜 (비워 두면 미정)", ariaLabel: "할 날짜", value: draft.date, oninput() { draft.date = this.value; } });
   const add = async (ev) => {
     ev.preventDefault();
     if (!textIn.value.trim()) return textIn.focus();
@@ -1165,7 +1190,7 @@ function studyAddCourse() {
   const courseIn = el("input", { className: "input course", placeholder: "다른 과목", maxLength: 100 });
   courseIn.setAttribute("list", "study-courses");
   const textIn = el("input", { className: "input", placeholder: "공부할 내용", maxLength: 200 });
-  const dateIn = el("input", { className: "input date", type: "date", title: "할 날짜 (비워 두면 미정)", ariaLabel: "할 날짜" });
+  const dateIn = dateInput({ title: "할 날짜 (비워 두면 미정)", ariaLabel: "할 날짜" });
   const add = async (ev) => {
     ev.preventDefault();
     if (!courseIn.value.trim()) return courseIn.focus();
@@ -1191,7 +1216,7 @@ function studyRow(s, today, reload) {
     el("input", { type: "checkbox", checked: !!s.done, title: "끝냄 표시", onchange() { update({ done: this.checked }); } }),
     el("span", { className: "plan-title", textContent: s.title }),
     s.date === today ? pill("오늘", "blue") : late ? pill("밀림", "orange") : null,
-    el("input", { className: "input date", type: "date", value: s.date ?? "", title: "할 날짜", ariaLabel: `${s.title} 할 날짜`, onchange() { update({ date: this.value }); } }),
+    dateInput({ value: s.date ?? "", title: "할 날짜", ariaLabel: `${s.title} 할 날짜`, onchange() { update({ date: this.value }); } }),
     iconBtn("수정", "edit", () => openStudyDialog(s)),
     iconBtn("삭제", "trash", () => confirm(`"${s.title}" 을(를) 지울까요?`) && call(`/api/studies/${s.id}`, { method: "DELETE" }).then(reload, showError), "danger"),
   );

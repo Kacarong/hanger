@@ -887,13 +887,26 @@ ${body || `<section class="works"><p class="empty reveal">${mine ? "아직 포�
     // 공부: each course's list of what to study, each line with the day to do it (or none yet). Not tasks, so the
     // calendar never sees it; on its day it also becomes a 오늘 할 일 task in 할 일·과제 (db.queueStudies, run
     // when that list or the today screen is read).
-    if (path === "/api/studies" && method === "GET") return json({ date: today(), studies: db.listStudies() });
+    // Courses taken off the 공부 tab (시간표 courses that need no study); writing a line for one brings it back.
+    const hiddenCourses = (): string[] => JSON.parse(db.getSetting("study_hidden_courses") ?? "[]");
+    const setHiddenCourses = (list: string[]) => db.setSetting("study_hidden_courses", JSON.stringify(list));
+    if (path === "/api/studies" && method === "GET") return json({ date: today(), studies: db.listStudies(), hidden: hiddenCourses() });
 
     if (path === "/api/studies" && method === "POST") {
       const f = studyFields(await body(req));
       if (typeof f === "string") return json({ error: f }, 400);
       if (!f.title) return json({ error: "공부할 내용을 입력해 주세요" }, 400);
-      return json(db.insertStudy({ course: "", date: null, ...f, title: f.title }, today()), 201);
+      const study = db.insertStudy({ course: "", date: null, ...f, title: f.title }, today());
+      setHiddenCourses(hiddenCourses().filter((c) => c !== study.course));
+      return json(study, 201);
+    }
+
+    // 과목 삭제: the course's lines go (and their 할 일 with them) and its card stays off the tab.
+    if (path === "/api/studies/course" && method === "DELETE") {
+      const course = str((await body(req)).course, 100);
+      for (const s of db.listStudies()) if (s.course === course) db.deleteStudy(s.id);
+      if (course && !hiddenCourses().includes(course)) setHiddenCourses([...hiddenCourses(), course]);
+      return json({ ok: true });
     }
 
     const stm = path.match(/^\/api\/studies\/(\d+)$/);
@@ -904,6 +917,7 @@ ${body || `<section class="works"><p class="empty reveal">${mine ? "아직 포�
         const f = studyFields(await body(req));
         if (typeof f === "string") return json({ error: f }, 400);
         db.updateStudy(study.id, f, today());
+        if (f.course !== undefined) setHiddenCourses(hiddenCourses().filter((c) => c !== f.course));
         return json(db.getStudy(study.id));
       }
       if (method === "DELETE") {

@@ -419,6 +419,9 @@ span.note-fold { cursor: default; }
 .study-course .plan .pill { flex: none; }
 .study-course .meter { margin: 0 0 10px; }
 .study-course .input.date, .study-add .input.date { flex: 0 0 150px; width: 150px; height: 32px; color-scheme: dark; }
+/* No day yet: just the calendar button, without the "연도. 월. 일." placeholder. */
+.study-course .input.date.empty, .study-add .input.date.empty { flex: 0 0 34px; width: 34px; padding: 0 8px; cursor: pointer; }
+.input.date.empty::-webkit-datetime-edit { display: none; }
 .study-new-course { margin: 16px; }
 .meter { display: flex; align-items: center; gap: 10px; min-width: 0; }
 .meter-track { flex: 1; height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; }

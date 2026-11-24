@@ -1526,6 +1526,35 @@ test("공부: 과목마다 공부할 것을 적고(날짜는 나중에 붙여도
   }
 });
 
+test("공부 과목 삭제: 그 과목 공부와 할 일이 지워지고 과목은 숨겨지며, 다시 적으면 돌아옴", async () => {
+  const { call, db, cleanup } = makeApp({ googleEnabled: false, now: () => new Date("2026-11-20T03:00:00Z") });
+  try {
+    db.setSetting("password_hash", await Bun.password.hash("correct horse battery"));
+    const { cookie } = await passwordLogin(call, "correct horse battery");
+    const req = async (path: string, method: string, b?: object) => {
+      const r = await call(path, { method, cookie, headers: JSON_ORIGIN, body: b ? JSON.stringify(b) : undefined });
+      return { status: r.status, body: (await r.json()) as any };
+    };
+    await req("/api/studies", "POST", { date: "2026-11-20", course: "부경인성세미나", title: "소감문" }); // today → also a 할 일
+    await req("/api/studies", "POST", { course: "부경인성세미나", title: "발표 준비" });
+    await req("/api/studies", "POST", { course: "토질역학", title: "3장 복습" });
+    expect((await req("/api/tasks", "GET")).body.map((t: any) => t.title)).toEqual(["소감문"]);
+    expect((await req("/api/studies", "GET")).body.hidden).toEqual([]);
+
+    expect((await req("/api/studies/course", "DELETE", { course: "부경인성세미나" })).status).toBe(200);
+    expect((await req("/api/studies/course", "DELETE", { course: "항공우주학개론" })).status).toBe(200); // a 시간표 course with no lines
+    let list = (await req("/api/studies", "GET")).body;
+    expect(list.studies.map((s: any) => s.title)).toEqual(["3장 복습"]);
+    expect(list.hidden).toEqual(["부경인성세미나", "항공우주학개론"]);
+    expect((await req("/api/tasks", "GET")).body).toEqual([]);
+
+    await req("/api/studies", "POST", { course: "항공우주학개론", title: "1장" }); // written again → back on the tab
+    expect((await req("/api/studies", "GET")).body.hidden).toEqual(["부경인성세미나"]);
+  } finally {
+    cleanup();
+  }
+});
+
 test("나중에 할 일: 마감일이 되면 오늘 할 일로 옮겨지고, 날짜 없는 것·끝낸 것·아직 먼 것은 그대로", async () => {
   let clock = new Date("2026-11-22T14:59:00Z"); // 11-22 23:59 KST
   const { call, db, cleanup } = makeApp({ googleEnabled: false, now: () => clock });
