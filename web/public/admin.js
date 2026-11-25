@@ -641,6 +641,14 @@ function openTaskDialog(t = null) {
   $("task-dialog").showModal();
 }
 
+// 지난 일을 모두 오늘 날짜로 옮긴다(시간은 그대로). 노트에서 온 할 일도 노트 쪽 날짜가 같이 바뀌도록 하나씩 고친다.
+async function moveOverdueToToday(tasks, date) {
+  if (!confirm(`지난 일 ${tasks.length}개의 날짜를 오늘로 바꿀까요?`)) return;
+  for (const t of tasks) await call(`/api/tasks/${t.id}`, { method: "PATCH", body: { due_date: date } });
+}
+const overdueBtn = (tasks, date, reload) =>
+  el("button", { className: "btn sm", type: "button", onclick: () => moveOverdueToToday(tasks, date).then(reload, (e) => (showError(e), reload())) }, "지난 일 모두 오늘로");
+
 async function loadToday() {
   const t = await call("/api/today");
   const reload = () => loadToday().catch(showError);
@@ -666,7 +674,10 @@ async function loadToday() {
     .filter(([, items]) => items.length);
   $("today-list").replaceChildren(
     ...(sections.length
-      ? sections.flatMap(([title, items, make]) => [el("tr", { className: "group-row" }, el("td", { colSpan: 6, textContent: `${title} · ${items.length}` })), ...items.map(make)])
+      ? sections.flatMap(([title, items, make]) => [
+          el("tr", { className: "group-row" }, el("td", { colSpan: 6 }, `${title} · ${items.length}`, title === "지난 일" ? overdueBtn(t.overdue, t.date, reload) : null)),
+          ...items.map(make),
+        ])
       : [emptyRow(6, "오늘 할 일이 없습니다.")]),
   );
 }
@@ -687,6 +698,7 @@ async function loadTasks() {
     stat("남은 과제", String(left("과제")), `3일 안 마감 ${today.upcoming.length}개`),
     stat("지난 일", String(today.overdue.length), "", today.overdue.length > 0),
   );
+  $("task-overdue").replaceChildren(...(today.overdue.length ? [overdueBtn(today.overdue, today.date, reload)] : []));
   const q = searchText();
   const shown = tasks.filter((x) => matches(x, q) && (taskCategory() === "*" || x.category === taskCategory()));
   // One group per category, in the fixed order, 분류 없음 last.
