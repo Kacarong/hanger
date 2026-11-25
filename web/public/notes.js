@@ -23,7 +23,6 @@ const EXTRA = [
   { action: "table", label: "표", keys: "table 표" },
 ];
 const TEXT_TYPES = ["p", "h1", "h2", "h3", "todo", "bullet", "number", "quote", "toggle", "callout", "code"];
-const RICH_TYPES = TEXT_TYPES.filter((t) => t !== "code");
 const LIST_TYPES = ["todo", "bullet", "number", "toggle"]; // Enter continues these
 const PLACEHOLDER = { p: "", h1: "제목 1", h2: "제목 2", h3: "제목 3", todo: "할 일", bullet: "목록", number: "목록", quote: "인용", code: "코드", toggle: "토글", callout: "콜아웃", equation: "수식 (LaTeX)" };
 export const COLORS = [

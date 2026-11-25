@@ -158,9 +158,6 @@ export function createApp(cfg: AppConfig, db: Db, google: Google) {
 
   const now = cfg.now ?? (() => new Date());
   const today = () => seoulDate(now());
-  // Password login is gone: log out devices still signed in with it, and drop the old hash.
-  db.raw.query("DELETE FROM sessions WHERE email = 'password'").run();
-  db.raw.query("DELETE FROM settings WHERE key = 'password_hash'").run();
 
   // Links Notion can show a 파일함 file from (a block made here points at one): /f/<id>/<signature>/<name>.
   // Only someone with the link can open that file; other files stay private.
@@ -725,23 +722,15 @@ ${body || `<section class="works"><p class="empty reveal">${mine ? "아직 포�
       return json(db.listTasks({ done: done === null ? undefined : done === "1", from, to, kind: q.get("kind") ?? undefined }));
     }
 
-    // exam_id adds a day to that exam's study plan: kind 공부, the exam's course.
     if (path === "/api/tasks" && method === "POST") {
-      const b = await body(req);
-      const f = taskFields(b);
+      const f = taskFields(await body(req));
       if (typeof f === "string") return json({ error: f }, 400);
       if (!f.title) return json({ error: "제목을 입력해 주세요" }, 400);
-      const exam = b.exam_id === undefined || b.exam_id === null ? null : db.getExam(Number(b.exam_id));
-      if (b.exam_id !== undefined && b.exam_id !== null && !exam) return json({ error: "시험을 찾을 수 없습니다" }, 404);
-      const plan = exam ? { kind: "공부", course: exam.course, exam_id: exam.id } : {};
-      return json(db.insertTask({ kind: "할 일", category: "", course: "", due_date: null, due_time: null, note: "", ...f, title: f.title, ...plan }), 201);
+      return json(db.insertTask({ kind: "할 일", category: "", course: "", due_date: null, due_time: null, note: "", ...f, title: f.title }), 201);
     }
 
-    // 시험: every exam with its study plan (soonest exam first; the client splits off past ones).
-    if (path === "/api/exams" && method === "GET") {
-      const plan = db.listTasks({ planned: true });
-      return json({ date: today(), exams: db.listExams().map((e) => ({ ...e, plan: plan.filter((t) => t.exam_id === e.id) })) });
-    }
+    // 시험: every exam (soonest first; the client splits off past ones).
+    if (path === "/api/exams" && method === "GET") return json({ date: today(), exams: db.listExams() });
 
     if (path === "/api/exams" && method === "POST") {
       const f = examFields(await body(req));

@@ -42,10 +42,8 @@ export type TaskRow = {
   created_at: string;
   note_id: number | null; // set when the task is a dated checkbox inside a note
   block_id: string | null;
-  exam_id: number | null; // set when the task is a day of an exam's study plan (kind 공부)
   study_id: number | null; // set when the task is a 공부 tab entry whose day has come (see queueStudies)
   note_title?: string | null; // joined in by listTasks/getTask
-  exam_title?: string | null; // joined in by listTasks/getTask
   files?: number; // how many cloud files are attached, joined in by listTasks/getTask
 };
 
@@ -54,8 +52,7 @@ export const TASK_KINDS = ["할 일", "과제", "공부"];
 export const TASK_CATEGORIES = ["오늘 할 일", "꾸준히 할 일", "나중에 할 일"];
 export type TaskFields = Pick<TaskRow, "kind" | "category" | "title" | "course" | "due_date" | "due_time" | "note">;
 
-// An exam on the 시험 tab. Its study plan is tasks with exam_id (kind 공부), so each day of the plan
-// shows up on the today screen and the calendar like any task.
+// An exam on the 시험 tab.
 export type ExamRow = {
   id: number;
   title: string;
@@ -297,7 +294,6 @@ export function openDb(path: string) {
   const taskCols = (db.query("PRAGMA table_info(tasks)").all() as { name: string }[]).map((c) => c.name);
   if (!taskCols.includes("note_id")) db.exec("ALTER TABLE tasks ADD COLUMN note_id INTEGER; ALTER TABLE tasks ADD COLUMN block_id TEXT;");
   db.exec("CREATE INDEX IF NOT EXISTS tasks_note ON tasks (note_id)");
-  if (!taskCols.includes("exam_id")) db.exec("ALTER TABLE tasks ADD COLUMN exam_id INTEGER");
   if (!taskCols.includes("category")) db.exec("ALTER TABLE tasks ADD COLUMN category TEXT NOT NULL DEFAULT ''");
   const examCols = (db.query("PRAGMA table_info(exams)").all() as { name: string }[]).map((c) => c.name);
   if (!examCols.includes("color")) db.exec("ALTER TABLE exams ADD COLUMN color TEXT NOT NULL DEFAULT ''");
@@ -326,11 +322,6 @@ export function openDb(path: string) {
     })();
   }
   db.exec(`
-    CREATE INDEX IF NOT EXISTS tasks_exam ON tasks (exam_id);
-    -- An exam takes its study plan with it.
-    CREATE TRIGGER IF NOT EXISTS tasks_exam_gone AFTER DELETE ON exams BEGIN
-      DELETE FROM tasks WHERE exam_id = old.id;
-    END;
     CREATE INDEX IF NOT EXISTS tasks_study ON tasks (study_id);
     CREATE TRIGGER IF NOT EXISTS tasks_study_gone AFTER DELETE ON studies BEGIN
       DELETE FROM tasks WHERE study_id = old.id;
@@ -392,8 +383,13 @@ export function openDb(path: string) {
   if (!pfItemCols.includes("note_id")) db.exec("ALTER TABLE portfolio_items ADD COLUMN note_id INTEGER");
   const pfSectionCols = (db.query("PRAGMA table_info(portfolio_sections)").all() as { name: string }[]).map((c) => c.name);
   if (!pfSectionCols.includes("layout")) db.exec("ALTER TABLE portfolio_sections ADD COLUMN layout TEXT NOT NULL DEFAULT 'cards'");
-  // Tasks and exams this site put in the owner's Google Calendar (key "task:<id>" / "exam:<id>").
-  // hash: the event body last sent, so only changed items are sent again.
+  // Left over from removed features: the exam study plan (tasks.exam_id), sending tasks and exams to Google Calendar
+  // (gcal_links, gcal_push*) and the 공부 tab's period (study_range). The index and trigger go before the column.
+  db.exec(`
+    DROP TRIGGER IF EXISTS tasks_exam_gone; DROP INDEX IF EXISTS tasks_exam; DROP TABLE IF EXISTS gcal_links;
+    DELETE FROM settings WHERE key IN ('gcal_push', 'gcal_push_error', 'study_range');
+  `);
+  if (taskCols.includes("exam_id")) db.exec("ALTER TABLE tasks DROP COLUMN exam_id");
   // Notifications: the devices that get Web Push, what was sent (also read by pages that show notifications themselves,
   // like the PC program), and which scheduled ones went out already.
   db.exec(`
@@ -408,9 +404,9 @@ export function openDb(path: string) {
       db.query("INSERT INTO settings (key, value) VALUES ('portfolio_seeded', '1')").run();
     })();
   }
-  const TASK_SELECT = `SELECT tasks.*, notes.title AS note_title, exams.title AS exam_title,
+  const TASK_SELECT = `SELECT tasks.*, notes.title AS note_title,
     (SELECT COUNT(*) FROM attachments WHERE target = 'task' AND target_id = tasks.id) AS files
-    FROM tasks LEFT JOIN notes ON notes.id = tasks.note_id LEFT JOIN exams ON exams.id = tasks.exam_id`;
+    FROM tasks LEFT JOIN notes ON notes.id = tasks.note_id`;
   const TASK_ORDER = "ORDER BY due_date IS NULL, due_date, due_time IS NULL, due_time, tasks.id";
   const notionRow = (r: NotionPageRecord): NotionPageRow => ({ ...r, kids: JSON.parse(r.kids), snapshot: r.snapshot ? JSON.parse(r.snapshot) : null, props: JSON.parse(r.props) });
   function getNote(id: number): NoteRow | null {
@@ -563,10 +559,9 @@ export function openDb(path: string) {
       return files;
     }),
     // from/to are inclusive YYYY-MM-DD bounds on due_date; a bound excludes undated tasks.
-    listTasks(opts: { done?: boolean; from?: string; to?: string; kind?: string; doneOn?: string; planned?: boolean }): TaskRow[] {
+    listTasks(opts: { done?: boolean; from?: string; to?: string; kind?: string; doneOn?: string }): TaskRow[] {
       const where: string[] = [];
       const args: (string | number)[] = [];
-      if (opts.planned) where.push("exam_id IS NOT NULL");
       if (opts.done !== undefined) {
         where.push("done = ?");
         args.push(opts.done ? 1 : 0);
@@ -593,9 +588,9 @@ export function openDb(path: string) {
     getTask(id: number): TaskRow | null {
       return db.query(`${TASK_SELECT} WHERE tasks.id = ?`).get(id) as TaskRow | null;
     },
-    insertTask(t: TaskFields & { exam_id?: number | null }): TaskRow {
+    insertTask(t: TaskFields): TaskRow {
       const id = (
-        db.query("INSERT INTO tasks (kind, category, title, course, due_date, due_time, note, exam_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id").get(t.kind, t.category, t.title, t.course, t.due_date, t.due_time, t.note, t.exam_id ?? null) as { id: number }
+        db.query("INSERT INTO tasks (kind, category, title, course, due_date, due_time, note) VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id").get(t.kind, t.category, t.title, t.course, t.due_date, t.due_time, t.note) as { id: number }
       ).id;
       return db.query(`${TASK_SELECT} WHERE tasks.id = ?`).get(id) as TaskRow;
     },
@@ -619,15 +614,13 @@ export function openDb(path: string) {
     insertExam(e: ExamFields): ExamRow {
       return db.query("INSERT INTO exams (title, course, date, time, place, scope, note, color) VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING *").get(e.title, e.course, e.date, e.time, e.place, e.scope, e.note, e.color) as ExamRow;
     },
-    // The study plan follows the exam's course.
-    updateExam: db.transaction((id: number, patch: Partial<ExamFields>) => {
+    updateExam(id: number, patch: Partial<ExamFields>) {
       const keys = Object.keys(patch) as (keyof typeof patch)[];
       if (!keys.length) return;
       db.query(`UPDATE exams SET ${keys.map((k) => `${k} = ?`).join(", ")} WHERE id = ?`).run(...keys.map((k) => patch[k] ?? null), id);
-      if (patch.course !== undefined) db.query("UPDATE tasks SET course = ? WHERE exam_id = ?").run(patch.course, id);
-    }),
+    },
     deleteExam(id: number) {
-      db.query("DELETE FROM exams WHERE id = ?").run(id); // its plan goes by trigger
+      db.query("DELETE FROM exams WHERE id = ?").run(id);
     },
     listExpenses(): ExpenseRow[] {
       return db.query("SELECT * FROM expenses ORDER BY id").all() as ExpenseRow[];

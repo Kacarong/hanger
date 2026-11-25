@@ -16,7 +16,6 @@ const ICONS = {
   folder: '<path d="M3 6.5A1.5 1.5 0 0 1 4.5 5H9l2 2.5h8.5A1.5 1.5 0 0 1 21 9v9.5a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 18.5z"/>',
   globe: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.7 3.8 5.7 3.8 9s-1.3 6.3-3.8 9c-2.5-2.7-3.8-5.7-3.8-9S9.5 5.7 12 3z"/>',
   logout: '<path d="M15 4h4v16h-4M10 8l-4 4 4 4M6 12h10"/>',
-  key: '<circle cx="8" cy="15" r="4"/><path d="m11 12 9-9M16 7l3 3M14 9l2 2"/>',
   search: '<circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>',
   plus: '<path d="M12 5v14M5 12h14"/>',
   upload: '<path d="M12 15V4M7 9l5-5 5 5M4 15v4a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-4"/>',
@@ -604,7 +603,6 @@ function taskRow(t, today, reload, withActions) {
       t.files ? el("span", { className: "clip", title: `첨부 파일 ${t.files}개` }, icon("clip"), String(t.files)) : null,
       t.note ? el("span", { className: "sub", textContent: t.note }) : null,
       t.note_id ? el("span", { className: "sub" }, el("a", { href: `#notes/${t.note_id}`, textContent: `노트 · ${t.note_title || "제목 없음"}` })) : null,
-      t.exam_id ? el("span", { className: "sub" }, el("a", { href: "#exams", textContent: `시험 · ${t.exam_title}` })) : null,
       t.study_id ? el("span", { className: "sub" }, el("a", { href: "#studies", textContent: t.course ? `공부 · ${t.course}` : "공부" })) : null,
     ),
     el("td", { className: "hide-sm" }, pill(t.kind, t.kind === "과제" ? "blue" : t.kind === "공부" ? "amber" : "gray")),
@@ -628,14 +626,14 @@ const TODAY_CATEGORY = "오늘 할 일"; // 고르면 날짜가 오늘로 채워
 const STEADY_CATEGORY = "꾸준히 할 일"; // 고르면 날짜·시간 칸이 숨는다
 const syncTaskWhen = () => ($("task-when").hidden = $("task-category").value === STEADY_CATEGORY);
 let editingTask = null;
-function openTaskDialog(t = null, date = "") {
+function openTaskDialog(t = null) {
   editingTask = t;
   $("task-dialog-title").textContent = t ? "할 일 수정" : "새 할 일";
   $("task-kind").value = t?.kind ?? taskKinds[0];
   // A new task from the 할 일·과제 tab starts in the category shown there.
   $("task-category").value = t ? t.category : currentTab() === "tasks" && taskCategory() !== "*" ? taskCategory() : "";
   $("task-title").value = t?.title ?? "";
-  $("task-date").value = t?.due_date ?? (date || ($("task-category").value === TODAY_CATEGORY ? seoulToday() : ""));
+  $("task-date").value = t?.due_date ?? ($("task-category").value === TODAY_CATEGORY ? seoulToday() : "");
   $("task-time").value = t?.due_time ?? "";
   $("task-note").value = t?.note ?? "";
   syncTaskWhen();
@@ -997,8 +995,7 @@ function eventItem(e, day) {
   );
 }
 
-// 시험: 시험마다 일정(날짜·시간·장소·범위)과 날짜별 공부 계획. 공부 계획 하나하나는 할 일(종류 "공부")이라
-// 오늘 화면에도 나오고, 거기서 체크해도 여기에 반영된다.
+// 시험: 시험마다 일정(날짜·시간·장소·범위).
 const weekday = (d) => "일월화수목금토"[new Date(d + "T00:00:00Z").getUTCDay()];
 const dday = (today, date) => {
   const n = daysBetween(today, date);

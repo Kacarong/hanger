@@ -262,10 +262,8 @@ export function createGoogle(cfg: GoogleConfig, db: Db) {
       const res = await api(`${eventPath(calendarId)}?fields=id`, { method: "POST", headers: { "Content-Type": "application/json" }, body: withoutNulls(body) }, "구글 일정 만들기");
       return ((await res.json()) as { id: string }).id;
     },
-    // Returns the event's status after the change: "cancelled" means it was deleted in Google (PATCH still works on those).
-    async patchEvent(calendarId: string, eventId: string, body: EventBody): Promise<string> {
-      const res = await api(`${eventPath(calendarId, eventId)}?fields=id,status`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }, "구글 일정 고치기");
-      return ((await res.json()) as { status?: string }).status ?? "confirmed";
+    async patchEvent(calendarId: string, eventId: string, body: EventBody) {
+      await api(`${eventPath(calendarId, eventId)}?fields=id`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }, "구글 일정 고치기");
     },
     async deleteEvent(calendarId: string, eventId: string) {
       await api(eventPath(calendarId, eventId), { method: "DELETE" }, "구글 일정 지우기");

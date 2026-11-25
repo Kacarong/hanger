@@ -235,9 +235,7 @@ function makeApp(opts: { googleEnabled?: boolean; now?: () => Date; notionApi?: 
   };
   const fetch = start();
   const call = caller(fetch);
-  // The same data with a freshly started app, like a server restart.
-  const reopen = () => caller(start());
-  return { call, db, reopen, notion: fetch.notion, notifier: fetch.notifier, backup: fetch.backup, moveNotionCopies: fetch.moveNotionCopies, cleanup: () => rmSync(dataDir, { recursive: true, force: true }) };
+  return { call, db, notion: fetch.notion, notifier: fetch.notifier, backup: fetch.backup, moveNotionCopies: fetch.moveNotionCopies, cleanup: () => rmSync(dataDir, { recursive: true, force: true }) };
 }
 
 async function login(call: ReturnType<typeof makeApp>["call"], code = "good-code") {
@@ -487,31 +485,25 @@ test("첫 업로드를 동시에 여러 개 시작해도 드라이브 폴더는 
 const JSON_ORIGIN = { "Content-Type": "application/json", Origin: "https://kacarong.kr" };
 
 // A signed-in owner, as a Google login leaves it (the login itself is tested with login() above).
-function ownerSession(db: ReturnType<typeof makeApp>["db"], subject = "owner@example.com") {
+function ownerSession(db: ReturnType<typeof makeApp>["db"]) {
   const sid = crypto.randomUUID();
-  db.createSession(sid, subject, Date.now() + 86400_000);
+  db.createSession(sid, "owner@example.com", Date.now() + 86400_000);
   return `sid=${sid}`;
 }
 
-test("로그인은 구글뿐: 비밀번호 로그인 없음, 예전 비밀번호 로그인은 서버가 뜰 때 풀림, 로그아웃", async () => {
-  const { call, db, reopen, cleanup } = makeApp();
+test("로그인은 구글뿐: 비밀번호 로그인 없음, 로그아웃", async () => {
+  const { call, db, cleanup } = makeApp();
   try {
     const pw = await call("/auth/password", { method: "POST", headers: JSON_ORIGIN, body: JSON.stringify({ password: "correct horse battery" }) });
     expect(pw.status).toBe(404);
     expect(pw.headers.getSetCookie().some((c) => c.startsWith("sid="))).toBe(false);
     expect(await (await call("/api/me")).json()).toMatchObject({ admin: false, googleEnabled: true });
 
-    // Before this change: a device signed in with the password, and the hash in settings.
-    const old = ownerSession(db, "password");
     const google = ownerSession(db);
-    db.setSetting("password_hash", "old-hash");
-    const call2 = reopen(); // the server starts again with the new code
-    expect((await call2("/api/tasks", { cookie: old })).status).toBe(401);
-    expect(db.getSetting("password_hash")).toBeNull();
-    expect((await call2("/api/tasks", { cookie: google })).status).toBe(200);
+    expect((await call("/api/tasks", { cookie: google })).status).toBe(200);
 
-    expect((await call2("/auth/logout", { method: "POST", cookie: google })).status).toBe(204);
-    expect(await (await call2("/api/me", { cookie: google })).json()).toMatchObject({ admin: false });
+    expect((await call("/auth/logout", { method: "POST", cookie: google })).status).toBe(204);
+    expect(await (await call("/api/me", { cookie: google })).json()).toMatchObject({ admin: false });
   } finally {
     cleanup();
   }
@@ -1309,7 +1301,7 @@ test("예전 노션 사본은 드라이브에서도 클라우드 폴더 밖(노�
   }
 });
 
-test("시험: 일정 → 날짜별 공부 계획(오늘·캘린더·할 일에도) → 과목을 바꾸면 계획도 → 시험을 지우면 계획도", async () => {
+test("시험: 일정 적기·고치기·지우기, 오늘 화면에는 2주 안 시험만, 캘린더에는 안 나옴", async () => {
   const { call, db, cleanup } = makeApp({ googleEnabled: false, now: () => new Date("2026-11-20T03:00:00Z") });
   try {
     const cookie = ownerSession(db);
@@ -1328,32 +1320,17 @@ test("시험: 일정 → 날짜별 공부 계획(오늘·캘린더·할 일에�
     expect((await req("/api/exams", "POST", { title: "x", date: "2026-02-30" })).status).toBe(400);
     expect((await req("/api/exams", "POST", { title: "x", time: "24:00" })).status).toBe(400);
 
-    // A study plan day is a task of kind 공부 with the exam's course.
-    const day1 = (await req("/api/tasks", "POST", { exam_id: mid.id, title: "1장 복습", due_date: "2026-11-20" })).body;
-    const day2 = (await req("/api/tasks", "POST", { exam_id: mid.id, title: "2장 문제풀이", due_date: "2026-11-21", kind: "할 일" })).body;
-    expect(day1).toMatchObject({ kind: "공부", course: "토질역학", exam_id: mid.id, exam_title: "토질역학 중간고사" });
-    expect(day2).toMatchObject({ kind: "공부" });
-    expect((await req("/api/tasks", "POST", { exam_id: 9999, title: "x" })).status).toBe(404);
-
     let list = (await req("/api/exams", "GET")).body;
     expect(list.date).toBe("2026-11-20");
     expect(list.exams.map((e: any) => e.title)).toEqual(["지난 퀴즈", "토질역학 중간고사", "토익", "날짜 미정 시험"]);
-    expect(list.exams[1].plan.map((t: any) => t.title)).toEqual(["1장 복습", "2장 문제풀이"]);
 
-    // The today screen shows today's plan day and exams within two weeks; the calendar shows neither.
-    const today = (await req("/api/today", "GET")).body;
-    expect(today.today.map((t: any) => t.title)).toEqual(["1장 복습"]);
-    expect(today.exams.map((e: any) => e.title)).toEqual(["토질역학 중간고사"]);
+    // The today screen counts exams within two weeks; the calendar shows none.
+    expect((await req("/api/today", "GET")).body.exams.map((e: any) => e.title)).toEqual(["토질역학 중간고사"]);
     const cal = (await req("/api/calendar?from=2026-11-01&to=2026-11-30", "GET")).body;
     expect(cal.exams).toBeUndefined();
     expect(cal.tasks).toBeUndefined();
 
-    // Checked off from the today screen, it is done on the 시험 tab too.
-    await req(`/api/tasks/${day1.id}`, "PATCH", { done: true });
-    expect((await req("/api/exams", "GET")).body.exams[1].plan[0]).toMatchObject({ done: 1, done_at: "2026-11-20" });
-
     expect((await req(`/api/exams/${mid.id}`, "PATCH", { course: "토질역학1", date: "2026-12-01", time: "" })).body).toMatchObject({ course: "토질역학1", date: "2026-12-01", time: null, title: "토질역학 중간고사" });
-    expect(db.getTask(day2.id)).toMatchObject({ course: "토질역학1" });
     expect((await req(`/api/exams/${mid.id}`, "PATCH", { title: " " })).status).toBe(400);
     expect((await req("/api/exams/9999", "PATCH", { title: "x" })).status).toBe(404);
     // Card color: starts with none, takes one of the fixed colors, nothing else.
@@ -1364,7 +1341,6 @@ test("시험: 일정 → 날짜별 공부 계획(오늘·캘린더·할 일에�
     expect((await req(`/api/exams/${mid.id}`, "PATCH", { color: "" })).body).toMatchObject({ color: "" });
 
     expect((await req(`/api/exams/${mid.id}`, "DELETE")).status).toBe(200);
-    expect([db.getTask(day1.id), db.getTask(day2.id)]).toEqual([null, null]);
     list = (await req("/api/exams", "GET")).body;
     expect(list.exams.map((e: any) => e.title)).toEqual(["지난 퀴즈", "토익", "날짜 미정 시험"]);
   } finally {
@@ -1545,6 +1521,43 @@ test("공부 날짜가 꼭 있어야 하던 DB를 열면 공부는 그대로, �
     expect(db.insertStudy({ date: null, course: "구조역학", title: "4장" }, "2026-11-24")).toMatchObject({ id: 2, date: null, queued: 0 });
     db.deleteStudy(1);
     expect(db.listTasks({}).length).toBe(0);
+    db.raw.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("없앤 기능이 남긴 것(시험 공부 계획 칸, 구글로 보내기 표·설정, 공부 기간)은 DB를 열 때 치우고, 할 일·시험·다른 설정은 그대로", () => {
+  const dir = mkdtempSync(join(tmpdir(), "folio-test-"));
+  try {
+    const path = join(dir, "old.db");
+    let db = openDb(path);
+    // What the old code left: a plan day tied to an exam, its index and trigger, the push table and settings.
+    db.raw.exec(`
+      ALTER TABLE tasks ADD COLUMN exam_id INTEGER;
+      CREATE INDEX tasks_exam ON tasks (exam_id);
+      CREATE TRIGGER tasks_exam_gone AFTER DELETE ON exams BEGIN DELETE FROM tasks WHERE exam_id = old.id; END;
+      CREATE TABLE gcal_links (key TEXT PRIMARY KEY, event_id TEXT NOT NULL, hash TEXT NOT NULL);
+      INSERT INTO settings (key, value) VALUES ('gcal_push_error', ''), ('study_range', '{"from":"2026-11-23","to":"2026-12-17"}'), ('backup_last', '2026-11-25');
+    `);
+    const exam = db.insertExam({ title: "중간고사", course: "토질역학", date: "2026-11-30", time: null, place: "", scope: "", note: "", color: "" });
+    const task = db.insertTask({ kind: "공부", category: "", title: "1장 복습", course: "토질역학", due_date: "2026-11-20", due_time: null, note: "" });
+    db.raw.query("UPDATE tasks SET exam_id = ? WHERE id = ?").run(exam.id, task.id);
+    db.raw.close();
+
+    db = openDb(path);
+    const objects = (db.raw.query("SELECT name FROM sqlite_master").all() as { name: string }[]).map((o) => o.name);
+    expect(objects).not.toContain("gcal_links");
+    expect(objects).not.toContain("tasks_exam");
+    expect(objects).not.toContain("tasks_exam_gone");
+    expect((db.raw.query("PRAGMA table_info(tasks)").all() as { name: string }[]).map((c) => c.name)).not.toContain("exam_id");
+    expect([db.getSetting("gcal_push_error"), db.getSetting("study_range"), db.getSetting("backup_last")]).toEqual([null, null, "2026-11-25"]);
+    expect(db.getTask(task.id)).toMatchObject({ title: "1장 복습", course: "토질역학", due_date: "2026-11-20" });
+    db.deleteExam(exam.id); // the task no longer goes with the exam
+    expect(db.getTask(task.id)).not.toBeNull();
+    db.raw.close();
+    db = openDb(path); // opening again leaves it as it is
+    expect(db.getTask(task.id)).not.toBeNull();
     db.raw.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });
