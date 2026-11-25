@@ -1244,9 +1244,12 @@ const tauriNotify = window.__TAURI__?.notification ?? null;
 const pushSupported = () => !tauriNotify && "serviceWorker" in navigator && "PushManager" in window && "Notification" in window;
 const notifyMode = () => storage(() => localStorage.getItem("notifyMode")) || "";
 let notifyPoll = null;
+// 서비스 워커 범위는 /admin: 안드로이드 크롬은 이 범위 주소를 여는 앱(TWA, /admin 만 맡음)이 있을 때만
+// 알림을 그 앱 이름으로 넘긴다. 범위가 / 면 크롬 이름으로 떠서 크롬 알림을 끈 휴대폰에서는 사라진다.
+const SW_SCOPE = "/admin";
 
 async function pushSubscription() {
-  const reg = await navigator.serviceWorker.getRegistration("/");
+  const reg = await navigator.serviceWorker.getRegistration(SW_SCOPE);
   return reg ? reg.pushManager.getSubscription() : null;
 }
 
@@ -1289,7 +1292,7 @@ async function notifyOn() {
   if (pushSupported()) {
     try {
       const { publicKey } = await call("/api/notify");
-      const reg = await navigator.serviceWorker.register("/sw.js", { scope: "/" });
+      const reg = await navigator.serviceWorker.register("/sw.js", { scope: SW_SCOPE });
       await navigator.serviceWorker.ready;
       const sub = (await reg.pushManager.getSubscription()) ?? (await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: publicKey }));
       await call("/api/push/subscribe", { method: "POST", body: sub.toJSON() });
