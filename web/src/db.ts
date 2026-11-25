@@ -478,9 +478,6 @@ export function openDb(path: string) {
     createSession(id: string, email: string, expiresAt: number) {
       db.query("INSERT INTO sessions (id, email, expires_at) VALUES (?, ?, ?)").run(id, email, expiresAt);
     },
-    deleteOtherSessions(keepId: string) {
-      db.query("DELETE FROM sessions WHERE id != ?").run(keepId);
-    },
     deleteExpiredSessions() {
       db.query("DELETE FROM sessions WHERE expires_at <= ?").run(Date.now());
     },

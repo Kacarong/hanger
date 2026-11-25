@@ -47,10 +47,7 @@ input[type="checkbox"]:disabled { opacity: .5; cursor: default; }
 .login-card { width: min(360px, 100%); padding: 28px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); }
 .login-card h1 { margin: 16px 0 4px; font-size: 18px; font-weight: 600; }
 .login-card p { margin: 0 0 20px; color: var(--muted); }
-.login-card form { display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; }
-.login-card .btn { justify-content: center; height: 34px; }
-.login-card .google { display: block; margin-top: 12px; text-align: center; color: var(--muted); }
-.login-card .google:hover { color: var(--fg); }
+.login-card .btn { display: flex; justify-content: center; height: 34px; }
 
 /* 레이아웃 */
 .app { display: grid; grid-template-columns: 232px 1fr; height: 100vh; padding: 10px; gap: 0; }

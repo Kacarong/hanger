@@ -9,20 +9,17 @@ import { eventWhen } from "./gcal";
 import { GoogleError, type CalendarEvent, type EventBody, type Google } from "./google";
 import { createNotifier } from "./notify";
 import { createNotionSync, NotionError } from "./notion";
-import { passwordProblem } from "./password";
 
 export const MAX_FILE_SIZE = 1024 ** 3; // files must be under 1GB
 const SESSION_DAYS = 30;
 const CALENDAR_MAX_DAYS = 62; // longest range /api/calendar serves (a 6-week month grid is 42)
 const UPCOMING_DAYS = 3; // 과제 due within this many days show up on the today screen
 const EXAM_DAYS = 14; // exams within this many days show up on the today screen
-const LOGIN_FAIL_LIMIT = 5; // password failures allowed per LOGIN_FAIL_WINDOW
-const LOGIN_FAIL_WINDOW = 15 * 60_000;
 const PUBLIC_DIR = join(import.meta.dir, "..", "public");
 
 export type AppConfig = {
   baseUrl: string; // e.g. https://kacarong.kr
-  adminEmail: string; // only used by Google login
+  adminEmail: string; // the only account that can log in (Google)
   dataDir: string;
   googleEnabled: boolean; // false until the OAuth client is configured
   notionApi?: string; // https://api.notion.com unless a test points elsewhere
@@ -144,8 +141,7 @@ export function createApp(cfg: AppConfig, db: Db, google: Google) {
     return `${name}=${encodeURIComponent(value)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAgeSec}${secure}`;
   }
 
-  // Sessions are only ever created for the owner (password or the admin Google account).
-  // The subject is "password" or the Google email.
+  // Sessions are only ever created for the owner: the admin Google account, whose email is the subject.
   function session(req: Request): { id: string; subject: string } | null {
     const sid = cookies(req).sid;
     const s = sid ? db.getSession(sid) : null;
@@ -162,7 +158,9 @@ export function createApp(cfg: AppConfig, db: Db, google: Google) {
 
   const now = cfg.now ?? (() => new Date());
   const today = () => seoulDate(now());
-  let loginFailures: number[] = [];
+  // Password login is gone: log out devices still signed in with it, and drop the old hash.
+  db.raw.query("DELETE FROM sessions WHERE email = 'password'").run();
+  db.raw.query("DELETE FROM settings WHERE key = 'password_hash'").run();
 
   // Links Notion can show a 파일함 file from (a block made here points at one): /f/<id>/<signature>/<name>.
   // Only someone with the link can open that file; other files stay private.
@@ -593,7 +591,6 @@ ${body || `<section class="works"><p class="empty reveal">${mine ? "아직 포�
       const s = session(req);
       return json({
         admin: !!s,
-        loginMethod: s ? (s.subject === "password" ? "password" : "google") : null,
         googleEnabled: cfg.googleEnabled,
         driveConnected: !!db.getSetting("refresh_token"),
         calendarConnected: !!db.getSetting("refresh_token") && google.calendarGranted(),
@@ -610,28 +607,6 @@ ${body || `<section class="works"><p class="empty reveal">${mine ? "아직 포�
     // Browsers always send Origin on POST/PATCH/DELETE from fetch.
     if (method !== "GET" && req.headers.get("Origin") !== origin) {
       return json({ error: "잘못된 요청 출처" }, 403);
-    }
-
-    // Changing the password logs out every other session. A password session must prove the
-    // current password; a Google session already proved who it is.
-    if (path === "/api/password" && method === "POST") {
-      const hashBefore = db.getSetting("password_hash"); // read before any await, see the re-check below
-      const b = await body(req);
-      const next = typeof b.password === "string" ? b.password : "";
-      const problem = passwordProblem(next);
-      if (problem) return json({ error: problem }, 400);
-      if (s.subject === "password") {
-        const current = typeof b.current === "string" ? b.current : "";
-        if (!hashBefore || !current || !(await Bun.password.verify(current, hashBefore))) return json({ error: "지금 비밀번호가 틀렸습니다" }, 403);
-      }
-      const newHash = await Bun.password.hash(next);
-      // While we were hashing, another device may have changed the password and logged this one out.
-      // Check again and write with no await in between, so a stale request can't undo that change.
-      if (!db.getSession(s.id)) return json({ error: "로그인이 풀렸습니다. 다시 로그인해 주세요." }, 401);
-      if (db.getSetting("password_hash") !== hashBefore) return json({ error: "다른 곳에서 비밀번호가 방금 바뀌었습니다. 다시 시도해 주세요." }, 409);
-      db.setSetting("password_hash", newHash);
-      db.deleteOtherSessions(s.id);
-      return json({ ok: true });
     }
 
     if (path === "/api/today" && method === "GET") {
@@ -1347,32 +1322,6 @@ ${body || `<section class="works"><p class="empty reveal">${mine ? "아직 포�
       if (!/^[\w-][\w.-]*(\/[\w-][\w.-]*)*$/.test(name)) return new Response("not found", { status: 404 });
       const file = Bun.file(join(PUBLIC_DIR, name));
       return (await file.exists()) ? new Response(file) : new Response("not found", { status: 404 });
-    }
-
-    if (path === "/auth/password" && req.method === "POST") {
-      if (req.headers.get("Origin") !== origin) return json({ error: "잘못된 요청 출처" }, 403);
-      const t = Date.now();
-      loginFailures = loginFailures.filter((x) => x > t - LOGIN_FAIL_WINDOW);
-      if (loginFailures.length >= LOGIN_FAIL_LIMIT) return json({ error: "비밀번호를 여러 번 틀렸습니다. 15분 뒤에 다시 시도해 주세요." }, 429);
-      // Count the attempt as a failure before any await, so parallel requests can't all slip past the limit.
-      loginFailures.push(t);
-      const hash = db.getSetting("password_hash");
-      const password = (await body(req)).password;
-      if (!hash || typeof password !== "string" || !password || !(await Bun.password.verify(password, hash))) {
-        return json({ error: hash ? "비밀번호가 틀렸습니다" : "비밀번호가 아직 설정되지 않았습니다" }, 401);
-      }
-      // Right password, but one that is public or too short (the old default): don't let it in.
-      if (passwordProblem(password)) {
-        const how = cfg.googleEnabled ? "구글 계정으로 로그인한 뒤 왼쪽 아래 \"비밀번호 바꾸기\"에서" : "서버에서 bun run set-password로";
-        return json({ error: `이 비밀번호는 안전하지 않아 더는 쓸 수 없습니다. ${how} 새 비밀번호를 정해 주세요.` }, 403);
-      }
-      // The password may have been changed while we were verifying; the old one must not open a session.
-      if (db.getSetting("password_hash") !== hash) return json({ error: "비밀번호가 방금 바뀌었습니다. 새 비밀번호로 로그인해 주세요." }, 401);
-      const i = loginFailures.indexOf(t);
-      if (i >= 0) loginFailures.splice(i, 1); // it succeeded after all
-      const headers = new Headers();
-      startSession("password", headers);
-      return new Response(null, { status: 204, headers });
     }
 
     if (path.startsWith("/auth/") && path !== "/auth/logout" && !cfg.googleEnabled) return new Response("not found", { status: 404 });

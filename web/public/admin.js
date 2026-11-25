@@ -1794,13 +1794,7 @@ async function init() {
     }
     $("login").hidden = false;
     $("google-login").hidden = !me.googleEnabled;
-    $("password-login").onsubmit = (ev) => {
-      ev.preventDefault();
-      call("/auth/password", { method: "POST", body: { password: $("password").value } }).then(
-        () => location.reload(),
-        (e) => ($("login-msg").textContent = e.message),
-      );
-    };
+    if (!me.googleEnabled) $("login-msg").textContent = "구글 로그인이 아직 설정되지 않아 로그인할 수 없습니다.";
     return;
   }
   storage(() => {
@@ -2098,24 +2092,6 @@ async function init() {
       .then((sub) => sub && call("/api/push/subscribe", { method: "POST", body: sub.toJSON() }))
       .catch(() => {});
   }
-  $("change-password").onclick = () => {
-    $("pw-current-row").hidden = me.loginMethod !== "password"; // a Google login already proved who you are
-    $("pw-current").required = me.loginMethod === "password";
-    $("password-form").reset();
-    $("pw-msg").textContent = "";
-    $("password-dialog").showModal();
-  };
-  $("password-form").onsubmit = async (ev) => {
-    ev.preventDefault();
-    if ($("pw-new").value !== $("pw-new2").value) return ($("pw-msg").textContent = "새 비밀번호 두 칸이 다릅니다.");
-    try {
-      await call("/api/password", { method: "POST", body: { current: $("pw-current").value, password: $("pw-new").value } });
-      $("password-dialog").close();
-      $("msg").textContent = "비밀번호를 바꿨습니다. 다른 기기의 로그인은 모두 풀렸습니다.";
-    } catch (e) {
-      $("pw-msg").textContent = e.message;
-    }
-  };
   $("notion-form").onsubmit = async (ev) => {
     ev.preventDefault();
     if ($("notion-connect").hidden) return void ($("notion-connect").hidden = false); // "토큰 바꾸기": show the field first

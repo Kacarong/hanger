@@ -19,7 +19,7 @@ const adminEmail = (process.env.ADMIN_EMAIL ?? "").toLowerCase();
 const googleEnabled = !!(process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET && adminEmail);
 
 const db = openDb(join(dataDir, "folio.db"));
-if (!db.getSetting("password_hash")) console.warn("비밀번호가 없습니다. `bun run set-password` 로 설정하세요.");
+if (!googleEnabled) console.warn("구글 설정(GOOGLE_CLIENT_ID·GOOGLE_CLIENT_SECRET·ADMIN_EMAIL)이 없어 아무도 로그인할 수 없습니다.");
 const google = createGoogle(
   {
     clientId: process.env.GOOGLE_CLIENT_ID ?? "",

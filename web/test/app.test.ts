@@ -222,17 +222,22 @@ function makeApp(opts: { googleEnabled?: boolean; now?: () => Date; notionApi?: 
     },
     db,
   );
-  const fetch = createApp(
-    { baseUrl: opts.baseUrl ?? "https://kacarong.kr", adminEmail: "owner@example.com", dataDir, googleEnabled: opts.googleEnabled ?? true, now: opts.now, notionApi: opts.notionApi, notionDebounceMs: 0 },
-    db,
-    google,
-  );
-  const call = (path: string, init: RequestInit & { cookie?: string } = {}) => {
+  const start = () =>
+    createApp(
+      { baseUrl: opts.baseUrl ?? "https://kacarong.kr", adminEmail: "owner@example.com", dataDir, googleEnabled: opts.googleEnabled ?? true, now: opts.now, notionApi: opts.notionApi, notionDebounceMs: 0 },
+      db,
+      google,
+    );
+  const caller = (app: ReturnType<typeof start>) => (path: string, init: RequestInit & { cookie?: string } = {}) => {
     const headers = new Headers(init.headers);
     if (init.cookie) headers.set("Cookie", init.cookie);
-    return fetch(new Request("https://kacarong.kr" + path, { ...init, headers }));
+    return app(new Request("https://kacarong.kr" + path, { ...init, headers }));
   };
-  return { call, db, notion: fetch.notion, notifier: fetch.notifier, backup: fetch.backup, moveNotionCopies: fetch.moveNotionCopies, cleanup: () => rmSync(dataDir, { recursive: true, force: true }) };
+  const fetch = start();
+  const call = caller(fetch);
+  // The same data with a freshly started app, like a server restart.
+  const reopen = () => caller(start());
+  return { call, db, reopen, notion: fetch.notion, notifier: fetch.notifier, backup: fetch.backup, moveNotionCopies: fetch.moveNotionCopies, cleanup: () => rmSync(dataDir, { recursive: true, force: true }) };
 }
 
 async function login(call: ReturnType<typeof makeApp>["call"], code = "good-code") {
@@ -481,37 +486,43 @@ test("첫 업로드를 동시에 여러 개 시작해도 드라이브 폴더는 
 
 const JSON_ORIGIN = { "Content-Type": "application/json", Origin: "https://kacarong.kr" };
 
-async function passwordLogin(call: ReturnType<typeof makeApp>["call"], password: string) {
-  const res = await call("/auth/password", { method: "POST", headers: JSON_ORIGIN, body: JSON.stringify({ password }) });
-  return { res, cookie: res.headers.getSetCookie().find((c) => c.startsWith("sid="))?.split(";")[0] };
+// A signed-in owner, as a Google login leaves it (the login itself is tested with login() above).
+function ownerSession(db: ReturnType<typeof makeApp>["db"], subject = "owner@example.com") {
+  const sid = crypto.randomUUID();
+  db.createSession(sid, subject, Date.now() + 86400_000);
+  return `sid=${sid}`;
 }
 
-test("비밀번호 로그인: 구글 없이 로그인, 틀리면 거부, 5번 틀리면 잠금", async () => {
-  const { call, db, cleanup } = makeApp({ googleEnabled: false });
+test("로그인은 구글뿐: 비밀번호 로그인 없음, 예전 비밀번호 로그인은 서버가 뜰 때 풀림, 로그아웃", async () => {
+  const { call, db, reopen, cleanup } = makeApp();
   try {
-    expect((await passwordLogin(call, "anything")).res.status).toBe(401); // not set yet
-    db.setSetting("password_hash", await Bun.password.hash("correct horse battery"));
+    const pw = await call("/auth/password", { method: "POST", headers: JSON_ORIGIN, body: JSON.stringify({ password: "correct horse battery" }) });
+    expect(pw.status).toBe(404);
+    expect(pw.headers.getSetCookie().some((c) => c.startsWith("sid="))).toBe(false);
+    expect(await (await call("/api/me")).json()).toMatchObject({ admin: false, googleEnabled: true });
 
-    expect((await call("/auth/login")).status).toBe(404); // Google login is off
+    // Before this change: a device signed in with the password, and the hash in settings.
+    const old = ownerSession(db, "password");
+    const google = ownerSession(db);
+    db.setSetting("password_hash", "old-hash");
+    const call2 = reopen(); // the server starts again with the new code
+    expect((await call2("/api/tasks", { cookie: old })).status).toBe(401);
+    expect(db.getSetting("password_hash")).toBeNull();
+    expect((await call2("/api/tasks", { cookie: google })).status).toBe(200);
+
+    expect((await call2("/auth/logout", { method: "POST", cookie: google })).status).toBe(204);
+    expect(await (await call2("/api/me", { cookie: google })).json()).toMatchObject({ admin: false });
+  } finally {
+    cleanup();
+  }
+});
+
+test("구글이 꺼져 있으면 아무 로그인도 안 됨", async () => {
+  const { call, cleanup } = makeApp({ googleEnabled: false });
+  try {
+    expect((await call("/auth/login")).status).toBe(404);
+    expect((await call("/auth/password", { method: "POST", headers: JSON_ORIGIN, body: "{}" })).status).toBe(404);
     expect(await (await call("/api/me")).json()).toMatchObject({ admin: false, googleEnabled: false });
-
-    const cross = await call("/auth/password", { method: "POST", headers: { ...JSON_ORIGIN, Origin: "https://evil.example" }, body: JSON.stringify({ password: "correct horse battery" }) });
-    expect(cross.status).toBe(403);
-
-    const { res, cookie } = await passwordLogin(call, "correct horse battery");
-    expect(res.status).toBe(204);
-    expect(await (await call("/api/me", { cookie })).json()).toMatchObject({ admin: true });
-    // Drive isn't connected, so file storage says so instead of crashing.
-    expect((await call("/api/quota", { cookie })).status).toBe(401);
-
-    // The attempt before the password was set already counts as 1 failure.
-    for (let i = 0; i < 3; i++) expect((await passwordLogin(call, "wrong")).res.status).toBe(401);
-    expect((await passwordLogin(call, "wrong")).res.status).toBe(401); // 5th failure
-    expect((await passwordLogin(call, "correct horse battery")).res.status).toBe(429); // locked even with the right one
-
-    expect((await call("/auth/logout", { method: "POST", cookie })).status).toBe(204);
-    expect((await call("/api/me", { cookie })).status).toBe(200);
-    expect(await (await call("/api/me", { cookie })).json()).toMatchObject({ admin: false });
   } finally {
     cleanup();
   }
@@ -522,8 +533,7 @@ test("할 일·과제: 추가 → 오늘 화면 분류 → 완료 → 수정·�
   let clock = new Date("2026-11-18T15:30:00Z");
   const { call, db, cleanup } = makeApp({ googleEnabled: false, now: () => clock });
   try {
-    db.setSetting("password_hash", await Bun.password.hash("correct horse battery"));
-    const { cookie } = await passwordLogin(call, "correct horse battery");
+    const cookie = ownerSession(db);
     expect((await call("/api/tasks")).status).toBe(401);
 
     const add = async (b: object) => {
@@ -662,11 +672,10 @@ test("캘린더: 권한 없으면 다시 동의 요청, 구글 일정만 한국 
 test("구글에서 권한이 끊기면 다음 로그인에서 전체 권한을 다시 요청", async () => {
   const { call, db, cleanup } = makeApp();
   try {
-    db.setSetting("password_hash", await Bun.password.hash("correct horse battery"));
     db.setSetting("refresh_token", "old-rt");
     db.setSetting("granted_scopes", FULL_SCOPE);
     expect(new URL((await call("/auth/login")).headers.get("Location")!).searchParams.get("prompt")).toBeNull();
-    const { cookie } = await passwordLogin(call, "correct horse battery");
+    const cookie = ownerSession(db);
     grantRevoked = true;
     const r = (await (await call("/api/calendar?from=2026-11-15&to=2026-11-30", { cookie })).json()) as Record<string, unknown>;
     expect(r.google).toBe("error");
@@ -761,8 +770,7 @@ test("알림: 기기 구독 → 아침 요약·과제 마감 전·시험 전날�
   const { call, db, notifier, cleanup } = makeApp({ now: () => clock, googleEnabled: false });
   pushes.length = 0;
   try {
-    db.setSetting("password_hash", await Bun.password.hash("correct horse battery"));
-    const { cookie } = await passwordLogin(call, "correct horse battery");
+    const cookie = ownerSession(db);
     const req = (path: string, method = "GET", b?: object) => call(path, { method, cookie, headers: JSON_ORIGIN, body: b ? JSON.stringify(b) : undefined });
     const info = (await (await req("/api/notify")).json()) as { settings: object; publicKey: string; devices: number };
     expect(info).toMatchObject({ settings: { morning: "08:00", homework: true, exam: true }, devices: 0 });
@@ -868,8 +876,7 @@ test("알림: 기기 구독 → 아침 요약·과제 마감 전·시험 전날�
 test("포트폴리오: 섹션 보기 방식(큰 카드·격자·목록), 항목에 노트를 붙이면 공개 페이지에 자세히 보기 + 노트 사진도 공개", async () => {
   const { call, db, cleanup } = makeApp({ googleEnabled: false });
   try {
-    db.setSetting("password_hash", await Bun.password.hash("correct horse battery"));
-    const { cookie } = await passwordLogin(call, "correct horse battery");
+    const cookie = ownerSession(db);
     const req = (path: string, method = "GET", b?: object) => call(path, { method, cookie, headers: JSON_ORIGIN, body: b ? JSON.stringify(b) : undefined });
     const pic = db.insertFile({ drive_id: "d-note-pic", name: "shot.png", title: "shot.png", mime: "image/png", size: 10, category: "기타", tags: "", note: "" });
     const note = db.insertNote(
@@ -954,94 +961,6 @@ test("정적 파일 주소에 버전이 붙고, 그 주소로 파일이 열림",
   }
 });
 
-test("공개된 옛 기본 비밀번호·짧은 비밀번호는 맞아도 로그인 거부", async () => {
-  const { call, db, cleanup } = makeApp();
-  try {
-    for (const weak of ["kacarong", "kacarong2026!!", "short1!"]) {
-      db.setSetting("password_hash", await Bun.password.hash(weak));
-      const { res, cookie } = await passwordLogin(call, weak);
-      expect(res.status).toBe(403);
-      expect(cookie).toBeUndefined();
-      expect(((await res.json()) as { error: string }).error).toContain("비밀번호 바꾸기");
-    }
-  } finally {
-    cleanup();
-  }
-});
-
-test("비밀번호 바꾸기: 비밀번호 로그인은 지금 비밀번호 확인, 바꾸면 다른 로그인은 모두 해제", async () => {
-  loginEmail = "owner@example.com";
-  const { call, db, cleanup } = makeApp();
-  try {
-    db.setSetting("password_hash", await Bun.password.hash("correct horse battery"));
-    const a = (await passwordLogin(call, "correct horse battery")).cookie!;
-    const b = (await passwordLogin(call, "correct horse battery")).cookie!;
-    expect(await (await call("/api/me", { cookie: a })).json()).toMatchObject({ admin: true, loginMethod: "password" });
-    const change = (cookie: string | undefined, body: object, headers: Record<string, string> = JSON_ORIGIN) =>
-      call("/api/password", { method: "POST", cookie, headers, body: JSON.stringify(body) });
-
-    expect((await change(undefined, { password: "a brand new secret" })).status).toBe(401);
-    expect((await change(a, { current: "correct horse battery", password: "a brand new secret" }, { "Content-Type": "application/json" })).status).toBe(403); // no Origin
-    expect((await change(a, { password: "a brand new secret" })).status).toBe(403); // current missing
-    expect((await change(a, { current: "wrong wrong wrong", password: "a brand new secret" })).status).toBe(403);
-    expect((await change(a, { current: "correct horse battery", password: "too short" })).status).toBe(400);
-    expect((await change(a, { current: "correct horse battery", password: "my kacarong password" })).status).toBe(400);
-
-    expect((await change(a, { current: "correct horse battery", password: "a brand new secret" })).status).toBe(200);
-    expect((await call("/api/tasks", { cookie: a })).status).toBe(200); // this device stays logged in
-    expect((await call("/api/tasks", { cookie: b })).status).toBe(401); // others are logged out
-    expect((await passwordLogin(call, "correct horse battery")).res.status).toBe(401);
-    expect((await passwordLogin(call, "a brand new secret")).res.status).toBe(204);
-
-    // A Google login can set it without the current one (e.g. when the old one was the public default).
-    const g = (await login(call)).cookie!;
-    expect(await (await call("/api/me", { cookie: g })).json()).toMatchObject({ loginMethod: "google" });
-    expect((await change(g, { password: "set from google login" })).status).toBe(200);
-    expect((await passwordLogin(call, "set from google login")).res.status).toBe(204);
-    expect((await call("/api/tasks", { cookie: a })).status).toBe(401);
-  } finally {
-    cleanup();
-  }
-});
-
-test("비밀번호 경합: 검증·해싱 도중 비밀번호가 바뀌면 옛 요청은 로그인도 변경도 못 함", async () => {
-  const { call, db, cleanup } = makeApp();
-  try {
-    db.setSetting("password_hash", await Bun.password.hash("correct horse battery"));
-    const sid = (c: string) => decodeURIComponent(c.slice("sid=".length));
-    // Hash everything up front: the "other device" writes below must not await, or the pending request could finish first.
-    const [elsewhere, winner, winner2] = await Promise.all(["changed elsewhere 1", "winner from device b", "second winner value"].map((p) => Bun.password.hash(p)));
-
-    // Login with the old password is still verifying when the password changes.
-    const pending = passwordLogin(call, "correct horse battery"); // runs until its first await
-    db.setSetting("password_hash", elsewhere);
-    const late = await pending;
-    expect(late.res.status).toBe(401);
-    expect(late.cookie).toBeUndefined();
-
-    // A change is hashing when another device changes the password and logs this session out.
-    db.setSetting("password_hash", await Bun.password.hash("correct horse battery"));
-    const a = (await passwordLogin(call, "correct horse battery")).cookie!;
-    const b = (await passwordLogin(call, "correct horse battery")).cookie!;
-    const change = (cookie: string, body: object) => call("/api/password", { method: "POST", cookie, headers: JSON_ORIGIN, body: JSON.stringify(body) });
-    const stale = change(a, { current: "correct horse battery", password: "stale request value" });
-    db.setSetting("password_hash", winner); // what device b's finished change does
-    db.deleteOtherSessions(sid(b));
-    expect((await stale).status).toBe(401);
-    expect(db.getSetting("password_hash")).toBe(winner);
-    expect((await call("/api/tasks", { cookie: b })).status).toBe(200); // b was not logged out by the stale request
-
-    // Same race while this session stays valid: refused because the password moved on.
-    const c = (await passwordLogin(call, "winner from device b")).cookie!;
-    const stale2 = change(c, { current: "winner from device b", password: "stale request value" });
-    db.setSetting("password_hash", winner2);
-    expect((await stale2).status).toBe(409);
-    expect(db.getSetting("password_hash")).toBe(winner2);
-  } finally {
-    cleanup();
-  }
-});
-
 test("보안 헤더: CSP·프레임 금지·nosniff·HSTS, 개인 데이터는 캐시 금지", async () => {
   const { call, cleanup } = makeApp({ googleEnabled: false });
   try {
@@ -1072,8 +991,7 @@ test("보안 헤더: CSP·프레임 금지·nosniff·HSTS, 개인 데이터는 �
 test("캘린더: 구글이 꺼져 있으면 비어 있음(할 일·시험은 안 나옴)", async () => {
   const { call, db, cleanup } = makeApp({ googleEnabled: false });
   try {
-    db.setSetting("password_hash", await Bun.password.hash("correct horse battery"));
-    const { cookie } = await passwordLogin(call, "correct horse battery");
+    const cookie = ownerSession(db);
     expect((await call("/api/calendar?from=2026-11-01&to=2026-11-30")).status).toBe(401);
     await call("/api/tasks", { method: "POST", cookie, headers: JSON_ORIGIN, body: JSON.stringify({ title: "장보기", due_date: "2026-11-19" }) });
     await call("/api/exams", { method: "POST", cookie, headers: JSON_ORIGIN, body: JSON.stringify({ title: "중간고사", date: "2026-11-20" }) });
@@ -1084,38 +1002,11 @@ test("캘린더: 구글이 꺼져 있으면 비어 있음(할 일·시험은 안
   }
 });
 
-test("비밀번호 로그인: 병렬 요청도 5번까지만 검증", async () => {
-  const { call, db, cleanup } = makeApp({ googleEnabled: false });
-  try {
-    db.setSetting("password_hash", await Bun.password.hash("correct horse battery"));
-    const results = await Promise.all(Array.from({ length: 20 }, () => passwordLogin(call, "wrong")));
-    const statuses = results.map((r) => r.res.status);
-    expect(statuses.filter((s) => s === 401)).toHaveLength(5);
-    expect(statuses.filter((s) => s === 429)).toHaveLength(15);
-    expect((await passwordLogin(call, "correct horse battery")).res.status).toBe(429);
-  } finally {
-    cleanup();
-  }
-});
-
-test("비밀번호 로그인: 성공한 시도는 실패 횟수에 남지 않음", async () => {
-  const { call, db, cleanup } = makeApp({ googleEnabled: false });
-  try {
-    db.setSetting("password_hash", await Bun.password.hash("correct horse battery"));
-    for (let i = 0; i < 4; i++) expect((await passwordLogin(call, "wrong")).res.status).toBe(401);
-    expect((await passwordLogin(call, "correct horse battery")).res.status).toBe(204);
-    expect((await passwordLogin(call, "correct horse battery")).res.status).toBe(204);
-  } finally {
-    cleanup();
-  }
-});
-
 test("노트: 블록 저장, 날짜 있는 체크박스는 할 일이 되어 오늘·캘린더에 나오고 양쪽이 서로 맞춰짐", async () => {
   const clock = new Date("2026-11-19T03:00:00Z");
   const { call, db, cleanup } = makeApp({ googleEnabled: false, now: () => clock });
   try {
-    db.setSetting("password_hash", await Bun.password.hash("correct horse battery"));
-    const { cookie } = await passwordLogin(call, "correct horse battery");
+    const cookie = ownerSession(db);
     expect((await call("/api/notes")).status).toBe(401);
     const req = (path: string, method: string, b?: object) => call(path, { method, cookie, headers: JSON_ORIGIN, body: b ? JSON.stringify(b) : undefined });
 
@@ -1421,8 +1312,7 @@ test("예전 노션 사본은 드라이브에서도 클라우드 폴더 밖(노�
 test("시험: 일정 → 날짜별 공부 계획(오늘·캘린더·할 일에도) → 과목을 바꾸면 계획도 → 시험을 지우면 계획도", async () => {
   const { call, db, cleanup } = makeApp({ googleEnabled: false, now: () => new Date("2026-11-20T03:00:00Z") });
   try {
-    db.setSetting("password_hash", await Bun.password.hash("correct horse battery"));
-    const { cookie } = await passwordLogin(call, "correct horse battery");
+    const cookie = ownerSession(db);
     expect((await call("/api/exams")).status).toBe(401);
     const req = async (path: string, method: string, b?: object) => {
       const r = await call(path, { method, cookie, headers: JSON_ORIGIN, body: b ? JSON.stringify(b) : undefined });
@@ -1485,8 +1375,7 @@ test("시험: 일정 → 날짜별 공부 계획(오늘·캘린더·할 일에�
 test("공부: 과목마다 공부할 것을 적고(날짜는 나중에 붙여도 됨) 체크·수정·삭제, 캘린더에는 안 나옴", async () => {
   const { call, db, cleanup } = makeApp({ googleEnabled: false, now: () => new Date("2026-11-20T03:00:00Z") });
   try {
-    db.setSetting("password_hash", await Bun.password.hash("correct horse battery"));
-    const { cookie } = await passwordLogin(call, "correct horse battery");
+    const cookie = ownerSession(db);
     expect((await call("/api/studies")).status).toBe(401);
     const req = async (path: string, method: string, b?: object) => {
       const r = await call(path, { method, cookie, headers: JSON_ORIGIN, body: b ? JSON.stringify(b) : undefined });
@@ -1529,8 +1418,7 @@ test("공부: 과목마다 공부할 것을 적고(날짜는 나중에 붙여도
 test("공부 과목 삭제: 그 과목 공부와 할 일이 지워지고 과목은 숨겨지며, 다시 적으면 돌아옴", async () => {
   const { call, db, cleanup } = makeApp({ googleEnabled: false, now: () => new Date("2026-11-20T03:00:00Z") });
   try {
-    db.setSetting("password_hash", await Bun.password.hash("correct horse battery"));
-    const { cookie } = await passwordLogin(call, "correct horse battery");
+    const cookie = ownerSession(db);
     const req = async (path: string, method: string, b?: object) => {
       const r = await call(path, { method, cookie, headers: JSON_ORIGIN, body: b ? JSON.stringify(b) : undefined });
       return { status: r.status, body: (await r.json()) as any };
@@ -1559,8 +1447,7 @@ test("나중에 할 일: 마감일이 되면 오늘 할 일로 옮겨지고, 날
   let clock = new Date("2026-11-22T14:59:00Z"); // 11-22 23:59 KST
   const { call, db, cleanup } = makeApp({ googleEnabled: false, now: () => clock });
   try {
-    db.setSetting("password_hash", await Bun.password.hash("correct horse battery"));
-    const { cookie } = await passwordLogin(call, "correct horse battery");
+    const cookie = ownerSession(db);
     const req = async (path: string, method: string, b?: object) => {
       const r = await call(path, { method, cookie, headers: JSON_ORIGIN, body: b ? JSON.stringify(b) : undefined });
       return { status: r.status, body: (await r.json()) as any };
@@ -1589,8 +1476,7 @@ test("공부: 그날 0시가 되면 할 일·과제의 오늘 할 일에 들어�
   let clock = new Date("2026-11-22T14:59:00Z"); // 11-22 23:59 KST
   const { call, db, cleanup } = makeApp({ googleEnabled: false, now: () => clock });
   try {
-    db.setSetting("password_hash", await Bun.password.hash("correct horse battery"));
-    const { cookie } = await passwordLogin(call, "correct horse battery");
+    const cookie = ownerSession(db);
     const req = async (path: string, method: string, b?: object) => {
       const r = await call(path, { method, cookie, headers: JSON_ORIGIN, body: b ? JSON.stringify(b) : undefined });
       return { status: r.status, body: (await r.json()) as any };
@@ -2357,8 +2243,7 @@ test("백업: 하루 한 번(새벽 2~7시 빼고) folio.db 사본을 드라이�
 test("지출: 매달 나가는 돈(정기)·앞으로 쓸 돈(예정) 만들기·고치기·썼음·지우기, 종류에 안 맞는 칸은 비움", async () => {
   const { call, db, cleanup } = makeApp({ googleEnabled: false, now: () => new Date("2026-11-23T03:00:00Z") });
   try {
-    db.setSetting("password_hash", await Bun.password.hash("correct horse battery"));
-    const { cookie } = await passwordLogin(call, "correct horse battery");
+    const cookie = ownerSession(db);
     expect((await call("/api/expenses")).status).toBe(401);
     const send = async (path: string, method: string, b: object) => {
       const r = await call(path, { method, cookie, headers: JSON_ORIGIN, body: JSON.stringify(b) });
@@ -2394,8 +2279,7 @@ test("지출: 매달 나가는 돈(정기)·앞으로 쓸 돈(예정) 만들기�
 test("시간표: 지금 학기는 늘 있고, 학기 추가·과목(시간·강의실·학점·성적·전공) 만들기·고치기·지우기, 학기를 지우면 과목도", async () => {
   const { call, db, cleanup } = makeApp({ googleEnabled: false, now: () => new Date("2026-11-23T03:00:00Z") });
   try {
-    db.setSetting("password_hash", await Bun.password.hash("correct horse battery"));
-    const { cookie } = await passwordLogin(call, "correct horse battery");
+    const cookie = ownerSession(db);
     expect((await call("/api/timetable")).status).toBe(401);
     const send = async (path: string, method: string, b?: object) => {
       const r = await call(path, { method, cookie, headers: JSON_ORIGIN, body: b ? JSON.stringify(b) : undefined });
@@ -2453,8 +2337,7 @@ test("수업일정: 바뀐 수업(변경·보강·휴강)을 적으면 그 수�
   let clock = new Date("2026-11-23T10:00:00+09:00");
   const { call, db, notifier, cleanup } = makeApp({ now: () => clock, googleEnabled: false });
   try {
-    db.setSetting("password_hash", await Bun.password.hash("correct horse battery"));
-    const { cookie } = await passwordLogin(call, "correct horse battery");
+    const cookie = ownerSession(db);
     const send = async (path: string, method: string, b?: object) => {
       const r = await call(path, { method, cookie, headers: JSON_ORIGIN, body: b ? JSON.stringify(b) : undefined });
       return { status: r.status, body: (await r.json()) as Record<string, any> };
@@ -2515,8 +2398,7 @@ test("수업일정: 바뀐 수업(변경·보강·휴강)을 적으면 그 수�
 test("시간표·수업일정: 본문이 늦게 오는 PATCH 가 그사이 저장된 다른 칸을 옛 값으로 되돌리지 않음", async () => {
   const { call, db, cleanup } = makeApp({ googleEnabled: false, now: () => new Date("2026-11-23T03:00:00Z") });
   try {
-    db.setSetting("password_hash", await Bun.password.hash("correct horse battery"));
-    const { cookie } = await passwordLogin(call, "correct horse battery");
+    const cookie = ownerSession(db);
     const send = async (path: string, method: string, b: object) => (await call(path, { method, cookie, headers: JSON_ORIGIN, body: JSON.stringify(b) })).json() as Promise<Record<string, any>>;
     // A PATCH whose body arrives only when release() is called.
     const slow = (path: string, b: object) => {
