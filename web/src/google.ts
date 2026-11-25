@@ -69,7 +69,8 @@ async function check(res: Response, what: string): Promise<Response> {
 export function createGoogle(cfg: GoogleConfig, db: Db) {
   let accessToken: { token: string; expiresAt: number } | null = null;
 
-  // loginHint makes Google pick that account by itself, so a returning owner signs in without a click.
+  // loginHint (from the browser's own cookie, never ADMIN_EMAIL) makes Google pick that account by itself,
+  // so a returning owner signs in without a click.
   // needGrant asks for every scope with a fresh consent, so Google issues a new refresh token.
   function authRedirect(state: string, needGrant: boolean, loginHint: string): string {
     const u = new URL(cfg.authUrl);

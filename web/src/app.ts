@@ -589,6 +589,7 @@ ${body || `<section class="works"><p class="empty reveal">${mine ? "아직 포�
       return json({
         admin: !!s,
         googleEnabled: cfg.googleEnabled,
+        knownDevice: !!cookies(req).login_hint, // the owner signed in on this browser before, so auto login may try
         driveConnected: !!db.getSetting("refresh_token"),
         calendarConnected: !!db.getSetting("refresh_token") && google.calendarGranted(),
         calendarWrite: !!db.getSetting("refresh_token") && google.calendarWriteGranted(),
@@ -1321,7 +1322,9 @@ ${body || `<section class="works"><p class="empty reveal">${mine ? "아직 포�
         status: 302,
         headers: {
           // Ask for the full grant only when none is saved or it lacks a scope (e.g. calendar, added later).
-          Location: google.authRedirect(state, !db.getSetting("refresh_token") || !google.calendarGranted() || !google.calendarWriteGranted(), cfg.adminEmail),
+          // The account hint comes only from this browser's own cookie (set after the owner signed in here),
+          // never from ADMIN_EMAIL, so a stranger opening /admin never sees the owner's email.
+          Location: google.authRedirect(state, !db.getSetting("refresh_token") || !google.calendarGranted() || !google.calendarWriteGranted(), cookies(req).login_hint ?? ""),
           // One cookie per attempt, so two tabs signing in at once don't overwrite each other's state.
           "Set-Cookie": setCookie(`oauth_state_${state}`, "1", 600),
         },
@@ -1343,13 +1346,18 @@ ${body || `<section class="works"><p class="empty reveal">${mine ? "아직 포�
       // A plain sign-in gets no refresh token; keep the saved grant then.
       if (r.tokens.refresh_token) google.saveTokens(r.tokens);
       startSession(r.email, headers);
+      headers.append("Set-Cookie", setCookie("login_hint", r.email, 365 * 86400));
       return new Response(null, { status: 302, headers });
     }
 
     if (path === "/auth/logout" && req.method === "POST") {
       const sid = cookies(req).sid;
       if (sid) db.deleteSession(sid);
-      return new Response(null, { status: 204, headers: { "Set-Cookie": setCookie("sid", "", 0) } });
+      // Logging out also forgets the account hint, so a shared computer doesn't keep the email.
+      const headers = new Headers();
+      headers.append("Set-Cookie", setCookie("sid", "", 0));
+      headers.append("Set-Cookie", setCookie("login_hint", "", 0));
+      return new Response(null, { status: 204, headers });
     }
 
     if (path.startsWith("/api/")) return api(req, url);

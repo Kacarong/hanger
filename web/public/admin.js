@@ -1805,7 +1805,8 @@ function storage(fn) {
 async function init() {
   me = await call("/api/me");
   if (!me.admin) {
-    // Go straight to Google, which signs the owner in without a click. Only once per tab, so a
+    // Go straight to Google, which signs the owner in without a click — only on a browser the owner
+    // signed in on before (knownDevice), so strangers just see the login screen. Only once per tab, so a
     // cancelled or failed login shows this screen instead of looping, and not after a logout.
     // If the browser blocks Web Storage the attempt can't be recorded, so auto login is skipped.
     const autoLogin = storage(() => {
@@ -1813,7 +1814,7 @@ async function init() {
       sessionStorage.setItem("autoLoginTried", "1");
       return true;
     });
-    if (me.googleEnabled && autoLogin) {
+    if (me.googleEnabled && me.knownDevice && autoLogin) {
       location.replace("/auth/login");
       return;
     }

@@ -248,7 +248,7 @@ async function login(call: ReturnType<typeof makeApp>["call"], code = "good-code
   expect(redirect.searchParams.get("scope")).toBe(full ? FULL_SCOPE : "openid email");
   expect(redirect.searchParams.get("access_type")).toBe(full ? "offline" : "online");
   expect(redirect.searchParams.get("include_granted_scopes")).toBe(full ? "true" : null); // else the saved calendar grant comes back in
-  expect(redirect.searchParams.get("login_hint")).toBe("owner@example.com"); // Google picks the owner account by itself
+  expect(redirect.searchParams.get("login_hint")).toBeNull(); // no login_hint cookie yet: the owner's email is never handed out
   const state = redirect.searchParams.get("state")!;
   const res = await call(`/auth/callback?state=${state}&code=${code}`, { cookie: `oauth_state_${state}=1` });
   const sid = res.headers.getSetCookie().find((c) => c.startsWith("sid="))?.split(";")[0];
@@ -504,6 +504,29 @@ test("로그인은 구글뿐: 비밀번호 로그인 없음, 로그아웃", asyn
 
     expect((await call("/auth/logout", { method: "POST", cookie: google })).status).toBe(204);
     expect(await (await call("/api/me", { cookie: google })).json()).toMatchObject({ admin: false });
+  } finally {
+    cleanup();
+  }
+});
+
+test("구글 로그인 창의 이메일은 그 브라우저에서 로그인한 적 있을 때만 채워짐", async () => {
+  loginEmail = "owner@example.com";
+  const { call, cleanup } = makeApp();
+  try {
+    // A stranger: no email in Google's login page, and no automatic jump to it.
+    expect(new URL((await call("/auth/login")).headers.get("Location")!).searchParams.get("login_hint")).toBeNull();
+    expect(await (await call("/api/me")).json()).toMatchObject({ admin: false, knownDevice: false });
+
+    // The owner signs in once on this browser; from then on Google picks the account by itself.
+    const { res, cookie } = await login(call);
+    const hint = res.headers.getSetCookie().find((c) => c.startsWith("login_hint="))!.split(";")[0];
+    expect(hint).toBe(`login_hint=${encodeURIComponent("owner@example.com")}`);
+    expect(new URL((await call("/auth/login", { cookie: hint })).headers.get("Location")!).searchParams.get("login_hint")).toBe("owner@example.com");
+    expect(await (await call("/api/me", { cookie: hint })).json()).toMatchObject({ admin: false, knownDevice: true });
+
+    // Logging out forgets it.
+    const out = await call("/auth/logout", { method: "POST", cookie: `${cookie}; ${hint}` });
+    expect(out.headers.getSetCookie().some((c) => c.startsWith("login_hint=;") && c.includes("Max-Age=0"))).toBe(true);
   } finally {
     cleanup();
   }
