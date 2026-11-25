@@ -1245,9 +1245,32 @@ let notifyPoll = null;
 // 알림을 그 앱 이름으로 넘긴다. 범위가 / 면 크롬 이름으로 떠서 크롬 알림을 끈 휴대폰에서는 사라진다.
 const SW_SCOPE = "/admin";
 
+// /admin 에 등록이 없으면 getRegistration 은 예전 / 등록을 준다: 그건 이 기기의 구독으로 치지 않는다.
 async function pushSubscription() {
   const reg = await navigator.serviceWorker.getRegistration(SW_SCOPE);
-  return reg ? reg.pushManager.getSubscription() : null;
+  return reg && new URL(reg.scope).pathname === SW_SCOPE ? reg.pushManager.getSubscription() : null;
+}
+
+// 예전 범위(/)의 서비스 워커: 그 구독으로 가는 알림은 크롬 이름으로 뜨므로 서버·브라우저에서 지우고 등록을 푼다.
+async function dropOldWorkers() {
+  for (const reg of await navigator.serviceWorker.getRegistrations()) {
+    if (new URL(reg.scope).pathname === SW_SCOPE) continue;
+    const sub = await reg.pushManager.getSubscription();
+    if (sub) {
+      await call("/api/push/unsubscribe", { method: "POST", body: { endpoint: sub.endpoint } }).catch(() => {});
+      await sub.unsubscribe();
+    }
+    await reg.unregister();
+  }
+}
+
+// 구독은 켜진(active) 워커가 있어야 된다. serviceWorker.ready 는 예전 / 워커로 이미 끝났을 수 있어서 이 등록을 직접 기다린다.
+async function untilActive(reg) {
+  const w = reg.installing || reg.waiting;
+  if (reg.active || !w) return;
+  await new Promise((ok, fail) =>
+    w.addEventListener("statechange", () => (w.state === "activated" ? ok() : w.state === "redundant" && fail(new Error("서비스 워커를 켜지 못했습니다")))),
+  );
 }
 
 // 이 기기의 알림 상태 글.
@@ -1289,8 +1312,9 @@ async function notifyOn() {
   if (pushSupported()) {
     try {
       const { publicKey } = await call("/api/notify");
+      await dropOldWorkers();
       const reg = await navigator.serviceWorker.register("/sw.js", { scope: SW_SCOPE });
-      await navigator.serviceWorker.ready;
+      await untilActive(reg);
       const sub = (await reg.pushManager.getSubscription()) ?? (await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: publicKey }));
       await call("/api/push/subscribe", { method: "POST", body: sub.toJSON() });
       storage(() => localStorage.setItem("notifyMode", "push"));
@@ -1305,6 +1329,7 @@ async function notifyOn() {
 
 async function notifyOff() {
   if (pushSupported()) {
+    await dropOldWorkers().catch(() => {});
     const sub = await pushSubscription().catch(() => null);
     if (sub) {
       await call("/api/push/unsubscribe", { method: "POST", body: { endpoint: sub.endpoint } });
@@ -2085,11 +2110,12 @@ async function init() {
       (e) => ($("notify-msg").textContent = e.message),
     );
   // 이 기기가 알림을 켜 둔 상태면 이어서 받는다: 화면이 직접 띄우는 방식은 다시 묻기 시작하고,
-  // 웹 푸시는 구독을 서버에 다시 알려 둔다(서버가 지웠어도 되살아나게).
+  // 웹 푸시는 구독을 서버에 다시 알려 둔다(서버가 지웠어도 되살아나게). /admin 구독이 없으면(예전 / 구독뿐이거나
+  // 브라우저가 지움) 다시 켠다: 이미 허용돼 있어 묻지 않고, 예전 구독은 notifyOn 이 치운다.
   if (notifyMode() === "page") startNotifyPoll();
   else if (notifyMode() === "push" && pushSupported() && Notification.permission === "granted") {
     pushSubscription()
-      .then((sub) => sub && call("/api/push/subscribe", { method: "POST", body: sub.toJSON() }))
+      .then((sub) => (sub ? call("/api/push/subscribe", { method: "POST", body: sub.toJSON() }) : notifyOn()))
       .catch(() => {});
   }
   $("notion-form").onsubmit = async (ev) => {
