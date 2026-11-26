@@ -325,6 +325,7 @@ let folders = [];
 let listed = []; // what the list shows, in order: { type: "folder" | "file", id, name, sort, key, f (the row) }
 const picked = new Set(); // keys ("file:3", "folder:7") of the ticked rows
 let pickedIn = ""; // the folder/search the ticks belong to; going elsewhere clears them
+let orderSaves = Promise.resolve(); // PUT /api/cloud/order calls, one after another
 const dayText = (s) => new Intl.DateTimeFormat("ko-KR", { timeZone: "Asia/Seoul", year: "numeric", month: "numeric", day: "numeric" }).format(new Date(s.replace(" ", "T") + "Z"));
 
 // The open folder comes from the address (#files/<id>), so back/forward walk the folders. null = the top.
@@ -417,6 +418,12 @@ async function loadList() {
   const folderItems = (ordered ? folders.filter((f) => f.parent_id === cur) : []).map((f) => ({ type: "folder", id: f.id, name: f.name, sort: f.sort, key: `folder:${f.id}`, f }));
   const fileItems = files.map((f) => ({ type: "file", id: f.id, name: f.title, sort: f.sort, key: `file:${f.id}`, f }));
   listed = ordered ? [...folderItems, ...fileItems].sort((a, b) => a.sort - b.sort) : fileItems;
+  // Ticks stay while the same folder/search is reloaded (after a move, an upload, ...), and only for what is still there.
+  // Settled before the rows are made, since each row's box starts from `picked`.
+  const where = `${cur}|${q}|${fileCategory()}`;
+  if (where !== pickedIn) picked.clear();
+  pickedIn = where;
+  for (const k of [...picked]) if (!listed.some((it) => it.key === k)) picked.delete(k);
   const rows = listed.map((it) => {
     const f = it.f;
     if (it.type === "folder")
@@ -450,13 +457,8 @@ async function loadList() {
       ),
     ]);
   });
-  // Ticks stay while the same folder/search is reloaded (after a move, an upload, ...), and only for what is still there.
-  const where = `${cur}|${q}|${fileCategory()}`;
-  if (where !== pickedIn) picked.clear();
-  pickedIn = where;
-  for (const k of [...picked]) if (!listed.some((it) => it.key === k)) picked.delete(k);
-  showTicks();
   $("list").replaceChildren(...(rows.length ? rows : [emptyRow(8, q || fileCategory() ? "검색 결과가 없습니다." : cur === null ? "아직 올린 파일이 없습니다." : "빈 폴더입니다.")]));
+  showTicks();
 }
 
 // The bar over the list while something is ticked, and the tick-all box in the header.
@@ -568,10 +570,14 @@ function dragRows(ev, key) {
     listed = next;
     // 바로 그 순서로 보여 주고 저장한다. 저장이 안 되면 서버의 순서로 다시 그린다.
     $("list").append(...next.map((it) => rows.find((r) => r.dataset.key === it.key)));
-    call("/api/cloud/order", { method: "PUT", body: { folderId: currentFolder(), items: next.map(({ type, id }) => ({ type, id })) } }).catch((e) => {
-      showError(e);
-      loadList().catch(showError);
-    });
+    // 저장은 한 번에 하나씩 차례로 보낸다. 앞 저장이 늦게 끝나 마지막 순서를 덮어쓰지 않게.
+    const body = { folderId: currentFolder(), items: next.map(({ type, id }) => ({ type, id })) };
+    orderSaves = orderSaves.then(() =>
+      call("/api/cloud/order", { method: "PUT", body }).catch((e) => {
+        showError(e);
+        return loadList().catch(showError);
+      }),
+    );
   };
   handle.onpointerup = () => end(true);
   handle.onpointercancel = () => end(false);
