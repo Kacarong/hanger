@@ -1320,7 +1320,7 @@ async function notifyOn() {
     storage(() => localStorage.setItem("notifyMode", "page"));
     return startNotifyPoll();
   }
-  if ((await Notification.requestPermission()) !== "granted") throw new Error("알림을 허용하지 않아 켤 수 없습니다.");
+  if ((await Notification.requestPermission()) !== "granted") throw new Error("알림을 허용하지 않아 켤 수 없습니다. 휴대폰 앱이면 휴대폰 설정 → 애플리케이션 → kacarong → 알림을 켠 뒤 다시 눌러 주세요(크롬 알림은 꺼져 있어도 됩니다).");
   if (pushSupported()) {
     try {
       const { publicKey } = await call("/api/notify");
