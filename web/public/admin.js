@@ -1323,17 +1323,35 @@ async function notifyOn() {
   if ((await Notification.requestPermission()) !== "granted") throw new Error("알림을 허용하지 않아 켤 수 없습니다. 휴대폰 앱이면 휴대폰 설정 → 애플리케이션 → kacarong → 알림을 켠 뒤 다시 눌러 주세요(크롬 알림은 꺼져 있어도 됩니다).");
   let pushError = null;
   if (pushSupported()) {
-    try {
-      // 등록이 끝나지 않고 멈추는 휴대폰이 있어서, 20초 안에 안 끝나면 실패로 친다(버튼이 아무 말 없이 멈추지 않게).
-      const subscribe = async () => {
-        const { publicKey } = await call("/api/notify");
-        await dropOldWorkers();
-        const reg = await navigator.serviceWorker.register("/sw.js", { scope: SW_SCOPE });
-        await untilActive(reg);
-        const sub = (await reg.pushManager.getSubscription()) ?? (await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: publicKey }));
-        await call("/api/push/subscribe", { method: "POST", body: sub.toJSON() });
+    // 등록이 끝나지 않고 멈추는 휴대폰이 있어서, 20초 안에 안 끝나면 실패로 친다(버튼이 아무 말 없이 멈추지 않게).
+    // 시간이 지난 뒤에 늦게 끝난 구독은 서버·브라우저에서 지운다: 화면은 이미 "웹 푸시 아님"으로 정했다.
+    let step = "시작";
+    let timedOut = false;
+    const subscribe = async () => {
+      step = "서버에서 키 받기";
+      const { publicKey } = await call("/api/notify");
+      step = "예전 서비스 워커 정리";
+      await dropOldWorkers();
+      step = "서비스 워커 등록";
+      const reg = await navigator.serviceWorker.register("/sw.js", { scope: SW_SCOPE });
+      step = "서비스 워커 켜기";
+      await untilActive(reg);
+      step = "푸시 구독";
+      const sub = (await reg.pushManager.getSubscription()) ?? (await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: publicKey }));
+      const dropLate = async () => {
+        await call("/api/push/unsubscribe", { method: "POST", body: { endpoint: sub.endpoint } }).catch(() => {});
+        await sub.unsubscribe().catch(() => {});
       };
-      await Promise.race([subscribe(), new Promise((_, fail) => setTimeout(() => fail(new Error("20초 안에 끝나지 않음")), 20_000))]);
+      if (timedOut) return dropLate();
+      step = "서버에 이 기기 등록";
+      await call("/api/push/subscribe", { method: "POST", body: sub.toJSON() });
+      if (timedOut) return dropLate();
+    };
+    try {
+      await Promise.race([
+        subscribe().catch((e) => Promise.reject(new Error(`${step}: ${e?.message || e}`))),
+        new Promise((_, fail) => setTimeout(() => ((timedOut = true), fail(new Error(`${step}: 20초 안에 끝나지 않음`))), 20_000)),
+      ]);
       storage(() => localStorage.setItem("notifyMode", "push"));
       return;
     } catch (e) {
@@ -1341,9 +1359,31 @@ async function notifyOn() {
       pushError = e;
     }
   }
+  if (pushError) {
+    // 안드로이드 크롬은 화면의 new Notification 을 막는다: 켜진 서비스 워커도 없으면 화면이 직접 띄우는 방식도 안 된다.
+    // 확인 알림을 하나 띄워 보고, 안 되면 켜지 않고 이유를 보여 준다.
+    try {
+      await showLocal({ id: "on", title: "kacarong 알림", body: "이 화면이 열려 있는 동안 알림을 받습니다.", url: "/admin" });
+    } catch (e) {
+      throw new Error(`이 기기에서 알림을 켜지 못했습니다. (웹 푸시 — ${pushError.message} / 화면 알림 — ${e?.message || e})`);
+    }
+  }
   storage(() => localStorage.setItem("notifyMode", "page"));
   startNotifyPoll();
-  if (pushError) $("notify-msg").textContent = `앱이 닫혀 있을 때도 받는 알림을 켜지 못해, 이 화면이 열려 있는 동안만 받습니다. (이유: ${pushError.message || pushError})`;
+  if (pushError) $("notify-msg").textContent = `앱이 닫혀 있을 때도 받는 알림을 켜지 못해, 이 화면이 열려 있는 동안만 받습니다. (이유: ${pushError.message})`;
+}
+
+// 화면이 직접 띄우는 알림. 켜진 /admin 서비스 워커가 있으면 그걸로 띄운다(안드로이드 크롬은 new Notification 을 막음).
+async function showLocal(n) {
+  const reg = "serviceWorker" in navigator ? await navigator.serviceWorker.getRegistration(SW_SCOPE).catch(() => null) : null;
+  if (reg?.active && new URL(reg.scope).pathname === SW_SCOPE) {
+    return reg.showNotification(n.title, { body: n.body, icon: "/static/icon-192.png", tag: `n${n.id}`, data: { url: n.url } });
+  }
+  const shown = new Notification(n.title, { body: n.body, icon: "/static/icon-192.png", tag: `n${n.id}` });
+  shown.onclick = () => {
+    window.focus();
+    location.hash = new URL(n.url, location.origin).hash;
+  };
 }
 
 async function notifyOff() {
@@ -1374,11 +1414,7 @@ async function startNotifyPoll() {
         tauriNotify.sendNotification({ title: n.title, body: n.body });
         continue;
       }
-      const shown = new Notification(n.title, { body: n.body, icon: "/static/icon-192.png", tag: `n${n.id}` });
-      shown.onclick = () => {
-        window.focus();
-        location.hash = new URL(n.url, location.origin).hash;
-      };
+      await showLocal(n);
     }
   };
   notifyPoll = setInterval(() => check().catch(() => {}), 60_000);
