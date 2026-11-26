@@ -1443,7 +1443,7 @@ async function untilActive(reg) {
 async function notifyStateText() {
   if (tauriNotify) return notifyMode() === "page" ? "켜짐 · 프로그램이 켜져 있는 동안(최소화해도) 받습니다." : "꺼짐";
   if (!("Notification" in window)) return "이 기기(브라우저)는 알림을 지원하지 않습니다.";
-  if (Notification.permission === "denied") return "알림이 차단돼 있습니다. 휴대폰 앱이면 휴대폰 설정 → 애플리케이션 → kacarong → 알림을 켜 주세요(크롬 알림은 꺼져 있어도 됩니다). 브라우저면 브라우저의 사이트 설정에서 허용해 주세요.";
+  if (Notification.permission === "denied") return "알림이 차단돼 있습니다. 휴대폰 앱이면 휴대폰 설정 → 애플리케이션 → kacarong → 알림을 켠 다음, 최근 앱 목록에서 kacarong을 밀어 완전히 닫았다가 다시 열어 주세요. 앱은 열릴 때만 알림 설정을 다시 읽어서, 이미 켜 두셨어도 다시 열어야 적용됩니다(크롬 알림은 꺼져 있어도 됩니다). 브라우저면 브라우저의 사이트 설정에서 허용해 주세요.";
   if (notifyMode() === "page" && Notification.permission === "granted") return "켜짐 · 이 화면이 열려 있는 동안 받습니다.";
   if (notifyMode() === "push" && pushSupported() && (await pushSubscription().catch(() => null))) return "켜짐 · 앱·브라우저가 닫혀 있어도 받습니다.";
   return "꺼짐";
@@ -1474,7 +1474,7 @@ async function notifyOn() {
     storage(() => localStorage.setItem("notifyMode", "page"));
     return startNotifyPoll();
   }
-  if ((await Notification.requestPermission()) !== "granted") throw new Error("알림을 허용하지 않아 켤 수 없습니다. 휴대폰 앱이면 휴대폰 설정 → 애플리케이션 → kacarong → 알림을 켠 뒤 다시 눌러 주세요(크롬 알림은 꺼져 있어도 됩니다).");
+  if ((await Notification.requestPermission()) !== "granted") throw new Error("알림을 허용하지 않아 켤 수 없습니다. 휴대폰 앱이면 휴대폰 설정 → 애플리케이션 → kacarong → 알림을 켜고, 최근 앱 목록에서 kacarong을 밀어 완전히 닫았다가 다시 연 뒤 눌러 주세요. 이미 켜 두셨어도 앱을 다시 열어야 적용됩니다(크롬 알림은 꺼져 있어도 됩니다).");
   let pushError = null;
   if (pushSupported()) {
     // 등록이 끝나지 않고 멈추는 휴대폰이 있어서, 20초 안에 안 끝나면 실패로 친다(버튼이 아무 말 없이 멈추지 않게).
