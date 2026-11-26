@@ -396,6 +396,90 @@ test("클라우드: 로그인 → 업로드 → 사이트에서 열기·받기 �
   }
 });
 
+test("클라우드 순서: 새 것은 맨 앞, 끌어 놓은 순서(폴더·파일 섞어서)를 저장, 다른 폴더로 옮기면 거기 맨 앞", async () => {
+  loginEmail = "owner@example.com";
+  const { call, db, cleanup } = makeApp();
+  try {
+    const { cookie } = await login(call);
+    const req = (path: string, method: string, b?: object) => call(path, { method, cookie, headers: JSON_ORIGIN, body: b ? JSON.stringify(b) : undefined });
+    const folder = async (name: string, parentId: number | null = null) => (await req("/api/folders", "POST", { name, parentId })).json() as Promise<{ id: number; drive_id: string }>;
+    const a = await folder("A");
+    const rootId = drive.get(a.drive_id)!.parents[0]!;
+    const addFile = async (name: string, folderId: number | null = null) => {
+      const id = `ord${nextId++}`;
+      drive.set(id, { id, name, mimeType: "text/plain", parents: [folderId === null ? rootId : db.getFolder(folderId)!.drive_id], trashed: false, bytes: 1 });
+      return db.insertFile({ drive_id: id, name, title: name, mime: "text/plain", size: 1, category: "기타", tags: "", note: "", folder_id: folderId });
+    };
+    const f1 = await addFile("1.txt");
+    const b = await folder("B");
+    const f2 = await addFile("2.txt");
+
+    // What the screen shows for a folder: its folders and files merged by sort.
+    const view = async (f: number | null) => {
+      const fs = ((await (await req("/api/folders", "GET")).json()) as { id: number; name: string; parent_id: number | null; sort: number }[]).filter((x) => x.parent_id === f);
+      const files = (await (await req(`/api/files?folder=${f ?? "root"}`, "GET")).json()) as { title: string; sort: number }[];
+      return [...fs.map((x) => ({ n: x.name, s: x.sort })), ...files.map((x) => ({ n: x.title, s: x.sort }))].sort((x, y) => x.s - y.s).map((x) => x.n);
+    };
+    expect(await view(null)).toEqual(["2.txt", "B", "1.txt", "A"]); // newest first
+
+    // The owner's order, folders and files mixed.
+    const order = (folderId: number | null, items: [string, number][]) => req("/api/cloud/order", "PUT", { folderId, items: items.map(([type, id]) => ({ type, id })) });
+    expect((await order(null, [["folder", a.id], ["file", f1.id], ["folder", b.id], ["file", f2.id]])).status).toBe(200);
+    expect(await view(null)).toEqual(["A", "1.txt", "B", "2.txt"]);
+    // The listing a file is in (one folder) follows it; a search across folders stays newest first.
+    expect(((await (await req("/api/files?folder=root", "GET")).json()) as { title: string }[]).map((x) => x.title)).toEqual(["1.txt", "2.txt"]);
+    expect(((await (await req("/api/files?q=.txt", "GET")).json()) as { title: string }[]).map((x) => x.title)).toEqual(["2.txt", "1.txt"]);
+
+    // An order from an out-of-date screen (missing, extra, twice, wrong folder) changes nothing.
+    expect((await order(null, [["folder", a.id], ["file", f1.id], ["folder", b.id]])).status).toBe(409);
+    expect((await order(null, [["folder", a.id], ["file", f1.id], ["folder", b.id], ["file", f2.id], ["file", 9999]])).status).toBe(409);
+    expect((await order(null, [["folder", a.id], ["file", f1.id], ["file", f1.id], ["file", f2.id]])).status).toBe(409);
+    expect((await order(a.id, [["file", f1.id]])).status).toBe(409);
+    expect((await order(9999, [])).status).toBe(404);
+    expect((await order(null, [["note", 1]] as [string, number][])).status).toBe(400);
+    expect(await view(null)).toEqual(["A", "1.txt", "B", "2.txt"]);
+
+    // Moving goes first in the other folder and keeps the rest of the old one in order; Drive follows.
+    const f3 = await addFile("3.txt", a.id);
+    expect(await view(a.id)).toEqual(["3.txt"]);
+    expect((await req(`/api/files/${f2.id}`, "PATCH", { folderId: a.id })).status).toBe(200);
+    expect((await req(`/api/folders/${b.id}`, "PATCH", { parentId: a.id })).status).toBe(200);
+    expect(await view(a.id)).toEqual(["B", "2.txt", "3.txt"]);
+    expect(await view(null)).toEqual(["A", "1.txt"]);
+    expect(drive.get(f2.drive_id)!.parents).toEqual([a.drive_id]);
+    expect(drive.get(b.drive_id)!.parents).toEqual([a.drive_id]);
+    // Saving a file's details or renaming a folder in place doesn't move it.
+    expect((await req(`/api/files/${f3.id}`, "PATCH", { title: "3번", folderId: a.id })).status).toBe(200);
+    expect((await req(`/api/folders/${b.id}`, "PATCH", { name: "B2" })).status).toBe(200);
+    expect(await view(a.id)).toEqual(["B2", "2.txt", "3번"]);
+  } finally {
+    cleanup();
+  }
+});
+
+test("순서 칸이 없던 DB를 열면 폴더마다 예전처럼 폴더(이름순) 다음 파일(최신순)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "folio-test-"));
+  try {
+    const path = join(dir, "old.db");
+    const raw = new Database(path);
+    raw.exec(`
+      CREATE TABLE folders (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, parent_id INTEGER, drive_id TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT (datetime('now')));
+      CREATE TABLE files (id INTEGER PRIMARY KEY AUTOINCREMENT, drive_id TEXT NOT NULL UNIQUE, name TEXT NOT NULL, title TEXT NOT NULL, mime TEXT NOT NULL DEFAULT '', size INTEGER NOT NULL DEFAULT 0, category TEXT NOT NULL DEFAULT '기타', tags TEXT NOT NULL DEFAULT '', note TEXT NOT NULL DEFAULT '', shared INTEGER NOT NULL DEFAULT 0, public INTEGER NOT NULL DEFAULT 0, web_view_link TEXT NOT NULL DEFAULT '', web_content_link TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL DEFAULT (datetime('now')), folder_id INTEGER, origin TEXT NOT NULL DEFAULT '');
+      INSERT INTO folders (name, parent_id, drive_id) VALUES ('나', NULL, 'd1'), ('가', NULL, 'd2'), ('안', 1, 'd3');
+      INSERT INTO files (drive_id, name, title, folder_id) VALUES ('x1', 'old.txt', 'old.txt', NULL), ('x2', 'new.txt', 'new.txt', NULL), ('x3', 'in.txt', 'in.txt', 1);
+    `);
+    raw.close();
+    const db = openDb(path);
+    const top = [...db.listFolders().filter((f) => f.parent_id === null), ...db.listFiles({ folder: null })].sort((x, y) => x.sort - y.sort);
+    expect(top.map((x) => ("title" in x ? x.title : x.name))).toEqual(["가", "나", "new.txt", "old.txt"]);
+    const inner = [...db.listFolders().filter((f) => f.parent_id === 1), ...db.listFiles({ folder: 1 })].sort((x, y) => x.sort - y.sort);
+    expect(inner.map((x) => ("title" in x ? x.title : x.name))).toEqual(["안", "in.txt"]);
+    db.raw.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("다른 구글 계정은 관리자 로그인 불가, 토큰도 저장 안 함", async () => {
   loginEmail = "someone@example.com";
   const { call, db, cleanup } = makeApp();

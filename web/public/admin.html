@@ -138,7 +138,8 @@
           <form id="search" style="display:contents"><input class="input" id="q" placeholder="검색" style="width:240px"></form>
           <div class="seg" id="filter-category"><button data-v="" class="on">전체</button></div>
         </div>
-        <table class="table"><thead><tr><th class="w1"></th><th>이름</th><th class="hide-sm">분류</th><th class="hide-sm">태그</th><th class="num">크기</th><th class="hide-sm">올린 날</th><th></th></tr></thead>
+        <div class="sel-bar" id="sel-bar" hidden><span id="sel-count"></span><span class="grow"></span><button class="btn sm" type="button" id="sel-move">옮기기</button><button class="btn ghost sm" type="button" id="sel-clear">선택 해제</button></div>
+        <table class="table files-table"><thead><tr><th class="w1 sel-cell"><input type="checkbox" id="sel-all" title="모두 고르기" aria-label="모두 고르기"></th><th class="w1"></th><th>이름</th><th class="hide-sm">분류</th><th class="hide-sm">태그</th><th class="num">크기</th><th class="hide-sm">올린 날</th><th></th></tr></thead>
           <tbody id="list"></tbody></table>
       </div>
 
@@ -325,6 +326,16 @@
     <label>위치<select class="input" id="folder-parent"></select></label>
     <span class="error" id="folder-msg"></span>
     <div class="foot"><button class="btn" type="button" data-close>취소</button><button class="btn primary" value="ok">저장</button></div>
+  </form>
+</dialog>
+
+<dialog id="move-dialog">
+  <form method="dialog" id="move-form">
+    <h2>옮기기</h2>
+    <p class="muted" id="move-what"></p>
+    <label>옮길 곳<select class="input" id="move-folder"></select></label>
+    <span class="error" id="move-msg"></span>
+    <div class="foot"><button class="btn" type="button" data-close>취소</button><button class="btn primary" value="ok">옮기기</button></div>
   </form>
 </dialog>
 

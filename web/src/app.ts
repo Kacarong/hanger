@@ -1100,6 +1100,17 @@ ${body || `<section class="works"><p class="empty reveal">${mine ? "아직 포�
       return json(db.insertFolder(name, parent, driveId), 201);
     }
 
+    // The order of one folder's folders and files, as the owner dragged them. Only this site keeps it (Drive has none).
+    if (path === "/api/cloud/order" && method === "PUT") {
+      const b = await body(req);
+      const folder = folderRef(b.folderId);
+      if (folder === undefined) return json({ error: "폴더를 찾을 수 없습니다" }, 404);
+      const items = Array.isArray(b.items) ? b.items : [];
+      if (!items.every((i) => i && (i.type === "folder" || i.type === "file") && Number.isInteger(i.id))) return json({ error: "순서가 올바르지 않습니다" }, 400);
+      if (!db.orderFolder(folder, items)) return json({ error: "그사이 폴더 내용이 바뀌었습니다. 다시 옮겨 주세요" }, 409);
+      return json({ ok: true });
+    }
+
     const fm = path.match(/^\/api\/folders\/(\d+)$/);
     if (fm) {
       const folder = db.getFolder(Number(fm[1]));

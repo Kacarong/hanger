@@ -22,6 +22,7 @@ const ICONS = {
   edit: '<path d="M4 20h4L19 9l-4-4L4 16z"/>',
   trash: '<path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/>',
   download: '<path d="M12 4v11M7 10l5 5 5-5M4 20h16"/>',
+  grip: '<g fill="currentColor" stroke="none"><circle cx="9" cy="6" r="1.6"/><circle cx="15" cy="6" r="1.6"/><circle cx="9" cy="12" r="1.6"/><circle cx="15" cy="12" r="1.6"/><circle cx="9" cy="18" r="1.6"/><circle cx="15" cy="18" r="1.6"/></g>',
   chevrons: '<path d="m8 9 4-4 4 4M8 15l4 4 4-4"/>',
   menu: '<path d="M4 6h16M4 12h16M4 18h16"/>',
   clip: '<path d="m20 11-8.5 8.5a5 5 0 0 1-7-7L13 4a3.5 3.5 0 0 1 5 5l-8.5 8.5a2 2 0 0 1-3-3L14 7"/>',
@@ -321,6 +322,9 @@ let fileCategory = () => "";
 let editingFile = null;
 let editingFolder = null;
 let folders = [];
+let listed = []; // what the list shows, in order: { type: "folder" | "file", id, name, sort, key, f (the row) }
+const picked = new Set(); // keys ("file:3", "folder:7") of the ticked rows
+let pickedIn = ""; // the folder/search the ticks belong to; going elsewhere clears them
 const dayText = (s) => new Intl.DateTimeFormat("ko-KR", { timeZone: "Asia/Seoul", year: "numeric", month: "numeric", day: "numeric" }).format(new Date(s.replace(" ", "T") + "Z"));
 
 // The open folder comes from the address (#files/<id>), so back/forward walk the folders. null = the top.
@@ -399,29 +403,38 @@ async function loadList() {
   const files = await call("/api/files?" + params);
   loadQuota();
   renderCrumbs(cur, !!q);
+  // A whole folder is in the owner's order (folders and files together) and can be dragged; a search or a filter can't.
+  const ordered = !q && !fileCategory();
   const del = (path, text) => confirm(text) && call(path, { method: "DELETE" }).then(loadList, showError);
-  const folderRows = (q || fileCategory() ? [] : folders.filter((f) => f.parent_id === cur)).map((f) =>
-    el(
-      "tr",
-      { className: "folder-row" },
-      el("td", {}, el("div", { className: "thumb-empty folder-icon" }, icon("folder"))),
-      el("td", {}, el("a", { className: "title", href: `#files/${f.id}`, textContent: f.name }), el("span", { className: "sub", textContent: "폴더" })),
-      el("td", { className: "hide-sm" }),
-      el("td", { className: "hide-sm" }),
-      el("td", { className: "num muted" }),
-      el("td", { className: "hide-sm muted", textContent: dayText(f.created_at) }),
-      el(
-        "td",
-        { className: "actions" },
-        iconBtn("이름·위치 바꾸기", "edit", () => openFolderDialog(f)),
-        iconBtn("삭제", "trash", () => del(`/api/folders/${f.id}`, `"${f.name}" 폴더와 그 안의 파일·폴더를 모두 지울까요? (구글 드라이브 휴지통으로 가서 30일 안에는 드라이브에서 되살릴 수 있습니다. 노트·할 일·포트폴리오에 붙인 것도 떨어집니다)`), "danger"),
-      ),
-    ),
-  );
-  const fileRows = files.map((f) =>
-    el(
-      "tr",
-      {},
+  const row = (it, cells) => {
+    const tick = el("input", { type: "checkbox", checked: picked.has(it.key), title: "고르기", ariaLabel: `${it.name} 고르기`, onchange() { this.checked ? picked.add(it.key) : picked.delete(it.key); showTicks(); } });
+    const handle = ordered && el("button", { type: "button", className: "drag-handle", title: "끌어서 순서 바꾸기 · 폴더 위에 놓으면 그 안으로", ariaLabel: `${it.name} 끌어서 옮기기`, onpointerdown: (ev) => dragRows(ev, it.key) }, icon("grip"));
+    const tr = el("tr", { className: it.type === "folder" ? "folder-row" : "" }, el("td", { className: "sel-cell" }, el("div", { className: "sel-box" }, handle, tick)), ...cells);
+    tr.dataset.key = it.key;
+    if (it.type === "folder") tr.dataset.folder = it.id;
+    return tr;
+  };
+  const folderItems = (ordered ? folders.filter((f) => f.parent_id === cur) : []).map((f) => ({ type: "folder", id: f.id, name: f.name, sort: f.sort, key: `folder:${f.id}`, f }));
+  const fileItems = files.map((f) => ({ type: "file", id: f.id, name: f.title, sort: f.sort, key: `file:${f.id}`, f }));
+  listed = ordered ? [...folderItems, ...fileItems].sort((a, b) => a.sort - b.sort) : fileItems;
+  const rows = listed.map((it) => {
+    const f = it.f;
+    if (it.type === "folder")
+      return row(it, [
+        el("td", {}, el("div", { className: "thumb-empty folder-icon" }, icon("folder"))),
+        el("td", {}, el("a", { className: "title", href: `#files/${f.id}`, textContent: f.name }), el("span", { className: "sub", textContent: "폴더" })),
+        el("td", { className: "hide-sm" }),
+        el("td", { className: "hide-sm" }),
+        el("td", { className: "num muted" }),
+        el("td", { className: "hide-sm muted", textContent: dayText(f.created_at) }),
+        el(
+          "td",
+          { className: "actions" },
+          iconBtn("이름·위치 바꾸기", "edit", () => openFolderDialog(f)),
+          iconBtn("삭제", "trash", () => del(`/api/folders/${f.id}`, `"${f.name}" 폴더와 그 안의 파일·폴더를 모두 지울까요? (구글 드라이브 휴지통으로 가서 30일 안에는 드라이브에서 되살릴 수 있습니다. 노트·할 일·포트폴리오에 붙인 것도 떨어집니다)`), "danger"),
+        ),
+      ]);
+    return row(it, [
       el("td", {}, el("img", { className: "thumb", src: `/thumb/${f.id}`, alt: "", loading: "lazy", onerror() { this.replaceWith(el("div", { className: "thumb-empty" })); } })),
       el("td", {}, el("a", { className: "title", href: fileUrl(f), target: "_blank", rel: "noopener", textContent: f.title }), el("span", { className: "sub", textContent: q ? pathText(f.folder_id) : f.note || f.name })),
       el("td", { className: "hide-sm" }, pill(f.category, f.category === "포트폴리오" ? "blue" : "gray")),
@@ -435,10 +448,133 @@ async function loadList() {
         iconBtn("수정·옮기기", "edit", () => openFileDialog(f)),
         iconBtn("삭제", "trash", () => del(`/api/files/${f.id}`, `"${f.title}" 을(를) 지울까요? (구글 드라이브 휴지통으로 가서 30일 안에는 드라이브에서 되살릴 수 있습니다. 노트·할 일·포트폴리오에 붙인 것도 떨어집니다)`), "danger"),
       ),
-    ),
-  );
-  const rows = [...folderRows, ...fileRows];
-  $("list").replaceChildren(...(rows.length ? rows : [emptyRow(7, q || fileCategory() ? "검색 결과가 없습니다." : cur === null ? "아직 올린 파일이 없습니다." : "빈 폴더입니다.")]));
+    ]);
+  });
+  // Ticks stay while the same folder/search is reloaded (after a move, an upload, ...), and only for what is still there.
+  const where = `${cur}|${q}|${fileCategory()}`;
+  if (where !== pickedIn) picked.clear();
+  pickedIn = where;
+  for (const k of [...picked]) if (!listed.some((it) => it.key === k)) picked.delete(k);
+  showTicks();
+  $("list").replaceChildren(...(rows.length ? rows : [emptyRow(8, q || fileCategory() ? "검색 결과가 없습니다." : cur === null ? "아직 올린 파일이 없습니다." : "빈 폴더입니다.")]));
+}
+
+// The bar over the list while something is ticked, and the tick-all box in the header.
+function showTicks() {
+  $("sel-bar").hidden = !picked.size;
+  $("sel-count").textContent = `${picked.size}개 고름`;
+  $("sel-all").checked = !!listed.length && picked.size === listed.length;
+  $("sel-all").indeterminate = !!picked.size && picked.size < listed.length;
+  $("list").querySelectorAll("tr[data-key]").forEach((tr) => {
+    tr.classList.toggle("picked", picked.has(tr.dataset.key));
+    tr.querySelector(".sel-cell input").checked = picked.has(tr.dataset.key);
+  });
+}
+
+// Moves the items (in list order) into a folder (null = the top), one at a time like the 수정·옮기기 dialog.
+// Each lands first there, so going from the last one keeps their order. Returns what could not be moved.
+async function moveItems(items, target) {
+  const failed = [];
+  for (const it of [...items].reverse()) {
+    const now = it.type === "folder" ? folders.find((f) => f.id === it.id)?.parent_id : it.f.folder_id;
+    if (now === target) continue;
+    try {
+      if (it.type === "folder") await call(`/api/folders/${it.id}`, { method: "PATCH", body: { parentId: target } });
+      else await call(`/api/files/${it.id}`, { method: "PATCH", body: { folderId: target } });
+      picked.delete(it.key);
+    } catch (e) {
+      failed.unshift(`${it.name}: ${e.message}`);
+    }
+  }
+  await loadList();
+  return failed;
+}
+
+function openMoveDialog() {
+  const items = listed.filter((it) => picked.has(it.key));
+  if (!items.length) return;
+  const nf = items.filter((it) => it.type === "folder").length;
+  $("move-what").textContent = [nf && `폴더 ${nf}개`, items.length - nf && `파일 ${items.length - nf}개`].filter(Boolean).join(", ") + "를 옮깁니다.";
+  // A folder can't go into itself or below itself.
+  const skip = new Set(items.filter((it) => it.type === "folder").flatMap((it) => [...subtree(it.id)]));
+  folderOptions($("move-folder"), currentFolder(), skip);
+  $("move-msg").textContent = "";
+  $("move-dialog").showModal();
+}
+
+// 손잡이(점 6개)를 잡고 끌어서 순서를 바꾼다. 폴더 줄 가운데에 놓으면 그 폴더 안으로 옮긴다. 고른 줄을 끌면 고른 것이 모두 같이 간다.
+// 마우스와 손가락 모두 pointer 이벤트로 받는다(휴대폰 크롬은 HTML 끌어 놓기를 손가락으로 시작하지 못한다).
+function dragRows(ev, key) {
+  if (ev.button !== 0) return;
+  ev.preventDefault();
+  const handle = ev.currentTarget;
+  handle.setPointerCapture(ev.pointerId);
+  const rows = [...$("list").querySelectorAll("tr[data-key]")];
+  const group = picked.has(key) ? listed.filter((it) => picked.has(it.key)).map((it) => it.key) : [key];
+  const scroller = $("list").closest(".content");
+  const startY = ev.clientY;
+  let x = ev.clientX;
+  let y = ev.clientY;
+  let dragging = false;
+  let target = null;
+  let where = "";
+  let raf = 0;
+  const clear = () => rows.forEach((r) => r.classList.remove("drop-before", "drop-after", "drop-into"));
+  const locate = () => {
+    clear();
+    target = document.elementFromPoint(x, y)?.closest("#list tr[data-key]") ?? null;
+    if (!target || group.includes(target.dataset.key)) return void (target = null);
+    const r = target.getBoundingClientRect();
+    const at = (y - r.top) / r.height;
+    where = target.dataset.folder && at > 0.25 && at < 0.75 ? "into" : at < 0.5 ? "before" : "after";
+    target.classList.add("drop-" + where);
+  };
+  // 목록 위·아래 끝 가까이 끌고 있으면 목록을 굴린다.
+  const scroll = () => {
+    const box = scroller.getBoundingClientRect();
+    const d = y < box.top + 48 ? -12 : y > box.bottom - 48 ? 12 : 0;
+    if (d) {
+      scroller.scrollTop += d;
+      locate();
+    }
+    raf = requestAnimationFrame(scroll);
+  };
+  handle.onpointermove = (e) => {
+    x = e.clientX;
+    y = e.clientY;
+    if (!dragging && Math.abs(y - startY) < 5) return;
+    if (!dragging) {
+      dragging = true;
+      rows.forEach((r) => r.classList.toggle("dragging", group.includes(r.dataset.key)));
+      raf = requestAnimationFrame(scroll);
+    }
+    locate();
+  };
+  const end = (drop) => {
+    handle.onpointermove = handle.onpointerup = handle.onpointercancel = null;
+    cancelAnimationFrame(raf);
+    clear();
+    rows.forEach((r) => r.classList.remove("dragging"));
+    if (!drop || !dragging || !target) return;
+    const items = listed.filter((it) => group.includes(it.key));
+    if (where === "into") {
+      moveItems(items, Number(target.dataset.folder)).then((failed) => failed.length && showError("옮기지 못한 것: " + failed.join(" · ")), showError);
+      return;
+    }
+    const rest = listed.filter((it) => !group.includes(it.key));
+    const at = rest.findIndex((it) => it.key === target.dataset.key) + (where === "after" ? 1 : 0);
+    const next = [...rest.slice(0, at), ...items, ...rest.slice(at)];
+    if (next.every((it, i) => it === listed[i])) return;
+    listed = next;
+    // 바로 그 순서로 보여 주고 저장한다. 저장이 안 되면 서버의 순서로 다시 그린다.
+    $("list").append(...next.map((it) => rows.find((r) => r.dataset.key === it.key)));
+    call("/api/cloud/order", { method: "PUT", body: { folderId: currentFolder(), items: next.map(({ type, id }) => ({ type, id })) } }).catch((e) => {
+      showError(e);
+      loadList().catch(showError);
+    });
+  };
+  handle.onpointerup = () => end(true);
+  handle.onpointercancel = () => end(false);
 }
 
 // 포트폴리오: 내 소개 + 섹션(업적·작품·취미 …)마다 항목. 항목은 공개(kacarong.kr) 또는 개인용(미리 보기에만).
@@ -2002,6 +2138,21 @@ async function init() {
     } catch (e) {
       $("folder-msg").textContent = e.message;
     }
+  };
+  $("sel-all").onchange = (ev) => {
+    for (const it of listed) ev.target.checked ? picked.add(it.key) : picked.delete(it.key);
+    showTicks();
+  };
+  $("sel-clear").onclick = () => {
+    picked.clear();
+    showTicks();
+  };
+  $("sel-move").onclick = openMoveDialog;
+  $("move-form").onsubmit = async (ev) => {
+    ev.preventDefault();
+    const failed = await moveItems(listed.filter((it) => picked.has(it.key)), $("move-folder").value ? Number($("move-folder").value) : null).catch((e) => [e.message]);
+    if (failed.length) $("move-msg").textContent = "옮기지 못한 것: " + failed.join(" · ");
+    else $("move-dialog").close();
   };
   $("event-allday").onchange = syncEventTime;
   $("event-date").onchange = () => {

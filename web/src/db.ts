@@ -15,6 +15,7 @@ export type FileRow = {
   // '' = a file uploaded to the cloud. 'notion' = the copy of a file in a Notion page: it shows in its note
   // but is not one of the cloud's files (the cloud lists, counts and picks only its own uploads).
   origin: string;
+  sort: number; // place among the folders and files of its folder, smallest first (cloud uploads only)
   // shared/public/web_*_link are left over from when files were shared through Drive links; nothing reads them now.
   shared: number;
   public: number;
@@ -24,7 +25,9 @@ export type FileRow = {
 };
 
 // A cloud folder. Each one has a matching folder in Drive (drive_id) so the Drive copy keeps the same layout.
-export type FolderRow = { id: number; name: string; parent_id: number | null; drive_id: string; created_at: string };
+export type FolderRow = { id: number; name: string; parent_id: number | null; drive_id: string; sort: number; created_at: string };
+// One thing in a cloud folder, for putting the folder in order.
+export type CloudItem = { type: "folder" | "file"; id: number };
 
 export const CATEGORIES = ["포트폴리오", "플래닝", "작업", "과제", "기타"];
 
@@ -350,6 +353,20 @@ export function openDb(path: string) {
     db.exec(`ALTER TABLE files ADD COLUMN origin TEXT NOT NULL DEFAULT '';
       UPDATE files SET origin = 'notion' WHERE id IN (SELECT file_id FROM notion_files) OR id IN (SELECT file_id FROM attachments WHERE by_import = 1);`);
   }
+  // sort: the order the owner put a folder's folders and files in (one order for both). Before it, a folder showed
+  // its folders by name and then its files newest first, so that is where they start.
+  const folderCols = (db.query("PRAGMA table_info(folders)").all() as { name: string }[]).map((c) => c.name);
+  if (!folderCols.includes("sort") || !fileCols.includes("sort")) {
+    db.transaction(() => {
+      if (!folderCols.includes("sort")) db.exec("ALTER TABLE folders ADD COLUMN sort INTEGER NOT NULL DEFAULT 0");
+      if (!fileCols.includes("sort")) db.exec("ALTER TABLE files ADD COLUMN sort INTEGER NOT NULL DEFAULT 0");
+      db.exec(`
+        UPDATE folders SET sort = (SELECT n FROM (SELECT id, ROW_NUMBER() OVER (PARTITION BY parent_id ORDER BY name COLLATE NOCASE, id) - 1 AS n FROM folders) r WHERE r.id = folders.id);
+        UPDATE files SET sort = (SELECT n FROM (SELECT id, ROW_NUMBER() OVER (PARTITION BY folder_id ORDER BY id DESC) - 1 AS n FROM files WHERE origin = '') r WHERE r.id = files.id)
+          + (SELECT COUNT(*) FROM folders WHERE parent_id IS files.folder_id) WHERE origin = '';
+      `);
+    })();
+  }
   // Attachments tables made before portfolio items and the profile could have files: widen the target check.
   // SQLite can't change a CHECK in place, so copy the table. The triggers that name it go first and come back below.
   const attachSql = (db.query("SELECT sql FROM sqlite_master WHERE name = 'attachments'").get() as { sql: string }).sql;
@@ -404,6 +421,11 @@ export function openDb(path: string) {
       db.query("INSERT INTO settings (key, value) VALUES ('portfolio_seeded', '1')").run();
     })();
   }
+  // A sort that puts something first in a cloud folder (before its folders and files).
+  const topSort = (folder: number | null) => {
+    const { s } = db.query("SELECT MIN(s) AS s FROM (SELECT MIN(sort) AS s FROM folders WHERE parent_id IS ?1 UNION ALL SELECT MIN(sort) FROM files WHERE folder_id IS ?1 AND origin = '')").get(folder) as { s: number | null };
+    return s === null ? 0 : s - 1;
+  };
   const TASK_SELECT = `SELECT tasks.*, notes.title AS note_title,
     (SELECT COUNT(*) FROM attachments WHERE target = 'task' AND target_id = tasks.id) AS files
     FROM tasks LEFT JOIN notes ON notes.id = tasks.note_id`;
@@ -501,7 +523,8 @@ export function openDb(path: string) {
         const like = `%${opts.q}%`;
         args.push(like, like, like, like);
       }
-      const sql = `SELECT * FROM files WHERE ${where.join(" AND ")} ORDER BY id DESC`;
+      // One folder is in the owner's order; a search across folders shows the newest first.
+      const sql = `SELECT * FROM files WHERE ${where.join(" AND ")} ORDER BY ${opts.folder === undefined ? "" : "sort, "}id DESC`;
       return db.query(sql).all(...args) as FileRow[];
     },
     usage(): { files: number; bytes: number } {
@@ -513,25 +536,29 @@ export function openDb(path: string) {
     getFileByDriveId(driveId: string): FileRow | null {
       return db.query("SELECT * FROM files WHERE drive_id = ?").get(driveId) as FileRow | null;
     },
+    // A new upload goes first in its folder.
     insertFile(f: Pick<FileRow, "drive_id" | "name" | "title" | "mime" | "size" | "category" | "tags" | "note"> & { folder_id?: number | null; origin?: string }): FileRow {
       return db
-        .query("INSERT INTO files (drive_id, name, title, mime, size, category, tags, note, folder_id, origin) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *")
-        .get(f.drive_id, f.name, f.title, f.mime, f.size, f.category, f.tags, f.note, f.folder_id ?? null, f.origin ?? "") as FileRow;
+        .query("INSERT INTO files (drive_id, name, title, mime, size, category, tags, note, folder_id, origin, sort) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *")
+        .get(f.drive_id, f.name, f.title, f.mime, f.size, f.category, f.tags, f.note, f.folder_id ?? null, f.origin ?? "", topSort(f.folder_id ?? null)) as FileRow;
     },
     notionCopies(): FileRow[] {
       return db.query("SELECT * FROM files WHERE origin = 'notion'").all() as FileRow[];
     },
+    // A file moved to another folder goes first there.
     updateFile(id: number, patch: Partial<Pick<FileRow, "title" | "category" | "tags" | "note" | "folder_id">>) {
       const keys = Object.keys(patch) as (keyof typeof patch)[];
       if (!keys.length) return;
+      const before = db.query("SELECT folder_id FROM files WHERE id = ?").get(id) as { folder_id: number | null };
       const sets = keys.map((k) => `${k} = ?`).join(", ");
       db.query(`UPDATE files SET ${sets} WHERE id = ?`).run(...keys.map((k) => patch[k] ?? null), id);
+      if (patch.folder_id !== undefined && patch.folder_id !== before.folder_id) db.query("UPDATE files SET sort = ? WHERE id = ?").run(topSort(patch.folder_id), id);
     },
     deleteFile(id: number) {
       db.query("DELETE FROM files WHERE id = ?").run(id);
     },
     listFolders(): FolderRow[] {
-      return db.query("SELECT * FROM folders ORDER BY name COLLATE NOCASE, id").all() as FolderRow[];
+      return db.query("SELECT * FROM folders ORDER BY sort, id").all() as FolderRow[];
     },
     getFolder(id: number): FolderRow | null {
       return db.query("SELECT * FROM folders WHERE id = ?").get(id) as FolderRow | null;
@@ -540,12 +567,27 @@ export function openDb(path: string) {
     folderNameTaken(parentId: number | null, name: string, exceptId = 0): boolean {
       return !!db.query("SELECT 1 FROM folders WHERE parent_id IS ? AND name = ? AND id != ?").get(parentId, name, exceptId);
     },
+    // A new folder, or one moved to another folder, goes first there.
     insertFolder(name: string, parentId: number | null, driveId: string): FolderRow {
-      return db.query("INSERT INTO folders (name, parent_id, drive_id) VALUES (?, ?, ?) RETURNING *").get(name, parentId, driveId) as FolderRow;
+      return db.query("INSERT INTO folders (name, parent_id, drive_id, sort) VALUES (?, ?, ?, ?) RETURNING *").get(name, parentId, driveId, topSort(parentId)) as FolderRow;
     },
     updateFolder(id: number, name: string, parentId: number | null) {
-      db.query("UPDATE folders SET name = ?, parent_id = ? WHERE id = ?").run(name, parentId, id);
+      const before = db.query("SELECT parent_id FROM folders WHERE id = ?").get(id) as { parent_id: number | null };
+      const sort = parentId === before.parent_id ? null : topSort(parentId);
+      db.query("UPDATE folders SET name = ?, parent_id = ?, sort = COALESCE(?, sort) WHERE id = ?").run(name, parentId, sort, id);
     },
+    // Puts a folder's folders and files in the given order. It must name each of them once (the list on screen
+    // may be out of date); returns false otherwise and changes nothing.
+    orderFolder: db.transaction((folder: number | null, items: CloudItem[]): boolean => {
+      const have = [
+        ...(db.query("SELECT id FROM folders WHERE parent_id IS ?").all(folder) as { id: number }[]).map((r) => `folder:${r.id}`),
+        ...(db.query("SELECT id FROM files WHERE folder_id IS ? AND origin = ''").all(folder) as { id: number }[]).map((r) => `file:${r.id}`),
+      ];
+      const want = items.map((i) => `${i.type}:${i.id}`);
+      if (new Set(want).size !== want.length || want.length !== have.length || !want.every((k) => have.includes(k))) return false;
+      items.forEach((i, n) => db.query(`UPDATE ${i.type === "folder" ? "folders" : "files"} SET sort = ? WHERE id = ?`).run(n, i.id));
+      return true;
+    }),
     // The folder and every folder below it.
     folderTree(id: number): number[] {
       return (db.query("WITH RECURSIVE t(id) AS (SELECT ? UNION SELECT folders.id FROM folders JOIN t ON folders.parent_id = t.id) SELECT id FROM t").all(id) as { id: number }[]).map((r) => r.id);
