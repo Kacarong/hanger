@@ -1321,22 +1321,29 @@ async function notifyOn() {
     return startNotifyPoll();
   }
   if ((await Notification.requestPermission()) !== "granted") throw new Error("알림을 허용하지 않아 켤 수 없습니다. 휴대폰 앱이면 휴대폰 설정 → 애플리케이션 → kacarong → 알림을 켠 뒤 다시 눌러 주세요(크롬 알림은 꺼져 있어도 됩니다).");
+  let pushError = null;
   if (pushSupported()) {
     try {
-      const { publicKey } = await call("/api/notify");
-      await dropOldWorkers();
-      const reg = await navigator.serviceWorker.register("/sw.js", { scope: SW_SCOPE });
-      await untilActive(reg);
-      const sub = (await reg.pushManager.getSubscription()) ?? (await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: publicKey }));
-      await call("/api/push/subscribe", { method: "POST", body: sub.toJSON() });
+      // 등록이 끝나지 않고 멈추는 휴대폰이 있어서, 20초 안에 안 끝나면 실패로 친다(버튼이 아무 말 없이 멈추지 않게).
+      const subscribe = async () => {
+        const { publicKey } = await call("/api/notify");
+        await dropOldWorkers();
+        const reg = await navigator.serviceWorker.register("/sw.js", { scope: SW_SCOPE });
+        await untilActive(reg);
+        const sub = (await reg.pushManager.getSubscription()) ?? (await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: publicKey }));
+        await call("/api/push/subscribe", { method: "POST", body: sub.toJSON() });
+      };
+      await Promise.race([subscribe(), new Promise((_, fail) => setTimeout(() => fail(new Error("20초 안에 끝나지 않음")), 20_000))]);
       storage(() => localStorage.setItem("notifyMode", "push"));
       return;
     } catch (e) {
       console.warn("웹 푸시를 쓸 수 없어 화면이 직접 알림을 띄웁니다:", e);
+      pushError = e;
     }
   }
   storage(() => localStorage.setItem("notifyMode", "page"));
   startNotifyPoll();
+  if (pushError) $("notify-msg").textContent = `앱이 닫혀 있을 때도 받는 알림을 켜지 못해, 이 화면이 열려 있는 동안만 받습니다. (이유: ${pushError.message || pushError})`;
 }
 
 async function notifyOff() {
@@ -2117,11 +2124,14 @@ async function init() {
       (e) => ($("notify-msg").textContent = e.message),
     );
   for (const id of ["notify-morning-on", "notify-morning", "notify-homework", "notify-exam", "notify-classes"]) $(id).onchange = saveNotify;
-  $("notify-test").onclick = () =>
+  // 이 기기가 꺼져 있으면 서버가 이 기기로 보낼 곳이 없다: 보내는 대신 먼저 켜라고 알려 준다.
+  $("notify-test").onclick = async () => {
+    if (!(await notifyStateText()).startsWith("켜짐")) return void ($("notify-msg").textContent = "이 기기는 아직 알림이 꺼져 있어서 테스트 알림을 받을 수 없습니다. 먼저 위의 '이 기기에서 알림 받기'를 누르고, 묻는 창이 뜨면 '허용'을 눌러 주세요.");
     call("/api/notify/test", { method: "POST" }).then(
-      () => ($("notify-msg").textContent = "보냈습니다. 잠시 뒤 알림이 뜨지 않으면 이 기기 알림이 꺼져 있는 것입니다."),
+      () => ($("notify-msg").textContent = "보냈습니다. 1분 안에 알림이 뜨지 않으면 휴대폰 설정에서 kacarong 알림이 켜져 있는지 확인해 주세요."),
       (e) => ($("notify-msg").textContent = e.message),
     );
+  };
   // 이 기기가 알림을 켜 둔 상태면 이어서 받는다: 화면이 직접 띄우는 방식은 다시 묻기 시작하고,
   // 웹 푸시는 구독을 서버에 다시 알려 둔다(서버가 지웠어도 되살아나게). /admin 구독이 없으면(예전 / 구독뿐이거나
   // 브라우저가 지움) 다시 켠다: 이미 허용돼 있어 묻지 않고, 예전 구독은 notifyOn 이 치운다.
