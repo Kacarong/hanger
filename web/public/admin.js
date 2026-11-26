@@ -1289,7 +1289,7 @@ async function untilActive(reg) {
 async function notifyStateText() {
   if (tauriNotify) return notifyMode() === "page" ? "켜짐 · 프로그램이 켜져 있는 동안(최소화해도) 받습니다." : "꺼짐";
   if (!("Notification" in window)) return "이 기기(브라우저)는 알림을 지원하지 않습니다.";
-  if (Notification.permission === "denied") return "알림이 차단돼 있습니다. 브라우저·앱 설정에서 이 사이트 알림을 허용해 주세요.";
+  if (Notification.permission === "denied") return "알림이 차단돼 있습니다. 휴대폰 앱이면 휴대폰 설정 → 애플리케이션 → kacarong → 알림을 켜 주세요(크롬 알림은 꺼져 있어도 됩니다). 브라우저면 브라우저의 사이트 설정에서 허용해 주세요.";
   if (notifyMode() === "page" && Notification.permission === "granted") return "켜짐 · 이 화면이 열려 있는 동안 받습니다.";
   if (notifyMode() === "push" && pushSupported() && (await pushSubscription().catch(() => null))) return "켜짐 · 앱·브라우저가 닫혀 있어도 받습니다.";
   return "꺼짐";
