@@ -326,6 +326,8 @@ let listed = []; // what the list shows, in order: { type: "folder" | "file", id
 const picked = new Set(); // keys ("file:3", "folder:7") of the ticked rows
 let pickedIn = ""; // the folder/search the ticks belong to; going elsewhere clears them
 let orderSaves = Promise.resolve(); // PUT /api/cloud/order calls, one after another
+let orderSeq = 0; // how many saves were queued; the last one redraws the list if any of them failed
+let orderFailed = false;
 const dayText = (s) => new Intl.DateTimeFormat("ko-KR", { timeZone: "Asia/Seoul", year: "numeric", month: "numeric", day: "numeric" }).format(new Date(s.replace(" ", "T") + "Z"));
 
 // The open folder comes from the address (#files/<id>), so back/forward walk the folders. null = the top.
@@ -571,13 +573,20 @@ function dragRows(ev, key) {
     // 바로 그 순서로 보여 주고 저장한다. 저장이 안 되면 서버의 순서로 다시 그린다.
     $("list").append(...next.map((it) => rows.find((r) => r.dataset.key === it.key)));
     // 저장은 한 번에 하나씩 차례로 보낸다. 앞 저장이 늦게 끝나 마지막 순서를 덮어쓰지 않게.
+    // 실패가 있었으면 줄 선 저장이 다 끝난 뒤에 한 번 서버의 순서로 다시 그린다(중간에 그리면 뒤 저장이 화면과 어긋난다).
     const body = { folderId: currentFolder(), items: next.map(({ type, id }) => ({ type, id })) };
-    orderSaves = orderSaves.then(() =>
-      call("/api/cloud/order", { method: "PUT", body }).catch((e) => {
+    const n = ++orderSeq;
+    orderSaves = orderSaves
+      .then(() => call("/api/cloud/order", { method: "PUT", body }))
+      .catch((e) => {
         showError(e);
+        orderFailed = true;
+      })
+      .then(() => {
+        if (n !== orderSeq || !orderFailed) return;
+        orderFailed = false;
         return loadList().catch(showError);
-      }),
-    );
+      });
   };
   handle.onpointerup = () => end(true);
   handle.onpointercancel = () => end(false);
