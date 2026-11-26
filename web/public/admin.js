@@ -1253,6 +1253,9 @@ const tauriNotify = window.__TAURI__?.notification ?? null;
 const pushSupported = () => !tauriNotify && "serviceWorker" in navigator && "PushManager" in window && "Notification" in window;
 const notifyMode = () => storage(() => localStorage.getItem("notifyMode")) || "";
 let notifyPoll = null;
+// 알림 켜기 시도 번호: 끄거나 다시 켜면 올라가서, 그 전 시도(시간이 지나 멈춘 것)는 다음 단계로 못 간다.
+let notifyAttempt = 0;
+let notifyWanted = false; // 마지막으로 누른 것이 켜기인가
 // 서비스 워커 범위는 /admin: 안드로이드 크롬은 이 범위 주소를 여는 앱(TWA, /admin 만 맡음)이 있을 때만
 // 알림을 그 앱 이름으로 넘긴다. 범위가 / 면 크롬 이름으로 떠서 크롬 알림을 끈 휴대폰에서는 사라진다.
 const SW_SCOPE = "/admin";
@@ -1324,28 +1327,43 @@ async function notifyOn() {
   let pushError = null;
   if (pushSupported()) {
     // 등록이 끝나지 않고 멈추는 휴대폰이 있어서, 20초 안에 안 끝나면 실패로 친다(버튼이 아무 말 없이 멈추지 않게).
-    // 시간이 지난 뒤에 늦게 끝난 구독은 서버·브라우저에서 지운다: 화면은 이미 "웹 푸시 아님"으로 정했다.
+    // 시간이 지났거나 그 뒤에 끄고/다시 켠 시도는 다음 단계로 가지 않는다.
+    notifyWanted = true;
+    const my = ++notifyAttempt;
     let step = "시작";
     let timedOut = false;
+    const stale = () => timedOut || my !== notifyAttempt;
     const subscribe = async () => {
       step = "서버에서 키 받기";
       const { publicKey } = await call("/api/notify");
+      if (stale()) return;
       step = "예전 서비스 워커 정리";
       await dropOldWorkers();
+      if (stale()) return;
       step = "서비스 워커 등록";
       const reg = await navigator.serviceWorker.register("/sw.js", { scope: SW_SCOPE });
+      if (stale()) return;
       step = "서비스 워커 켜기";
       await untilActive(reg);
+      if (stale()) return;
       step = "푸시 구독";
-      const sub = (await reg.pushManager.getSubscription()) ?? (await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: publicKey }));
-      const dropLate = async () => {
-        await call("/api/push/unsubscribe", { method: "POST", body: { endpoint: sub.endpoint } }).catch(() => {});
-        await sub.unsubscribe().catch(() => {});
+      const existing = await reg.pushManager.getSubscription();
+      if (stale()) return;
+      const sub = existing ?? (await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: publicKey }));
+      // 멈췄다가 늦게 끝난 구독: 이 시도가 새로 만든 것만, 이 시도가 마지막이거나(화면은 이미 "웹 푸시 아님") 끈 뒤일 때 지운다.
+      // 그 뒤에 다시 켠 시도가 있으면 같은 구독을 쓰고 있을 수 있어서 둔다.
+      const droppedLate = async () => {
+        if (!stale()) return false;
+        if (!existing && (my === notifyAttempt || !notifyWanted)) {
+          await call("/api/push/unsubscribe", { method: "POST", body: { endpoint: sub.endpoint } }).catch(() => {});
+          await sub.unsubscribe().catch(() => {});
+        }
+        return true;
       };
-      if (timedOut) return dropLate();
+      if (await droppedLate()) return;
       step = "서버에 이 기기 등록";
       await call("/api/push/subscribe", { method: "POST", body: sub.toJSON() });
-      if (timedOut) return dropLate();
+      await droppedLate();
     };
     try {
       await Promise.race([
@@ -1387,6 +1405,8 @@ async function showLocal(n) {
 }
 
 async function notifyOff() {
+  notifyWanted = false;
+  notifyAttempt++;
   if (pushSupported()) {
     await dropOldWorkers().catch(() => {});
     const sub = await pushSubscription().catch(() => null);
