@@ -14,6 +14,7 @@ const drive = new Map<string, FakeFile>();
 const uploads = new Map<string, { name: string; mimeType: string; parents: string[]; size: number; received: number; origin: string | null; fileId?: string; parts: Buffer[] }>();
 let foldersCreated = 0;
 let driveDeleteFails = false;
+let uploadFails = false; // starting an upload session fails, like a Drive outage
 let loginEmail = "owner@example.com";
 const READ_SCOPE = "openid email https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/calendar.readonly";
 const FULL_SCOPE = `${READ_SCOPE} https://www.googleapis.com/auth/calendar.events`;
@@ -92,6 +93,7 @@ beforeAll(() => {
       if (req.headers.get("Authorization") !== "Bearer at") return new Response("unauthorized", { status: 401 });
 
       if (p === "/upload/drive/v3/files" && req.method === "POST") {
+        if (uploadFails) return new Response("backend error", { status: 503 });
         const meta = await req.json();
         const sid = `s${nextId++}`;
         uploads.set(sid, {
@@ -2637,6 +2639,41 @@ test("백업 상태: 마지막 백업 시각·실패 이유·드라이브의 백
     expect([...drive.values()].length).toBe(uploads - 1); // no new upload, the older copy of the 28th removed
     expect(s.files.map((f) => f.name)).toEqual(["folio-2026-11-28.db", "folio-2026-11-27.db"]);
     expect((await now()).status).toBe(200);
+
+    // A failed upload in 지금 백업 (the day already has a copy, and the data changed since): the next hourly look
+    // uploads again, and the error clears only once that upload is through.
+    const before = (await status()).files[0]!.id;
+    const at = (await status()).at;
+    const made = await call("/api/tasks", { method: "POST", cookie, headers: JSON_ORIGIN, body: JSON.stringify({ kind: "할 일", title: "백업 뒤에 적은 일" }) });
+    expect(made.status).toBe(201);
+    uploadFails = true;
+    clock = new Date("2026-11-28T11:00:00+09:00");
+    expect((await now()).status).toBe(502);
+    expect((await status()).error!.message).toContain("업로드");
+    clock = new Date("2026-11-28T12:00:00+09:00");
+    await backup.tick(); // still failing: the error stays, the last good copy is still the one shown
+    s = await status();
+    expect(s.error!.at).toBe("2026-11-28T03:00:00.000Z");
+    expect(s.at).toBe(at);
+    uploadFails = false;
+    clock = new Date("2026-11-28T13:00:00+09:00");
+    await backup.tick();
+    s = await status();
+    expect(s.error).toBeNull();
+    expect(s.at).toBe("2026-11-28T04:00:00.000Z");
+    expect(s.files.map((f) => f.name)).toEqual(["folio-2026-11-28.db", "folio-2026-11-27.db"]);
+    expect(s.files[0]!.id).not.toBe(before);
+    const restoreDir = mkdtempSync(join(tmpdir(), "folio-restore-"));
+    try {
+      writeFileSync(join(restoreDir, "folio.db"), drive.get(s.files[0]!.id)!.raw!);
+      const copy = openDb(join(restoreDir, "folio.db"));
+      expect(copy.listTasks({}).map((t) => t.title)).toContain("백업 뒤에 적은 일");
+      copy.raw.close();
+    } finally {
+      rmSync(restoreDir, { recursive: true, force: true });
+    }
+    await backup.tick(); // done for the day: nothing more goes up
+    expect((await status()).files[0]!.id).toBe(s.files[0]!.id);
 
     // late: today's copy is due from 08:00, not 24 hours after the last one.
     expect(s.late).toBe(false);

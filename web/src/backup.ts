@@ -32,15 +32,22 @@ export function createBackup(opts: { db: Db; google: Google; enabled: boolean; o
 
   // Uploading and pruning are marked done apart (backup_last, backup_pruned), so a failed prune is retried
   // the next hour without uploading the day's copy again. force: upload a new copy even if today's is up.
+  // A failed upload leaves backup_redo = date, so the next hour uploads again even when the day already has a
+  // copy (a failed 지금 백업 after the day's copy: the newer data must still go up). backup_last/backup_at stay
+  // the last copy that really went up.
   async function run(date: string, force: boolean) {
     busy = true;
+    let uploading = false;
     try {
       const folder = await google.backupFolder();
       if (force || db.getSetting("backup_last") !== date) {
+        uploading = true;
         // serialize() reads through the connection, so changes still in the WAL are in the copy.
         await google.upload(`folio-${date}.db`, "application/vnd.sqlite3", new Blob([new Uint8Array(db.raw.serialize())]), opts.origin, folder);
+        uploading = false;
         db.setSetting("backup_last", date);
         db.setSetting("backup_at", opts.now().toISOString());
+        db.setSetting("backup_redo", "");
       }
       // Same-day duplicates count as one day; the older copies go.
       const seen = new Set<string>();
@@ -52,9 +59,10 @@ export function createBackup(opts: { db: Db; google: Google; enabled: boolean; o
       db.setSetting("backup_error", "");
     } catch (e) {
       db.setSetting("backup_error", JSON.stringify({ at: opts.now().toISOString(), message: e instanceof Error ? e.message : String(e) }));
-      // The next tick runs again (and clears the error): a failed 지금 백업 on a day already done must not
-      // leave the day marked finished. The day's copy is up already, so that tick only prunes.
+      // The next tick runs again (and clears the error only when it gets through): a failed 지금 백업 on a day
+      // already done must not leave the day marked finished. It uploads again if the upload failed, else only prunes.
       db.setSetting("backup_pruned", "");
+      if (uploading) db.setSetting("backup_redo", date);
       throw e;
     } finally {
       busy = false;
@@ -64,9 +72,10 @@ export function createBackup(opts: { db: Db; google: Google; enabled: boolean; o
   async function tick() {
     if (busy || !on()) return;
     const { date, hour } = seoul(opts.now());
-    if (QUIET(hour) || (db.getSetting("backup_last") === date && db.getSetting("backup_pruned") === date)) return;
+    const redo = db.getSetting("backup_redo") === date;
+    if (QUIET(hour) || (db.getSetting("backup_last") === date && db.getSetting("backup_pruned") === date && !redo)) return;
     try {
-      await run(date, false);
+      await run(date, redo);
     } catch (e) {
       console.error("백업 실패(한 시간 뒤 다시):", e);
     }
