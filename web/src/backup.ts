@@ -52,6 +52,9 @@ export function createBackup(opts: { db: Db; google: Google; enabled: boolean; o
       db.setSetting("backup_error", "");
     } catch (e) {
       db.setSetting("backup_error", JSON.stringify({ at: opts.now().toISOString(), message: e instanceof Error ? e.message : String(e) }));
+      // The next tick runs again (and clears the error): a failed 지금 백업 on a day already done must not
+      // leave the day marked finished. The day's copy is up already, so that tick only prunes.
+      db.setSetting("backup_pruned", "");
       throw e;
     } finally {
       busy = false;
@@ -82,6 +85,9 @@ export function createBackup(opts: { db: Db; google: Google; enabled: boolean; o
       return true;
     },
     // What the workspace shows. listError: the list couldn't be read from Drive (the rest still shows).
+    // late: today's copy should be up by now and isn't: the first hourly look after the quiet hours (07:00) has
+    // passed, or the last copy is older than yesterday. Not a plain 24 hours, since a copy made at 01:30 is
+    // followed by the next day's at 07:00 or later.
     async status() {
       const error = db.getSetting("backup_error");
       const folder = db.getSetting("backup_folder_id");
@@ -94,7 +100,11 @@ export function createBackup(opts: { db: Db; google: Google; enabled: boolean; o
           listError = e instanceof Error ? e.message : String(e);
         }
       }
-      return { on: on(), keep: KEEP, running: busy, last: db.getSetting("backup_last"), at: db.getSetting("backup_at"), error: error ? (JSON.parse(error) as { at: string; message: string }) : null, files: list, listError };
+      const { date, hour } = seoul(opts.now());
+      const yesterday = seoul(new Date(opts.now().getTime() - 86400_000)).date;
+      const last = db.getSetting("backup_last");
+      const late = on() && last !== date && (hour >= 8 || (!!last && last < yesterday));
+      return { on: on(), late, keep: KEEP, running: busy, last: db.getSetting("backup_last"), at: db.getSetting("backup_at"), error: error ? (JSON.parse(error) as { at: string; message: string }) : null, files: list, listError };
     },
     // A day copy from the backup folder, for "받기". null when the id isn't one of them.
     async file(id: string): Promise<BackupFile | null> {

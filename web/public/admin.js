@@ -1459,10 +1459,10 @@ function showBackup(s) {
     ? ["구글 드라이브가 연결되지 않아 백업하지 않습니다.", true]
     : s.error
       ? [`${timeText(s.error.at)}에 백업하지 못했습니다(한 시간 뒤 다시 합니다): ${s.error.message}${last ? ` · 마지막으로 된 백업 ${last}` : ""}`, true]
-      : !last
-        ? ["아직 백업한 적이 없습니다. 오늘 안에 자동으로 합니다.", false]
-        : daysBetween(s.last, seoulToday()) > 1
-          ? [`마지막 백업 ${last} — 하루 넘게 백업이 없습니다.`, true]
+      : s.late
+        ? [last ? `마지막 백업 ${last} — 오늘 백업이 아직 안 됐습니다.` : "아직 백업한 적이 없습니다.", true]
+        : !last
+          ? ["아직 백업한 적이 없습니다. 오늘 안에 자동으로 합니다.", false]
           : [`잘 되고 있습니다 · 마지막 백업 ${last}`, false];
   $("backup-state").textContent = text;
   $("backup-state").classList.toggle("warn", warn);

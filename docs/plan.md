@@ -74,7 +74,7 @@
 
 - 2026-11-27 전체 검색·백업 상태·PC 프로그램 자동 업데이트(사용자: "전체 검색 기능 추가, 백업 목록과 상태 보여주기 추가, PC 프로그램 자동업데이트"):
   - 전체 검색: GET /api/search?q= 가 노트(제목·본문, 본문은 찾은 곳 앞뒤 글)·할 일·과제·시험·공부·지출·클라우드 파일(노션 사본 빼고)에서 대소문자 무시로 찾아 종류마다 20개까지. 사이드바 검색칸 아래에 종류별 목록(↑↓·Enter·Esc), 고르면 검색칸을 비우고 그 화면으로 가서 연다(노트 = #notes/id, 나머지는 그 탭 + 수정 창, 파일은 폴더 목록을 먼저 읽고). 지금 탭을 거르는 예전 동작은 그대로(목록만 닫으면 거른 채).
-  - 백업: backup.ts 가 backup_at(마지막으로 올린 시각)·backup_error({at, message}, 성공하면 비움)를 남긴다. GET /api/backup = 상태 + 드라이브 "kacarong.kr 백업" 폴더의 날짜 사본 목록(크기·올린 시각), POST /api/backup = 지금 백업(새벽에도, 같은 날 사본은 새 것만 남김, 이미 하는 중이면 409), GET /api/backup/:id = 사본 받기(그 폴더의 날짜 사본만). 화면: 사이드바 "백업" 창. 되살리기는 아직 서버에서 folio.db 를 바꿔 넣는다.
+  - 백업: backup.ts 가 backup_at(마지막으로 올린 시각)·backup_error({at, message}, 성공하면 비움)를 남긴다. GET /api/backup = 상태 + 드라이브 "kacarong.kr 백업" 폴더의 날짜 사본 목록(크기·올린 시각), POST /api/backup = 지금 백업(새벽에도, 같은 날 사본은 새 것만 남김, 이미 하는 중이면 409), GET /api/backup/:id = 사본 받기(그 폴더의 날짜 사본만). 실패하면 backup_pruned 를 비워서(지금 백업이 실패한 날도) 다음 시간에 다시 하고 오류를 지운다. status.late = 오늘 사본이 없는데 08시가 지났거나 마지막 사본이 그저께 이전(01:30 사본 다음은 07시 이후라 24시간 기준은 안 씀). 화면: 사이드바 "백업" 창. 되살리기는 아직 서버에서 folio.db 를 바꿔 넣는다.
   - PC 프로그램 1.3.0: tauri-plugin-updater. 켤 때·12시간마다 /desktop/latest.json(DATA_DIR/desktop, desktop/publish.sh 가 서명해서 둔다) → 묻고 → 서명 확인 → 설치 파일 /S /UPDATE /R(installer.nsi 가 기다렸다 덮어쓰고 다시 연다). 서명 키 ~/.config/ejclaw/kacarong-updater.key. win-ci 에서 1.2.9 시험 빌드 → 1.3.0 업데이트·다시 열림·다시 안 물음 확인(KACUP2). 1.2.0 이하는 1.3.0 을 한 번 직접 설치해야 그다음부터 자동.
 
 ## 남은 일

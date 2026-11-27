@@ -2593,7 +2593,7 @@ test("백업 상태: 마지막 백업 시각·실패 이유·드라이브의 백
   loginEmail = "owner@example.com";
   let clock = new Date("2026-11-27T13:00:00+09:00");
   const { call, db, backup, cleanup } = makeApp({ now: () => clock });
-  type Status = { on: boolean; keep: number; last: string | null; at: string | null; error: { at: string; message: string } | null; files: { id: string; name: string; size: number }[]; listError: string | null };
+  type Status = { on: boolean; late: boolean; keep: number; last: string | null; at: string | null; error: { at: string; message: string } | null; files: { id: string; name: string; size: number }[]; listError: string | null };
   try {
     const { cookie } = await login(call);
     const status = async () => (await (await call("/api/backup", { cookie })).json()) as Status;
@@ -2628,12 +2628,27 @@ test("백업 상태: 마지막 백업 시각·실패 이유·드라이브의 백
     s = await status();
     expect(s.error).toMatchObject({ at: "2026-11-28T00:00:00.000Z" });
     expect(s.error!.message).toContain("드라이브에서 지우기");
-    expect((await now()).status).toBe(200);
+    // The day was done before 지금 백업 failed; the next hourly look still finishes it (prunes) and clears the error.
+    clock = new Date("2026-11-28T10:00:00+09:00");
+    const uploads = [...drive.values()].length;
+    await backup.tick();
     s = await status();
     expect(s.error).toBeNull();
+    expect([...drive.values()].length).toBe(uploads - 1); // no new upload, the older copy of the 28th removed
     expect(s.files.map((f) => f.name)).toEqual(["folio-2026-11-28.db", "folio-2026-11-27.db"]);
+    expect((await now()).status).toBe(200);
+
+    // late: today's copy is due from 08:00, not 24 hours after the last one.
+    expect(s.late).toBe(false);
+    clock = new Date("2026-11-29T07:30:00+09:00"); // last copy yesterday, today's not due yet
+    expect((await status()).late).toBe(false);
+    clock = new Date("2026-11-29T08:00:00+09:00");
+    expect((await status()).late).toBe(true);
+    clock = new Date("2026-11-30T03:00:00+09:00"); // last copy two days ago
+    expect((await status()).late).toBe(true);
 
     // 받기: only a copy in the backup folder.
+    s = await status();
     const got = await call(`/api/backup/${s.files[0]!.id}`, { cookie });
     expect(got.status).toBe(200);
     expect(got.headers.get("Content-Disposition")).toContain('filename="folio-2026-11-28.db"');
