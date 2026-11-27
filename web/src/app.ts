@@ -15,6 +15,7 @@ const SESSION_DAYS = 30;
 const CALENDAR_MAX_DAYS = 62; // longest range /api/calendar serves (a 6-week month grid is 42)
 const UPCOMING_DAYS = 3; // 과제 due within this many days show up on the today screen
 const EXAM_DAYS = 14; // exams within this many days show up on the today screen
+const SEARCH_LIMIT = 20; // results of each kind /api/search gives
 const PUBLIC_DIR = join(import.meta.dir, "..", "public");
 
 export type AppConfig = {
@@ -936,6 +937,27 @@ ${body || `<section class="works"><p class="empty reveal">${mine ? "아직 포�
         db.deleteTask(t.id);
         return json({ ok: true });
       }
+    }
+
+    // 전체 검색(사이드바 검색칸): 노트·할 일·과제·시험·공부·지출·클라우드 파일에서 q 가 든 것, 종류마다 SEARCH_LIMIT 개까지.
+    // 한 사람이 쓰는 작은 표들이라 다 읽어서 거른다(대소문자 무시).
+    if (path === "/api/search" && method === "GET") {
+      const q = (url.searchParams.get("q") ?? "").trim().toLowerCase();
+      const has = (...vals: (string | null)[]) => !!q && vals.some((v) => (v ?? "").toLowerCase().includes(q));
+      const take = <T>(list: T[], hit: (x: T) => boolean) => list.filter(hit).slice(0, SEARCH_LIMIT);
+      // A note's text around the first hit (its start when only the title matched).
+      const snippet = (text: string) => {
+        const from = Math.max(0, text.toLowerCase().indexOf(q) - 30);
+        return ((from ? "…" : "") + text.slice(from, from + 100)).replace(/\s+/g, " ").trim();
+      };
+      return json({
+        notes: take(db.noteTexts(), (n) => has(n.title, n.text)).map((n) => ({ id: n.id, title: n.title, snippet: snippet(n.text) })),
+        tasks: take(db.listTasks({}).sort((a, b) => a.done - b.done), (t) => has(t.title, t.course, t.note)),
+        exams: take(db.listExams(), (e) => has(e.title, e.course, e.place, e.scope, e.note)),
+        studies: take(db.listStudies(), (s) => has(s.title, s.course)),
+        expenses: take(db.listExpenses(), (x) => has(x.title, x.note)),
+        files: take(db.listFiles({}), (f) => has(f.title, f.name, f.tags, f.note)),
+      });
     }
 
     if (path === "/api/notes" && method === "GET") {

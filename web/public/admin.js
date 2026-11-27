@@ -1873,6 +1873,78 @@ function openNotion() {
 const searchText = () => $("global-search").value.trim().toLowerCase();
 const matches = (t, q) => !q || [t.title, t.course, t.note].some((v) => (v ?? "").toLowerCase().includes(q));
 
+// 전체 검색: 검색칸에 적으면 노트·할 일·과제·시험·공부·지출·클라우드 파일을 한꺼번에 찾아 칸 아래에 띄운다.
+// 하나를 고르면 검색칸을 비우고 그 화면으로 가서 연다. Esc·바깥을 누르면 목록만 닫히고 지금 화면은 전처럼 검색어로 걸러진다.
+// [종류, 제목, 아이콘, 줄 글자(제목, 아랫줄), 갈 주소, 가서 열 것]
+const when = (date, time) => (date ? md(date) + (time ? ` ${time}` : "") : "");
+const SEARCH_GROUPS = [
+  ["notes", "노트", "note", (n) => [n.title || "제목 없음", n.snippet], (n) => `#notes/${n.id}`, null],
+  ["tasks", "할 일·과제", "check", (t) => [t.title, [t.kind, t.course, when(t.due_date, t.due_time), t.done && "끝냄"]], () => "#tasks", openTaskDialog],
+  ["exams", "시험", "exam", (e) => [examName(e), [e.course && e.title, when(e.date, e.time), e.place]], () => "#exams", openExamDialog],
+  ["studies", "공부", "book", (s) => [s.title, [s.course, s.date && md(s.date), s.done && "끝냄"]], () => "#studies", openStudyDialog],
+  ["expenses", "지출", "wallet", (x) => [x.title, [won(x.amount), x.kind === "정기" ? (x.day ? `매달 ${x.day}일` : "매달") : x.date && md(x.date)]], () => "#expenses", (x) => openExpenseDialog(x)],
+  // 폴더 고르기 칸이 폴더 목록을 알아야 파일이 엉뚱한 폴더로 옮겨지지 않는다.
+  ["files", "클라우드", "folder", (f) => [f.title, [f.category, sizeText(f.size)]], (f) => `#files/${f.folder_id ?? ""}`, async (f) => ((folders = await call("/api/folders")), openFileDialog(f))],
+];
+let searchHits = []; // 보이는 결과 차례대로 { hash, open, kind }
+let searchOn = 0; // 화살표로 고른 결과
+let searchSeq = 0;
+async function showSearch() {
+  const box = $("search-results");
+  const q = $("global-search").value.trim();
+  const seq = ++searchSeq;
+  if (!q) return void (box.hidden = true);
+  const r = await call("/api/search?" + new URLSearchParams({ q }));
+  if (seq !== searchSeq || document.activeElement !== $("global-search")) return; // 그사이 더 적었거나 칸을 떠났다
+  searchHits = [];
+  const groups = SEARCH_GROUPS.filter(([kind]) => r[kind].length).map(([kind, title, iconName, text, hash, open]) =>
+    el(
+      "section",
+      {},
+      el("h3", { textContent: title }),
+      ...r[kind].map((x) => {
+        const [main, sub] = text(x);
+        const i = searchHits.push({ hash: hash(x), open: open && (() => open(x)), kind }) - 1;
+        // 누르는 순간 검색칸이 포커스를 잃어 목록이 닫히지 않게 mousedown 은 막는다.
+        return el(
+          "button",
+          { type: "button", className: "hit", onmousedown: (ev) => ev.preventDefault(), onmousemove: () => markSearch(i), onclick: () => pickSearch(i) },
+          icon(iconName),
+          el("span", {}, el("b", { textContent: main }), el("small", { textContent: [sub].flat().filter(Boolean).join(" · ") })),
+        );
+      }),
+    ),
+  );
+  box.replaceChildren(...(groups.length ? groups : [el("p", { className: "muted", textContent: "찾은 것이 없습니다." })]));
+  // 사이드바가 좁아서 목록은 검색칸 바로 아래에 화면 기준으로 띄운다.
+  const at = $("global-search").closest(".search").getBoundingClientRect();
+  Object.assign(box.style, { top: `${at.bottom + 6}px`, left: `${at.left}px`, width: `${Math.min(460, innerWidth - at.left - 12)}px` });
+  box.hidden = false;
+  markSearch(0);
+}
+function markSearch(i) {
+  const hits = $("search-results").querySelectorAll(".hit");
+  if (!hits.length) return;
+  searchOn = (i + hits.length) % hits.length;
+  hits.forEach((h, j) => h.classList.toggle("on", j === searchOn));
+  hits[searchOn].scrollIntoView({ block: "nearest" });
+}
+function closeSearch() {
+  searchSeq++; // 아직 오는 중인 결과도 띄우지 않는다
+  $("search-results").hidden = true;
+}
+function pickSearch(i) {
+  const h = searchHits[i];
+  if (!h) return;
+  $("global-search").value = "";
+  if (h.kind === "files") $("q").value = "";
+  closeSearch();
+  $("global-search").blur();
+  if (location.hash === h.hash) showTab(); // 같은 화면이면 주소가 안 바뀌어 다시 그리지 않으므로 직접(검색어 없이)
+  else location.hash = h.hash;
+  Promise.resolve(h.open?.()).catch(showError);
+}
+
 const tabs = {
   today: { title: "오늘", load: () => loadToday(), actions: () => [newTaskBtn()] },
   tasks: { title: "할 일·과제", load: () => loadTasks(), actions: () => [newTaskBtn()] },
@@ -2294,11 +2366,12 @@ async function init() {
     loadList().catch(showError);
   };
 
-  // 사이드바 검색: 파일함에서는 파일 검색, 그 밖에서는 할 일 거르기.
+  // 사이드바 검색: 칸 아래에 전체 검색 결과를 띄우고, 지금 화면도 전처럼 거른다(파일함에서는 파일 검색).
   let searchTimer;
   $("global-search").oninput = () => {
     clearTimeout(searchTimer);
     searchTimer = setTimeout(() => {
+      showSearch().catch(showError);
       if (currentTab() === "files") {
         $("q").value = $("global-search").value;
         loadList().catch(showError);
@@ -2306,6 +2379,17 @@ async function init() {
       else tabs[currentTab()].load().catch(showError);
     }, 200);
   };
+  $("global-search").onkeydown = (ev) => {
+    const open = !$("search-results").hidden;
+    if (ev.key === "ArrowDown" || ev.key === "ArrowUp") {
+      ev.preventDefault();
+      if (open) markSearch(searchOn + (ev.key === "ArrowDown" ? 1 : -1));
+      else showSearch().catch(showError);
+    } else if (ev.key === "Enter" && open && !ev.isComposing) (ev.preventDefault(), pickSearch(searchOn));
+    else if (ev.key === "Escape") (ev.preventDefault(), open ? closeSearch() : $("global-search").blur());
+  };
+  $("global-search").onfocus = () => showSearch().catch(showError);
+  $("global-search").onblur = closeSearch;
   document.addEventListener("keydown", (ev) => {
     if (ev.target.closest?.("input, textarea, select, dialog") || ev.metaKey || ev.ctrlKey || ev.altKey) return;
     if (ev.key === "/") (ev.preventDefault(), $("global-search").focus());

@@ -764,6 +764,10 @@ export function openDb(path: string) {
     deleteStudy(id: number) {
       db.query("DELETE FROM studies WHERE id = ?").run(id);
     },
+    // Every note with its text, newest edit first (/api/search filters them).
+    noteTexts(): { id: number; title: string; text: string }[] {
+      return db.query("SELECT id, title, text FROM notes ORDER BY updated_at DESC, id DESC").all() as { id: number; title: string; text: string }[];
+    },
     listNotes(q?: string): Pick<NoteRow, "id" | "title" | "parent_id" | "updated_at">[] {
       const like = `%${q ?? ""}%`;
       return db.query("SELECT id, title, parent_id, updated_at FROM notes WHERE ? = '' OR title LIKE ? OR text LIKE ? ORDER BY updated_at DESC, id DESC").all(q ?? "", like, like) as Pick<NoteRow, "id" | "title" | "parent_id" | "updated_at">[];

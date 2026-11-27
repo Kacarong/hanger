@@ -2549,3 +2549,42 @@ test("시간표·수업일정: 본문이 늦게 오는 PATCH 가 그사이 저�
     cleanup();
   }
 });
+
+test("전체 검색: 노트(본문 포함)·할 일·과제·시험·공부·지출·클라우드 파일을 한꺼번에, 대소문자 무시, 노션 사본은 빼고", async () => {
+  const { call, db, cleanup } = makeApp({ googleEnabled: false, now: () => new Date("2026-11-27T03:00:00Z") });
+  try {
+    const cookie = ownerSession(db);
+    expect((await call("/api/search?q=x")).status).toBe(401);
+    const req = async (path: string, method: string, b: object) => (await call(path, { method, cookie, headers: JSON_ORIGIN, body: JSON.stringify(b) })).json() as Promise<{ id: number; version: number }>;
+    const note = await req("/api/notes", "POST", { title: "수업 메모" });
+    const v = ((await (await call(`/api/notes/${note.id}`, { cookie })).json()) as { version: number }).version;
+    await req(`/api/notes/${note.id}`, "PUT", { title: "수업 메모", version: v, blocks: [{ id: "a", type: "p", text: "오늘은 Fluid 역학의\n베르누이 정리를 배웠다" }] });
+    await req("/api/notes", "POST", { title: "관계없는 노트" });
+    await req("/api/tasks", "POST", { kind: "과제", title: "유체역학 레포트", course: "유체역학", due_date: "2026-11-30" });
+    await req("/api/tasks", "POST", { kind: "할 일", title: "장보기", note: "fluid 세제" });
+    await req("/api/exams", "POST", { title: "기말고사", course: "유체역학", date: "2026-12-15" });
+    await req("/api/studies", "POST", { course: "유체역학", title: "3장 문제" });
+    await req("/api/expenses", "POST", { kind: "정기", title: "통신비", amount: 33000, day: 25, note: "FLUID 요금제" });
+    db.insertFile({ drive_id: "s1", name: "fluid.pdf", title: "유체 강의자료", mime: "application/pdf", size: 10, category: "강의", tags: "", note: "" });
+    db.insertFile({ drive_id: "s2", name: "fluid.png", title: "노션 사진", mime: "image/png", size: 10, category: "기타", tags: "", note: "", origin: "notion" });
+
+    type Hits = Record<"notes" | "tasks" | "exams" | "studies" | "expenses" | "files", { title: string; snippet?: string }[]>;
+    const search = async (q: string) => (await (await call("/api/search?" + new URLSearchParams({ q }), { cookie })).json()) as Hits;
+    const titles = (h: Hits) => Object.fromEntries(Object.entries(h).map(([k, list]) => [k, list.map((x) => x.title)]));
+
+    expect(titles(await search("  FLUID "))).toEqual({ notes: ["수업 메모"], tasks: ["장보기"], exams: [], studies: [], expenses: ["통신비"], files: ["유체 강의자료"] });
+    expect((await search("베르누이")).notes[0]!.snippet).toBe("오늘은 Fluid 역학의 베르누이 정리를 배웠다");
+    expect(titles(await search("유체역학"))).toEqual({ notes: [], tasks: ["유체역학 레포트"], exams: ["기말고사"], studies: ["3장 문제"], expenses: [], files: [] });
+    expect(titles(await search(" "))).toEqual({ notes: [], tasks: [], exams: [], studies: [], expenses: [], files: [] });
+
+    // Long note text: the snippet starts a little before the hit; only 20 of each kind come back.
+    const long = await req("/api/notes", "POST", { title: "긴 노트" });
+    const lv = ((await (await call(`/api/notes/${long.id}`, { cookie })).json()) as { version: number }).version;
+    await req(`/api/notes/${long.id}`, "PUT", { title: "긴 노트", version: lv, blocks: [{ id: "a", type: "p", text: "가".repeat(200) + "찾는말" + "나".repeat(200) }] });
+    expect((await search("찾는말")).notes[0]!.snippet).toBe("…" + "가".repeat(30) + "찾는말" + "나".repeat(67));
+    for (let i = 0; i < 25; i++) await req("/api/tasks", "POST", { kind: "할 일", title: `반복 ${i}` });
+    expect((await search("반복")).tasks).toHaveLength(20);
+  } finally {
+    cleanup();
+  }
+});
