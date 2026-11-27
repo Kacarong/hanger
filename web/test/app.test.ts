@@ -1,7 +1,7 @@
 import { Database } from "bun:sqlite";
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { createDecipheriv, createECDH, createHmac, createPublicKey, randomBytes, verify } from "node:crypto";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createApp } from "../src/app";
@@ -2651,6 +2651,29 @@ test("백업 상태: 드라이브가 연결되지 않았으면 꺼짐, 지금 �
     const cookie = ownerSession(db);
     expect(await (await call("/api/backup", { cookie })).json()).toMatchObject({ on: false, files: [], error: null });
     expect((await call("/api/backup", { method: "POST", cookie, headers: JSON_ORIGIN })).status).toBe(409);
+  } finally {
+    cleanup();
+  }
+});
+
+test("PC 프로그램 업데이트: DATA_DIR/desktop 의 latest.json(캐시 안 함)과 설치 파일만 로그인 없이 받음", async () => {
+  const { call, db, cleanup } = makeApp({ googleEnabled: false });
+  try {
+    const dir = join(db.raw.filename, "..", "desktop");
+    expect((await call("/desktop/latest.json")).status).toBe(404);
+    mkdirSync(dir);
+    writeFileSync(join(dir, "latest.json"), '{"version":"1.3.0"}');
+    writeFileSync(join(dir, "kacarong-Setup-1.3.0.exe"), "MZ-setup");
+    writeFileSync(join(dir, "other.txt"), "x");
+    const latest = await call("/desktop/latest.json");
+    expect(latest.status).toBe(200);
+    expect(latest.headers.get("Cache-Control")).toBe("no-store");
+    expect(await latest.json()).toEqual({ version: "1.3.0" });
+    const exe = await call("/desktop/kacarong-Setup-1.3.0.exe");
+    expect(exe.status).toBe(200);
+    expect(exe.headers.get("Content-Type")).toBe("application/octet-stream");
+    expect(await exe.text()).toBe("MZ-setup");
+    for (const p of ["/desktop/other.txt", "/desktop/kacarong-Setup-1.4.0.exe", "/desktop/..%2Ft.db", "/desktop/"]) expect((await call(p)).status).toBe(404);
   } finally {
     cleanup();
   }

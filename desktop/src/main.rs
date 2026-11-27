@@ -8,11 +8,17 @@
 //!   이 사이트 주소만 그 기능을 쓸 수 있다(capabilities/site.json).
 //! - 받기(다운로드)를 누르면 저장 위치를 고르는 창을 띄운다. WebView2 는 아무 표시 없이 다운로드 폴더에
 //!   저장해서 받기가 안 되는 것처럼 보였다.
+//! - 켤 때와 그 뒤 12시간마다 새 버전을 확인한다(https://kacarong.kr/desktop/latest.json). 있으면 물어보고,
+//!   "예"면 서명을 확인한 설치 파일을 받아 조용히 설치한 뒤 프로그램을 다시 연다(tauri-plugin-updater).
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use std::time::Duration;
+
+use rfd::{AsyncMessageDialog, MessageButtons, MessageDialogResult, MessageLevel};
 use tauri::webview::{DownloadEvent, NewWindowResponse};
-use tauri::{Manager, Url, WebviewUrl, WebviewWindowBuilder};
+use tauri::{AppHandle, Manager, Url, WebviewUrl, WebviewWindowBuilder};
+use tauri_plugin_updater::UpdaterExt;
 
 /// 여는 주소. 시험 빌드만 `KACARONG_HOME=http://.../admin cargo build` 로 다른 서버를 가리킨다.
 const HOME: &str = match option_env!("KACARONG_HOME") {
@@ -67,9 +73,76 @@ fn open_in_browser(url: &Url) {
     }
 }
 
+/// 새 버전 확인 간격(켤 때 한 번, 그 뒤로는 켜 둔 동안 이만큼마다).
+const UPDATE_EVERY: Duration = Duration::from_secs(12 * 60 * 60);
+
+/// 새 버전이 있으면 설치할지 묻고, "예"면 받아서 설치한다. 설치 파일을 실행하면 이 프로그램은 바로 끝나고
+/// 설치 파일이 조용히 덮어쓴 뒤 다시 연다(installer.nsi 의 /UPDATE /R). "아니요"면 다음 확인 때 다시 묻는다.
+async fn update_once(app: &AppHandle) -> Result<(), String> {
+    let updater = app.updater().map_err(|e| e.to_string())?;
+    let Some(update) = updater.check().await.map_err(|e| e.to_string())? else {
+        return Ok(());
+    };
+    let window = app.get_webview_window("main");
+    let mut ask = AsyncMessageDialog::new()
+        .set_level(MessageLevel::Info)
+        .set_title("kacarong 작업공간 업데이트")
+        .set_description(format!(
+            "새 버전 {}이(가) 나왔습니다(지금 {}).\n\n지금 설치할까요? 창이 잠깐 닫혔다가 다시 열립니다.\n올리는 중인 파일이 있으면 끝난 뒤에 '예'를 눌러 주세요.",
+            update.version, update.current_version
+        ))
+        .set_buttons(MessageButtons::YesNo);
+    if let Some(w) = &window {
+        ask = ask.set_parent(w);
+    }
+    if ask.show().await != MessageDialogResult::Yes {
+        return Ok(());
+    }
+    if let Err(e) = update.download_and_install(|_, _| {}, || {}).await {
+        let mut fail = AsyncMessageDialog::new()
+            .set_level(MessageLevel::Warning)
+            .set_title("kacarong 작업공간 업데이트")
+            .set_description(format!("새 버전을 설치하지 못했습니다: {e}\n\n다음에 다시 묻습니다."));
+        if let Some(w) = &window {
+            fail = fail.set_parent(w);
+        }
+        fail.show().await;
+    }
+    Ok(())
+}
+
+/// 지난 업데이트가 남긴 설치 파일(%TEMP%\<이름>-<버전>-updater-*\)을 지운다. 업데이트는 설치 파일을 띄우고 바로
+/// 끝나서 스스로 못 지운다. 설치 파일이 아직 끝나는 중이면 못 지우고 다음 실행 때 지운다.
+fn remove_old_installers(app: &AppHandle) {
+    let prefix = format!("{}-", app.package_info().name);
+    let Ok(dir) = std::fs::read_dir(std::env::temp_dir()) else {
+        return;
+    };
+    for e in dir.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if name.starts_with(&prefix) && name.contains("-updater-") {
+            let _ = std::fs::remove_dir_all(e.path());
+        }
+    }
+}
+
+fn watch_updates(app: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        remove_old_installers(&app);
+        loop {
+            if let Err(e) = update_once(&app).await {
+                eprintln!("업데이트 확인 실패: {e}");
+            }
+            tokio::time::sleep(UPDATE_EVERY).await;
+        }
+    });
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_single_instance::init(|app, _, _| {
             if let Some(w) = app.get_webview_window("main") {
                 let _ = w.unminimize();
@@ -117,6 +190,7 @@ fn main() {
                     NewWindowResponse::Deny
                 })
                 .build()?;
+            watch_updates(app.handle().clone());
             Ok(())
         })
         .run(tauri::generate_context!())

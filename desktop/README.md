@@ -15,6 +15,10 @@ Tauri 2 + Windows 내장 WebView2). 화면·기능은 전부 사이트에 있으
 - (1.2.0) 받기(다운로드)를 누르면 저장 위치를 고르는 창(기본: 다운로드 폴더, 사이트가 준 파일 이름)을 띄운다. 취소하면 받지 않는다.
   WebView2 는 아무 표시 없이 다운로드 폴더에 저장해서 받기가 안 되는 것처럼 보였다(`on_download` + rfd).
 - 로그인·캐시는 `%LOCALAPPDATA%\kr.kacarong.workspace` 에 남는다(제거하면 같이 지운다).
+- (1.3.0) 자동 업데이트(tauri-plugin-updater): 켤 때(10초 뒤)와 켜 둔 동안 12시간마다 https://kacarong.kr/desktop/latest.json 을 본다.
+  새 버전이면 "지금 설치할까요?"를 묻고, 예를 누르면 설치 파일을 받아 서명(minisign, 공개 키는 `tauri.conf.json`)을 확인한 뒤
+  `/S /UPDATE /R` 로 실행하고 프로그램은 끝난다. 설치 파일은 프로그램이 끝나기를 15초까지 기다려 덮어쓰고 다시 연다(installer.nsi).
+  다시 열린 프로그램이 `%TEMP%` 에 남은 설치 파일을 지운다. 아니요면 다음 확인 때 다시 묻는다. 사이트는 이 기능을 못 부른다(capability 없음).
 
 ## 빌드 (리눅스에서)
 
@@ -29,6 +33,18 @@ NSISDIR=$HOME/.local/nsis/usr/share/nsis PATH=$HOME/.local/nsis/usr/bin:$PATH ./
 시험용으로 다른 서버를 띄우려면 `KACARONG_HOME=http://127.0.0.1:2993/admin cargo build ...` (컴파일 때만 읽는다,
 그 서버와 같은 출처가 "이 사이트"가 된다). `NSIS_EXTRA='-DWEBVIEW2_HKLM=... -DWEBVIEW2_HKCU=...'` 로 런타임
 확인 키를 바꾸면 런타임이 없는 PC의 설치 흐름을 시험할 수 있다.
+
+## 자동 업데이트로 내보내기
+
+```bash
+desktop/publish.sh ~/.tmp/kacarong-out/kacarong-Setup-<버전>.exe
+# → 서명(.sig)하고 ~/.local/share/kacarong-folio/desktop/ 에 설치 파일과 latest.json 을 둔다
+```
+
+서명 키는 `~/.config/ejclaw/kacarong-updater.key`(비밀번호 없음, 공개 키는 `tauri.conf.json`). **키를 잃거나 바꾸면 이미 설치된
+프로그램이 업데이트를 받지 못하니 바꾸지 말 것.** `Cargo.toml` 의 `version` 을 올려야 새 버전으로 본다.
+시험 빌드는 `TAURI_CONFIG='{"plugins":{"updater":{"endpoints":["http://127.0.0.1:2993/desktop/latest.json"],"dangerousInsecureTransportProtocol":true}}}'`
+로 확인 주소를 바꾸고, `KACARONG_BASE=http://127.0.0.1:2993 publish.sh <setup> <시험 서버 DATA_DIR>/desktop` 으로 내보낸다.
 
 ## 설치 파일
 

@@ -1,12 +1,15 @@
 ; kacarong 작업공간 설치 파일. build.sh 가 리눅스에서 makensis 로 만든다:
 ;   makensis -DVERSION=1.0.0 -DSRC=<kacarong.exe·WebView2Loader.dll 폴더> -DOUT=<setup.exe> -DICON=<icon.ico> -DWEBVIEW2=<부트스트래퍼> installer.nsi
 ; 이 사용자 계정에만 설치한다(관리자 권한 없음): %LOCALAPPDATA%\Programs\kacarong. 같은 파일을 다시 실행하면 덮어써서 업데이트.
+; 프로그램의 자동 업데이트(tauri-plugin-updater)는 이 파일을 "/S /UPDATE /R /ARGS" 로 실행하고 바로 끝난다:
+; /UPDATE = 프로그램이 끝나기를 잠깐 기다린다, /R = 다 깔고 프로그램을 다시 연다.
 
 Unicode true
 SetCompressor /SOLID lzma
 !include "MUI2.nsh"
 !include "LogicLib.nsh"
 !include "x64.nsh"
+!include "FileFunc.nsh"
 
 !define APP "kacarong 작업공간"
 !define UNINST_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\kacarong-workspace"
@@ -38,22 +41,43 @@ VIAddVersionKey /LANG=0 "LegalCopyright" "kacarong"
 !insertmacro MUI_UNPAGE_INSTFILES
 !insertmacro MUI_LANGUAGE "Korean"
 
+Var Updating ; 1 = 프로그램이 스스로 업데이트하며 실행함(/UPDATE)
+Var Relaunch ; 1 = 다 깔고 프로그램을 다시 연다(/R)
+
 Function .onInit
   ${IfNot} ${RunningX64}
     MessageBox MB_ICONSTOP "64비트 Windows 10/11에서만 실행됩니다."
     Abort
   ${EndIf}
+  ${GetParameters} $0
+  ClearErrors
+  ${GetOptionsS} $0 "/UPDATE" $1
+  ${IfNot} ${Errors}
+    StrCpy $Updating 1
+  ${EndIf}
+  ClearErrors
+  ${GetOptionsS} $0 "/R" $1
+  ${IfNot} ${Errors}
+    StrCpy $Relaunch 1
+  ${EndIf}
 FunctionEnd
 
-; 실행 중이면 exe 를 지울 수 없다: 닫아 달라고 한다.
+; 실행 중이면 exe 를 지울 수 없다: 닫아 달라고 한다. 업데이트 때는 프로그램이 막 끝나는 중이라 15초까지 기다린다.
 !macro WaitClosed
+  StrCpy $R9 0
   ${Do}
     ClearErrors
     Delete "$INSTDIR\kacarong.exe"
     ${IfNot} ${Errors}
       ${Break}
     ${EndIf}
-    MessageBox MB_RETRYCANCEL|MB_ICONEXCLAMATION "${APP} 창이 열려 있습니다. 창을 닫은 뒤 다시 시도를 눌러 주세요." IDRETRY +2
+    ${If} $Updating == 1
+    ${AndIf} $R9 < 30
+      IntOp $R9 $R9 + 1
+      Sleep 500
+      ${Continue}
+    ${EndIf}
+    MessageBox MB_RETRYCANCEL|MB_ICONEXCLAMATION "${APP} 창이 열려 있습니다. 창을 닫은 뒤 다시 시도를 눌러 주세요." /SD IDCANCEL IDRETRY +2
     Abort
   ${Loop}
 !macroend
@@ -128,6 +152,9 @@ Section
   ; 등록이 없으면 설치형이 아닌 프로그램의 알림을 윈도우가 띄우지 않는다.
   WriteRegStr HKCU "${AUMID_KEY}" "DisplayName" "${APP}"
   WriteRegStr HKCU "${AUMID_KEY}" "IconUri" "$INSTDIR\icon.png"
+  ${If} $Relaunch == 1
+    Exec '"$INSTDIR\kacarong.exe"'
+  ${EndIf}
 SectionEnd
 
 Section "Uninstall"

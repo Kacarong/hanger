@@ -1352,6 +1352,18 @@ ${body || `<section class="works"><p class="empty reveal">${mine ? "아직 포�
     // The service worker that shows Web Push notifications. It must sit at the top to cover /admin, and never be cached long.
     if (path === "/sw.js" && req.method === "GET") return new Response(Bun.file(join(PUBLIC_DIR, "sw.js")), { headers: { "Content-Type": "text/javascript; charset=utf-8", "Cache-Control": "no-cache" } });
     // The Android app (android/) opens full screen only if this lists its signing key.
+    // PC 프로그램 자동 업데이트(desktop/publish.sh 가 DATA_DIR/desktop 에 둔다): 새 버전·서명·설치 파일 주소인 latest.json 과 설치 파일.
+    const dl = path.match(/^\/desktop\/(latest\.json|kacarong-Setup-\d+\.\d+\.\d+\.exe)$/);
+    if (dl && req.method === "GET") {
+      const f = Bun.file(join(cfg.dataDir, "desktop", dl[1]!));
+      if (!(await f.exists())) return new Response("not found", { status: 404 });
+      const latest = dl[1] === "latest.json";
+      return new Response(f, {
+        headers: latest
+          ? { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" }
+          : { "Content-Type": "application/octet-stream", "Content-Disposition": contentDisposition("attachment", dl[1]!), "Cache-Control": "public, max-age=31536000, immutable" },
+      });
+    }
     if (path === "/.well-known/assetlinks.json" && req.method === "GET") return new Response(Bun.file(join(PUBLIC_DIR, "assetlinks.json")));
 
     const t = path.match(/^\/thumb\/(\d+)$/);
