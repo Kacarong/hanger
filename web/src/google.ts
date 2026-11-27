@@ -316,10 +316,10 @@ export function createGoogle(cfg: GoogleConfig, db: Db) {
     },
 
     // Files in a folder this app made (drive.file only sees those), not in the trash.
-    async list(folder: string): Promise<{ id: string; name: string }[]> {
-      const q = new URLSearchParams({ q: `'${folder}' in parents and trashed = false`, fields: "files(id,name)", pageSize: "1000" });
+    async list(folder: string): Promise<{ id: string; name: string; size?: string; createdTime?: string }[]> {
+      const q = new URLSearchParams({ q: `'${folder}' in parents and trashed = false`, fields: "files(id,name,size,createdTime)", pageSize: "1000" });
       const res = await api(`/drive/v3/files?${q}`, {}, "드라이브 목록 조회");
-      return ((await res.json()) as { files?: { id: string; name: string }[] }).files ?? [];
+      return ((await res.json()) as { files?: { id: string; name: string; size?: string; createdTime?: string }[] }).files ?? [];
     },
     // Deletes for good (no trash).
     async remove(id: string) {

@@ -647,6 +647,24 @@ ${body || `<section class="works"><p class="empty reveal">${mine ? "아직 포�
       }
     }
 
+    // 백업: how the daily copy went, the copies in Drive, "지금 백업", and downloading one.
+    if (path === "/api/backup" && method === "GET") return json(await backup.status());
+    if (path === "/api/backup" && method === "POST") {
+      if (!cfg.googleEnabled || !db.getSetting("refresh_token")) return json({ error: "구글 드라이브가 연결되지 않아 백업할 수 없습니다" }, 409);
+      if (!(await backup.runNow())) return json({ error: "이미 백업하는 중입니다. 잠시 뒤에 다시 봐 주세요" }, 409);
+      return json(await backup.status());
+    }
+    const bk = path.match(/^\/api\/backup\/([\w-]+)$/);
+    if (bk && method === "GET") {
+      const f = await backup.file(bk[1]!);
+      if (!f) return json({ error: "백업 파일을 찾을 수 없습니다" }, 404);
+      const drive = await google.download(f.id, null);
+      const h = new Headers({ "Content-Type": "application/octet-stream", "Content-Disposition": contentDisposition("attachment", f.name), "Cache-Control": "private, no-store" });
+      const len = drive.headers.get("Content-Length");
+      if (len) h.set("Content-Length", len);
+      return new Response(drive.body, { headers: h });
+    }
+
     // 알림: what to be told about, the devices that get Web Push, and the notifications pages show themselves.
     if (path === "/api/notify" && method === "GET") {
       return json({ settings: notifier.settings(), publicKey: notifier.publicKey(), devices: db.pushSubs().length });

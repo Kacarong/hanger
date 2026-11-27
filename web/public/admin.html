@@ -46,6 +46,7 @@
 
     <div class="side-foot">
       <button class="nav-item btn ghost" id="notify-btn" style="border:0;justify-content:flex-start"><span data-icon="bell"></span>알림 설정</button>
+      <button class="nav-item btn ghost" id="backup-btn" style="border:0;justify-content:flex-start"><span data-icon="archive"></span>백업</button>
       <button class="nav-item btn ghost" id="logout" style="border:0;justify-content:flex-start"><span data-icon="logout"></span>로그아웃</button>
       <div class="me"><span class="avatar">KC</span><div>kacarong<small>관리자</small></div></div>
     </div>
@@ -305,6 +306,17 @@
     <p class="muted small">알림은 알림을 켠 기기 모두에 갑니다. PC 프로그램은 프로그램이 켜져 있는 동안(최소화해도 됨) 알림을 띄웁니다.</p>
     <span class="error" id="notify-msg"></span>
     <div class="foot"><button class="btn" type="button" id="notify-test">테스트 알림 보내기</button><span class="grow"></span><button class="btn primary" type="button" data-close>닫기</button></div>
+  </form>
+</dialog>
+
+<dialog id="backup-dialog">
+  <form method="dialog">
+    <h2>백업</h2>
+    <p id="backup-state"></p>
+    <p class="muted small">매일 한 번(새벽 2~7시 빼고) 노트·할 일·과제·시험·공부·지출·시간표·포트폴리오·설정을 통째로 구글 드라이브 "kacarong.kr 백업" 폴더에 올리고, 최근 14일 치만 남깁니다. 클라우드 파일은 드라이브에 그대로 있어서 따로 백업하지 않습니다.</p>
+    <div class="backup-list"><table class="table"><thead><tr><th>날짜</th><th class="hide-sm">올린 시각</th><th class="num">크기</th><th></th></tr></thead><tbody id="backup-list"></tbody></table></div>
+    <span class="error" id="backup-msg"></span>
+    <div class="foot"><button class="btn" type="button" id="backup-now">지금 백업</button><span class="grow"></span><button class="btn primary" type="button" data-close>닫기</button></div>
   </form>
 </dialog>
 

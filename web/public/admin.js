@@ -39,6 +39,7 @@ const ICONS = {
   layers: '<path d="m12 3 9 5-9 5-9-5z"/><path d="m3 13 9 5 9-5"/>',
   grid: '<rect x="3.5" y="4" width="17" height="16" rx="1.5"/><path d="M3.5 9h17M9 4v16M14.5 4v16"/>',
   clock: '<circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/>',
+  archive: '<rect x="3" y="4" width="18" height="5" rx="1"/><path d="M5 9v11h14V9M10 13h4"/>',
   wallet: '<path d="M4 7.5A1.5 1.5 0 0 1 5.5 6H19a1 1 0 0 1 1 1v12a1 1 0 0 1-1 1H5.5A1.5 1.5 0 0 1 4 18.5z"/><path d="M4 7.5 15 4v2M15 13h3"/>',
 };
 const icon = (name) => {
@@ -1449,6 +1450,47 @@ async function notifyStateText() {
   return "꺼짐";
 }
 
+// 백업: 매일 드라이브에 올리는 사본이 잘 되고 있는지, 드라이브에 남은 사본, 지금 백업, 받기.
+const timeText = (iso) => new Intl.DateTimeFormat("ko-KR", { timeZone: "Asia/Seoul", month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(new Date(iso));
+function showBackup(s) {
+  // backup_at 이 생기기 전에 한 백업은 날짜만 안다.
+  const last = s.at ? timeText(s.at) : s.last ? md(s.last) : "";
+  const [text, warn] = !s.on
+    ? ["구글 드라이브가 연결되지 않아 백업하지 않습니다.", true]
+    : s.error
+      ? [`${timeText(s.error.at)}에 백업하지 못했습니다(한 시간 뒤 다시 합니다): ${s.error.message}${last ? ` · 마지막으로 된 백업 ${last}` : ""}`, true]
+      : !last
+        ? ["아직 백업한 적이 없습니다. 오늘 안에 자동으로 합니다.", false]
+        : daysBetween(s.last, seoulToday()) > 1
+          ? [`마지막 백업 ${last} — 하루 넘게 백업이 없습니다.`, true]
+          : [`잘 되고 있습니다 · 마지막 백업 ${last}`, false];
+  $("backup-state").textContent = text;
+  $("backup-state").classList.toggle("warn", warn);
+  const day = (name) => dayLabel(name.slice(6, 16));
+  $("backup-list").replaceChildren(
+    ...(s.files.length
+      ? s.files.map((f) =>
+          el(
+            "tr",
+            {},
+            el("td", { textContent: day(f.name) }),
+            el("td", { className: "hide-sm muted", textContent: f.createdTime ? timeText(f.createdTime) : "" }),
+            el("td", { className: "num", textContent: sizeText(f.size) }),
+            el("td", { className: "actions" }, el("a", { className: "btn ghost sm", href: `/api/backup/${encodeURIComponent(f.id)}`, download: f.name, title: "받기", ariaLabel: `${f.name} 받기` }, icon("download"))),
+          ),
+        )
+      : [emptyRow(4, s.listError ? `목록을 읽지 못했습니다: ${s.listError}` : "드라이브에 백업이 없습니다.")]),
+  );
+  $("backup-now").disabled = !s.on || s.running;
+}
+async function openBackup() {
+  $("backup-msg").textContent = "";
+  $("backup-state").textContent = "불러오는 중…";
+  $("backup-list").replaceChildren();
+  $("backup-dialog").showModal();
+  showBackup(await call("/api/backup"));
+}
+
 async function openNotify() {
   const { settings } = await call("/api/notify");
   $("notify-morning-on").checked = !!settings.morning;
@@ -2412,6 +2454,20 @@ async function init() {
   };
   $("menu-btn").onclick = () => $("main").classList.toggle("nav-open");
   $("notify-btn").onclick = () => openNotify().catch(showError);
+  $("backup-btn").onclick = () => openBackup().catch((e) => ($("backup-msg").textContent = e.message));
+  $("backup-now").onclick = async () => {
+    $("backup-msg").textContent = "";
+    $("backup-now").disabled = true;
+    $("backup-now").textContent = "백업하는 중…";
+    try {
+      showBackup(await call("/api/backup", { method: "POST" }));
+    } catch (e) {
+      $("backup-msg").textContent = e.message;
+      await call("/api/backup").then(showBackup, () => ($("backup-now").disabled = false));
+    } finally {
+      $("backup-now").textContent = "지금 백업";
+    }
+  };
   $("notify-toggle").onclick = async () => {
     $("notify-msg").textContent = "";
     $("notify-toggle").disabled = true;

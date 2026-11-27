@@ -9,7 +9,7 @@ import { openDb } from "../src/db";
 import { createGoogle } from "../src/google";
 
 // A small stand-in for the Google OAuth + Drive endpoints the app uses.
-type FakeFile = { id: string; name: string; mimeType: string; parents: string[]; trashed: boolean; bytes: number; content?: string; raw?: Buffer };
+type FakeFile = { id: string; name: string; mimeType: string; parents: string[]; trashed: boolean; bytes: number; content?: string; raw?: Buffer; createdTime?: string };
 const drive = new Map<string, FakeFile>();
 const uploads = new Map<string, { name: string; mimeType: string; parents: string[]; size: number; received: number; origin: string | null; fileId?: string; parts: Buffer[] }>();
 let foldersCreated = 0;
@@ -83,7 +83,7 @@ beforeAll(() => {
           return new Response(null, { status: 308, headers: u.received ? { Range: `bytes=0-${u.received - 1}` } : {} });
         }
         if (!u.fileId) {
-          const f: FakeFile = { id: `f${nextId++}`, name: u.name, mimeType: u.mimeType, parents: u.parents, trashed: false, bytes: u.size, raw: Buffer.concat(u.parts) };
+          const f: FakeFile = { id: `f${nextId}`, name: u.name, mimeType: u.mimeType, parents: u.parents, trashed: false, bytes: u.size, raw: Buffer.concat(u.parts), createdTime: new Date(Date.UTC(2026, 0, 1) + nextId++ * 1000).toISOString() };
           drive.set(f.id, f);
           u.fileId = f.id;
         }
@@ -170,7 +170,7 @@ beforeAll(() => {
       }
       if (p === "/drive/v3/files" && req.method === "GET") {
         const parent = url.searchParams.get("q")!.match(/^'([^']+)' in parents and trashed = false$/)![1];
-        return Response.json({ files: [...drive.values()].filter((f) => f.parents.includes(parent!) && !f.trashed).map((f) => ({ id: f.id, name: f.name })) });
+        return Response.json({ files: [...drive.values()].filter((f) => f.parents.includes(parent!) && !f.trashed).map((f) => ({ id: f.id, name: f.name, size: String(f.bytes), createdTime: f.createdTime })) });
       }
       if (p === "/drive/v3/about") return Response.json({ storageQuota: { limit: String(400 * 1024 ** 3), usage: "1024", usageInDriveTrash: "0" } });
 
@@ -2584,6 +2584,73 @@ test("전체 검색: 노트(본문 포함)·할 일·과제·시험·공부·지
     expect((await search("찾는말")).notes[0]!.snippet).toBe("…" + "가".repeat(30) + "찾는말" + "나".repeat(67));
     for (let i = 0; i < 25; i++) await req("/api/tasks", "POST", { kind: "할 일", title: `반복 ${i}` });
     expect((await search("반복")).tasks).toHaveLength(20);
+  } finally {
+    cleanup();
+  }
+});
+
+test("백업 상태: 마지막 백업 시각·실패 이유·드라이브의 백업 목록을 보여 주고, 지금 백업(같은 날은 새 사본만 남김)·받기", async () => {
+  loginEmail = "owner@example.com";
+  let clock = new Date("2026-11-27T13:00:00+09:00");
+  const { call, db, backup, cleanup } = makeApp({ now: () => clock });
+  type Status = { on: boolean; keep: number; last: string | null; at: string | null; error: { at: string; message: string } | null; files: { id: string; name: string; size: number }[]; listError: string | null };
+  try {
+    const { cookie } = await login(call);
+    const status = async () => (await (await call("/api/backup", { cookie })).json()) as Status;
+    const now = () => call("/api/backup", { method: "POST", cookie, headers: JSON_ORIGIN });
+    expect(await status()).toMatchObject({ on: true, keep: 14, last: null, at: null, error: null, files: [], listError: null });
+
+    await backup.tick();
+    let s = await status();
+    expect(s).toMatchObject({ last: "2026-11-27", at: "2026-11-27T04:00:00.000Z", error: null });
+    expect(s.files.map((f) => f.name)).toEqual(["folio-2026-11-27.db"]);
+    expect(s.files[0]!.size).toBe(db.raw.serialize().byteLength);
+    const first = s.files[0]!.id;
+
+    // 지금 백업 on a day already copied: a new copy goes up and only it stays.
+    clock = new Date("2026-11-27T15:30:00+09:00");
+    const r = await now();
+    expect(r.status).toBe(200);
+    s = (await r.json()) as Status;
+    expect(s.at).toBe("2026-11-27T06:30:00.000Z");
+    expect(s.files.map((f) => f.name)).toEqual(["folio-2026-11-27.db"]);
+    expect(s.files[0]!.id).not.toBe(first);
+    expect(drive.has(first)).toBe(false);
+
+    // A failure is shown until the next backup goes through.
+    driveDeleteFails = true;
+    clock = new Date("2026-11-28T09:00:00+09:00");
+    await backup.tick(); // the 28th goes up and nothing needs removing, so nothing fails yet
+    expect((await status()).error).toBeNull();
+    const failed = await now(); // a second copy of the 28th: removing the older one fails
+    driveDeleteFails = false;
+    expect(failed.status).toBe(502);
+    s = await status();
+    expect(s.error).toMatchObject({ at: "2026-11-28T00:00:00.000Z" });
+    expect(s.error!.message).toContain("드라이브에서 지우기");
+    expect((await now()).status).toBe(200);
+    s = await status();
+    expect(s.error).toBeNull();
+    expect(s.files.map((f) => f.name)).toEqual(["folio-2026-11-28.db", "folio-2026-11-27.db"]);
+
+    // 받기: only a copy in the backup folder.
+    const got = await call(`/api/backup/${s.files[0]!.id}`, { cookie });
+    expect(got.status).toBe(200);
+    expect(got.headers.get("Content-Disposition")).toContain('filename="folio-2026-11-28.db"');
+    expect((await got.arrayBuffer()).byteLength).toBe(s.files[0]!.size);
+    expect((await call(`/api/backup/${db.getSetting("backup_folder_id")}`, { cookie })).status).toBe(404);
+    expect((await call(`/api/backup/${s.files[0]!.id}`)).status).toBe(401);
+  } finally {
+    cleanup();
+  }
+});
+
+test("백업 상태: 드라이브가 연결되지 않았으면 꺼짐, 지금 백업은 거절", async () => {
+  const { call, db, cleanup } = makeApp({ googleEnabled: false });
+  try {
+    const cookie = ownerSession(db);
+    expect(await (await call("/api/backup", { cookie })).json()).toMatchObject({ on: false, files: [], error: null });
+    expect((await call("/api/backup", { method: "POST", cookie, headers: JSON_ORIGIN })).status).toBe(409);
   } finally {
     cleanup();
   }
