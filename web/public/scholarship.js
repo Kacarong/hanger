@@ -142,6 +142,7 @@ export function mount(root, { icon, call, el, showError, searchText }) {
         // 관심은 장학금(series) 단위라 같은 장학금의 다른 회차도 같이 바꾼다
         for (const s of list.querySelectorAll(`.sch-star[data-series="${it.series}"]`)) s.paint(on);
         refreshCounts();
+        loadStatus().catch(() => {}); // 위쪽 '관심' 카드 숫자도
       } catch (e) {
         showError(e);
       } finally {
