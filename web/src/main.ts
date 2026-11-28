@@ -37,10 +37,12 @@ fetch.moveNotionCopies().catch((e) => console.error("노션 사본 옮기기 실
 fetch.notion.start(60_000); // look for edits in Notion every minute (and a full pass every half hour)
 fetch.notifier.start(60_000); // 알림: look every minute for notifications that are due
 fetch.backup.start(60 * 60_000); // once a day, a copy of folio.db to Drive (looked at every hour)
+fetch.scholarship.start(15 * 60_000); // 장학금: 6시간마다 다시 모으고, 15분마다 알릴 것을 본다
 
 const server = Bun.serve({
   hostname: process.env.HOST ?? "127.0.0.1",
   port: Number(process.env.PORT ?? 2992),
+  idleTimeout: 60, // 장학금 출처 더하기는 그 게시판을 한 번 읽어 보느라 10초(기본값)를 넘길 수 있다
   fetch,
 });
 console.log(`kacarong-folio listening on ${server.url}`);

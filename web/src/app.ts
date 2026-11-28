@@ -9,6 +9,7 @@ import { eventWhen } from "./gcal";
 import { GoogleError, type CalendarEvent, type EventBody, type Google } from "./google";
 import { createNotifier } from "./notify";
 import { createNotionSync, NotionError } from "./notion";
+import { createScholarship } from "./scholarship";
 
 export const MAX_FILE_SIZE = 1024 ** 3; // files must be under 1GB
 const SESSION_DAYS = 30;
@@ -197,6 +198,7 @@ export function createApp(cfg: AppConfig, db: Db, google: Google) {
   });
   const notifier = createNotifier({ db, subject: origin, now });
   const backup = createBackup({ db, google, enabled: cfg.googleEnabled, origin, now });
+  const scholarship = createScholarship({ db, dataDir: cfg.dataDir, now, deliver: notifier.deliver });
 
   async function body(req: Request): Promise<Record<string, unknown>> {
     try {
@@ -607,6 +609,7 @@ ${body || `<section class="works"><p class="empty reveal">${mine ? "아직 포�
     if (method !== "GET" && req.headers.get("Origin") !== origin) {
       return json({ error: "잘못된 요청 출처" }, 403);
     }
+    if (path.startsWith("/api/scholarship/")) return scholarship.api(req, url); // 장학금: scholarship/index.ts
 
     if (path === "/api/today" && method === "GET") {
       const d = today();
@@ -1464,5 +1467,5 @@ ${body || `<section class="works"><p class="empty reveal">${mine ? "아직 포�
       console.error(e);
       return withSecurityHeaders(json({ error: "서버 오류" }, 500), path);
     }
-  }, { notion, moveNotionCopies, notifier, backup });
+  }, { notion, moveNotionCopies, notifier, backup, scholarship });
 }

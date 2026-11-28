@@ -41,6 +41,7 @@ const ICONS = {
   clock: '<circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/>',
   archive: '<rect x="3" y="4" width="18" height="5" rx="1"/><path d="M5 9v11h14V9M10 13h4"/>',
   wallet: '<path d="M4 7.5A1.5 1.5 0 0 1 5.5 6H19a1 1 0 0 1 1 1v12a1 1 0 0 1-1 1H5.5A1.5 1.5 0 0 1 4 18.5z"/><path d="M4 7.5 15 4v2M15 13h3"/>',
+  cap: '<path d="m2 9 10-5 10 5-10 5z"/><path d="M6 11v5c0 1.4 2.7 3 6 3s6-1.6 6-3v-5M22 9v6"/>',
 };
 const icon = (name) => {
   const t = document.createElement("template");
@@ -2011,6 +2012,14 @@ const tabs = {
     ],
   },
   pdf: { title: "파일 편집기", load: () => loadPdfTools(), actions: () => [] },
+  scholarship: {
+    title: "장학금",
+    load: () => loadScholarship(),
+    actions: () => [
+      el("button", { className: "btn", type: "button", onclick: () => scholarshipView().then((m) => m.openSources(), showError) }, icon("layers"), "출처"),
+      el("button", { className: "btn primary", type: "button", onclick: () => scholarshipView().then((m) => m.openProfile(), showError) }, icon("edit"), "내 조건·알림"),
+    ],
+  },
   files: {
     title: "클라우드",
     load: () => {
@@ -2045,6 +2054,17 @@ function loadPdfTools() {
     throw e;
   });
 }
+
+// 장학금은 따로 둔 scholarship.js 가 그린다(이 탭을 처음 열 때 불러옴).
+let scholarship = null;
+function scholarshipView() {
+  scholarship ??= import("./scholarship.js" + new URL(import.meta.url).search).then((m) => m.mount($("tab-scholarship"), { icon, call, el, showError, searchText }));
+  return scholarship.catch((e) => {
+    scholarship = null; // 다음에 탭을 열 때 다시 시도
+    throw e;
+  });
+}
+const loadScholarship = () => scholarshipView().then((m) => m.load());
 
 // 올리기 창에서 고른 파일은 창을 닫고 차례로 올린다(진행은 클라우드 화면 위 목록에). 올리는 동안 더 골라도 뒤에 붙는다.
 let uploadQueue = Promise.resolve();
